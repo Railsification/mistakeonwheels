@@ -24,6 +24,8 @@ DATA_DIR.mkdir(parents=True, exist_ok=True)
 
 SESSIONS_FILE = DATA_DIR / "canyon_sessions.json"
 LANES = ["Left", "Left middle", "Right middle", "Right"]
+MAX_SCAN_IMAGES = 15
+DEFAULT_HISTORY_MESSAGES = 40
 
 
 @dataclass(slots=True)
@@ -377,6 +379,33 @@ class CanyonCog(commands.Cog):
             return []
         return [Player(name=x["name"], power=int(x["power"])) for x in data["players"]]
 
+    async def _collect_recent_images(
+        self,
+        interaction: discord.Interaction,
+        history_messages: int,
+    ) -> list[discord.Attachment]:
+        channel = interaction.channel
+        if channel is None or not isinstance(channel, discord.abc.Messageable):
+            raise RuntimeError("This command must be used in a server text channel.")
+
+        found: list[discord.Attachment] = []
+
+        async for message in channel.history(limit=history_messages):
+            if message.author.id != interaction.user.id:
+                continue
+
+            image_attachments = [a for a in message.attachments if is_image_attachment(a)]
+            if not image_attachments:
+                continue
+
+            found.extend(image_attachments)
+
+            if len(found) >= MAX_SCAN_IMAGES:
+                break
+
+        found = list(reversed(found))
+        return found[-MAX_SCAN_IMAGES:]
+
     async def _extract_from_attachments(self, attachments: list[discord.Attachment]) -> list[Player]:
         client = await self._get_openai_client()
 
@@ -438,66 +467,26 @@ class CanyonCog(commands.Cog):
         raw_text = self._extract_response_text(response)
         return parse_scan_payload(raw_text)
 
-    @app_commands.command(name="canyon_scan", description="Scan canyon screenshots and save the roster")
+    @app_commands.command(name="canyon_scan", description="Scan your recent canyon screenshots from this channel")
     @app_commands.describe(
-        image1="First screenshot",
-        image2="Second screenshot",
-        image3="Third screenshot",
-        image4="Fourth screenshot",
-        image5="Fifth screenshot",
-        image6="Sixth screenshot",
-        image7="Seventh screenshot",
-        image8="Eighth screenshot",
-        image9="Ninth screenshot",
-        image10="Tenth screenshot",
-        image11="Eleventh screenshot",
-        image12="Twelfth screenshot",
-        image13="Thirteenth screenshot",
-        image14="Fourteenth screenshot",
-        image15="Fifteenth screenshot",
+        history_messages="How far back to look in the channel for your screenshots (default 40, max 200)"
     )
     async def canyon_scan(
         self,
         interaction: discord.Interaction,
-        image1: discord.Attachment,
-        image2: Optional[discord.Attachment] = None,
-        image3: Optional[discord.Attachment] = None,
-        image4: Optional[discord.Attachment] = None,
-        image5: Optional[discord.Attachment] = None,
-        image6: Optional[discord.Attachment] = None,
-        image7: Optional[discord.Attachment] = None,
-        image8: Optional[discord.Attachment] = None,
-        image9: Optional[discord.Attachment] = None,
-        image10: Optional[discord.Attachment] = None,
-        image11: Optional[discord.Attachment] = None,
-        image12: Optional[discord.Attachment] = None,
-        image13: Optional[discord.Attachment] = None,
-        image14: Optional[discord.Attachment] = None,
-        image15: Optional[discord.Attachment] = None,
+        history_messages: Optional[app_commands.Range[int, 10, 200]] = 40,
     ) -> None:
         await interaction.response.defer(thinking=True)
 
         try:
-            attachments = [
-                x for x in [
-                    image1,
-                    image2,
-                    image3,
-                    image4,
-                    image5,
-                    image6,
-                    image7,
-                    image8,
-                    image9,
-                    image10,
-                    image11,
-                    image12,
-                    image13,
-                    image14,
-                    image15,
-                ]
-                if x is not None
-            ]
+            history_limit = history_messages or DEFAULT_HISTORY_MESSAGES
+            attachments = await self._collect_recent_images(interaction, history_limit)
+
+            if not attachments:
+                await interaction.followup.send(
+                    "No recent screenshots found from you in this channel. Post the canyon screenshots first, then run `/canyon_scan`."
+                )
+                return
 
             players = await self._extract_from_attachments(attachments)
 
@@ -510,7 +499,10 @@ class CanyonCog(commands.Cog):
             guild_id = interaction.guild_id or interaction.user.id
             self._store_roster(guild_id, players)
 
-            body = roster_text(players)
+            body = (
+                f"Images scanned: {len(attachments)}\n\n"
+                + roster_text(players)
+            )
             header = f"Scanned {len(players)} joined players"
             await send_long_message(interaction, header, body)
 
