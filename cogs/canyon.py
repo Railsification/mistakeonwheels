@@ -1,0 +1,511 @@
+from __future__ import annotations
+
+import base64
+import difflib
+import io
+import json
+import os
+import re
+import time
+from dataclasses import dataclass
+from pathlib import Path
+from typing import Optional
+
+import discord
+from discord import app_commands
+from discord.ext import commands
+from openai import AsyncOpenAI
+from pydantic import BaseModel, Field
+
+
+DATA_DIR = Path("data")
+DATA_DIR.mkdir(parents=True, exist_ok=True)
+
+SESSIONS_FILE = DATA_DIR / "canyon_sessions.json"
+LANES = ["Left", "Left middle", "Right middle", "Right"]
+
+
+# ---------- OpenAI structured output models ----------
+
+class ScanPlayer(BaseModel):
+    name: str = Field(description="Exact player name as shown in the screenshot")
+    power_text: str = Field(description="Power exactly as shown, e.g. 616m, 1.2b")
+
+
+class ScanPayload(BaseModel):
+    players: list[ScanPlayer]
+
+
+# ---------- Internal models ----------
+
+@dataclass(slots=True)
+class Player:
+    name: str
+    power: int
+
+
+@dataclass(slots=True)
+class GroupItem:
+    members: list[Player]
+
+    @property
+    def power(self) -> int:
+        return sum(p.power for p in self.members)
+
+
+# ---------- File helpers ----------
+
+def load_sessions() -> dict:
+    if not SESSIONS_FILE.exists():
+        return {}
+    try:
+        return json.loads(SESSIONS_FILE.read_text(encoding="utf-8"))
+    except Exception:
+        return {}
+
+
+def save_sessions(data: dict) -> None:
+    SESSIONS_FILE.write_text(json.dumps(data, indent=2), encoding="utf-8")
+
+
+# ---------- General helpers ----------
+
+def normalize_name(name: str) -> str:
+    return re.sub(r"[^a-z0-9]", "", name.lower())
+
+
+def clean_name(name: str) -> str:
+    name = name.strip()
+    name = re.sub(r"\s+", " ", name)
+    return name
+
+
+def power_to_int(text: str) -> int:
+    s = text.strip().lower().replace(",", "")
+    match = re.search(r"(\d+(?:\.\d+)?)\s*([kmbt]?)", s)
+    if not match:
+        raise ValueError(f"Could not parse power: {text}")
+
+    value = float(match.group(1))
+    suffix = match.group(2)
+
+    mult = {
+        "": 1,
+        "k": 1_000,
+        "m": 1_000_000,
+        "b": 1_000_000_000,
+        "t": 1_000_000_000_000,
+    }[suffix]
+
+    return int(round(value * mult))
+
+
+def format_power(value: int) -> str:
+    if value >= 1_000_000_000:
+        txt = f"{value / 1_000_000_000:.3f}".rstrip("0").rstrip(".")
+        return f"{txt}b"
+    if value >= 1_000_000:
+        txt = f"{value / 1_000_000:.3f}".rstrip("0").rstrip(".")
+        return f"{txt}m"
+    if value >= 1_000:
+        txt = f"{value / 1_000:.3f}".rstrip("0").rstrip(".")
+        return f"{txt}k"
+    return str(value)
+
+
+def dedupe_players(players: list[Player]) -> list[Player]:
+    """
+    Keep the highest power if the same player is seen multiple times
+    across overlapping screenshots.
+    """
+    seen: dict[str, Player] = {}
+    for p in players:
+        key = normalize_name(p.name)
+        prev = seen.get(key)
+        if prev is None or p.power > prev.power:
+            seen[key] = p
+    return sorted(seen.values(), key=lambda p: (-p.power, p.name.lower()))
+
+
+def get_player_lookup(players: list[Player]) -> dict[str, Player]:
+    return {normalize_name(p.name): p for p in players}
+
+
+def resolve_player(name: str, players: list[Player]) -> Player:
+    wanted = normalize_name(name)
+    lookup = get_player_lookup(players)
+
+    if wanted in lookup:
+        return lookup[wanted]
+
+    close = difflib.get_close_matches(wanted, list(lookup.keys()), n=1, cutoff=0.80)
+    if close:
+        return lookup[close[0]]
+
+    raise ValueError(f"Player not found: {name}")
+
+
+def parse_csv_names(raw: str) -> list[str]:
+    return [x.strip() for x in raw.split(",") if x.strip()]
+
+
+def parse_semicolon_groups(raw: str) -> list[list[str]]:
+    """
+    Example:
+    AstraJ+Asteria; Name3+Name4
+    """
+    groups: list[list[str]] = []
+    for group in raw.split(";"):
+        group = group.strip()
+        if not group:
+            continue
+        members = [x.strip() for x in group.split("+") if x.strip()]
+        if len(members) < 2:
+            raise ValueError(f"Invalid combine group: {group}")
+        groups.append(members)
+    return groups
+
+
+def roster_text(players: list[Player]) -> str:
+    lines = [f"{p.name} - {format_power(p.power)}" for p in players]
+    return "\n".join(lines)
+
+
+def rows_text(rows: dict[str, list[Player]], totals: dict[str, int]) -> str:
+    out: list[str] = []
+
+    for lane in LANES:
+        out.append(lane)
+        for p in rows[lane]:
+            out.append(p.name)
+        out.append("")
+
+    out.append("Totals")
+    for lane in LANES:
+        out.append(f"{lane} - {format_power(totals[lane])}")
+
+    return "\n".join(out).strip()
+
+
+async def send_long_message(
+    interaction: discord.Interaction,
+    title: str,
+    body: str,
+) -> None:
+    content = f"**{title}**\n```text\n{body}\n```"
+    if len(content) <= 1900:
+        await interaction.followup.send(content)
+        return
+
+    fp = io.BytesIO(body.encode("utf-8"))
+    file = discord.File(fp, filename=f"{title.lower().replace(' ', '_')}.txt")
+    await interaction.followup.send(f"**{title}**", file=file)
+
+
+# ---------- Row balancing ----------
+
+def build_balanced_rows(
+    players: list[Player],
+    leaders_csv: str,
+    combine_raw: Optional[str] = None,
+    exclude_csv: Optional[str] = None,
+) -> tuple[dict[str, list[Player]], dict[str, int], list[Player]]:
+    working = players[:]
+
+    if exclude_csv:
+        excludes = {normalize_name(x) for x in parse_csv_names(exclude_csv)}
+        working = [p for p in working if normalize_name(p.name) not in excludes]
+
+    if len(working) < 4:
+        raise ValueError("Need at least 4 players after exclusions.")
+
+    leader_names = parse_csv_names(leaders_csv)
+    if len(leader_names) != 4:
+        raise ValueError(
+            "Leaders must be exactly 4 names in lane order: "
+            "Left, Left middle, Right middle, Right"
+        )
+
+    leaders = [resolve_player(name, working) for name in leader_names]
+    leader_norms = [normalize_name(p.name) for p in leaders]
+
+    if len(set(leader_norms)) != 4:
+        raise ValueError("Leader list contains duplicates.")
+
+    rows: dict[str, list[Player]] = {}
+    totals: dict[str, int] = {}
+    leader_lane_by_norm: dict[str, str] = {}
+
+    for lane, leader in zip(LANES, leaders):
+        rows[lane] = [leader]
+        totals[lane] = leader.power
+        leader_lane_by_norm[normalize_name(leader.name)] = lane
+
+    non_leaders = [p for p in working if normalize_name(p.name) not in set(leader_norms)]
+
+    grouped_player_norms: set[str] = set()
+    items: list[GroupItem] = []
+
+    if combine_raw:
+        for group_names in parse_semicolon_groups(combine_raw):
+            members = [resolve_player(name, non_leaders) for name in group_names]
+            norms = [normalize_name(p.name) for p in members]
+
+            if len(set(norms)) != len(norms):
+                raise ValueError(f"Duplicate player in combine group: {' + '.join(group_names)}")
+
+            overlap = grouped_player_norms.intersection(norms)
+            if overlap:
+                raise ValueError(f"Player used in more than one combine group: {', '.join(sorted(overlap))}")
+
+            grouped_player_norms.update(norms)
+            items.append(GroupItem(members=members))
+
+    for p in non_leaders:
+        if normalize_name(p.name) in grouped_player_norms:
+            continue
+        items.append(GroupItem(members=[p]))
+
+    items.sort(key=lambda item: (-item.power, len(item.members), item.members[0].name.lower()))
+
+    for item in items:
+        fixed_lanes = {
+            leader_lane_by_norm[normalize_name(member.name)]
+            for member in item.members
+            if normalize_name(member.name) in leader_lane_by_norm
+        }
+
+        if len(fixed_lanes) > 1:
+            raise ValueError("A combined group contains players locked to different leader lanes.")
+
+        candidate_lanes = list(fixed_lanes) if fixed_lanes else LANES
+
+        chosen_lane = min(
+            candidate_lanes,
+            key=lambda lane: (
+                totals[lane],
+                len(rows[lane]),
+                LANES.index(lane),
+            ),
+        )
+
+        rows[chosen_lane].extend(item.members)
+        totals[chosen_lane] += item.power
+
+    used_players: list[Player] = []
+    for lane in LANES:
+        used_players.extend(rows[lane])
+
+    return rows, totals, sorted(working, key=lambda p: (-p.power, p.name.lower()))
+
+
+# ---------- Cog ----------
+
+class CanyonCog(commands.Cog):
+    def __init__(self, bot: commands.Bot):
+        self.bot = bot
+        self.oa = AsyncOpenAI()  # uses OPENAI_API_KEY from .env
+        self.model = os.getenv("OPENAI_MODEL", "gpt-4.1-mini")
+
+    def _store_roster(self, guild_id: int, players: list[Player]) -> None:
+        sessions = load_sessions()
+        sessions[str(guild_id)] = {
+            "updated_at": int(time.time()),
+            "players": [{"name": p.name, "power": p.power} for p in players],
+        }
+        save_sessions(sessions)
+
+    def _load_roster(self, guild_id: int) -> list[Player]:
+        sessions = load_sessions()
+        data = sessions.get(str(guild_id))
+        if not data or not data.get("players"):
+            return []
+        return [Player(name=x["name"], power=int(x["power"])) for x in data["players"]]
+
+    async def _extract_from_attachments(
+        self,
+        attachments: list[discord.Attachment],
+    ) -> list[Player]:
+        if not attachments:
+            raise ValueError("No images provided.")
+
+        content_parts: list[dict] = [
+            {
+                "type": "input_text",
+                "text": (
+                    "These are Whiteout Survival Canyon combat screenshots. "
+                    "Extract ONLY players whose row clearly shows the button/status text 'Join'. "
+                    "For each joined player, return the exact display name and the power text exactly as shown. "
+                    "Ignore rows that do not say Join. "
+                    "Ignore headers, empty slots, totals, substitutes, and anything not clearly a joined player row. "
+                    "Do not invent players. "
+                    "If a row is unclear, omit it."
+                ),
+            }
+        ]
+
+        for attachment in attachments:
+            if not attachment.content_type or not attachment.content_type.startswith("image/"):
+                raise ValueError(f"{attachment.filename} is not an image.")
+
+            raw = await attachment.read()
+            b64 = base64.b64encode(raw).decode("utf-8")
+            data_url = f"data:{attachment.content_type};base64,{b64}"
+
+            content_parts.append(
+                {
+                    "type": "input_image",
+                    "image_url": data_url,
+                }
+            )
+
+        response = await self.oa.responses.parse(
+            model=self.model,
+            input=[
+                {
+                    "role": "system",
+                    "content": "You are a precise data extractor. Return only structured data matching the schema.",
+                },
+                {
+                    "role": "user",
+                    "content": content_parts,
+                },
+            ],
+            text_format=ScanPayload,
+        )
+
+        parsed = response.output_parsed
+        if not parsed or not parsed.players:
+            return []
+
+        players: list[Player] = []
+        for item in parsed.players:
+            name = clean_name(item.name)
+            if not name:
+                continue
+            try:
+                power = power_to_int(item.power_text)
+            except Exception:
+                continue
+            players.append(Player(name=name, power=power))
+
+        return dedupe_players(players)
+
+    @app_commands.command(name="canyon_scan", description="Scan canyon screenshots and save the roster")
+    @app_commands.describe(
+        image1="First screenshot",
+        image2="Second screenshot",
+        image3="Third screenshot",
+        image4="Fourth screenshot",
+        image5="Fifth screenshot",
+        image6="Sixth screenshot",
+        image7="Seventh screenshot",
+        image8="Eighth screenshot",
+    )
+    async def canyon_scan(
+        self,
+        interaction: discord.Interaction,
+        image1: discord.Attachment,
+        image2: Optional[discord.Attachment] = None,
+        image3: Optional[discord.Attachment] = None,
+        image4: Optional[discord.Attachment] = None,
+        image5: Optional[discord.Attachment] = None,
+        image6: Optional[discord.Attachment] = None,
+        image7: Optional[discord.Attachment] = None,
+        image8: Optional[discord.Attachment] = None,
+    ) -> None:
+        await interaction.response.defer(thinking=True)
+
+        try:
+            attachments = [x for x in [image1, image2, image3, image4, image5, image6, image7, image8] if x is not None]
+            players = await self._extract_from_attachments(attachments)
+
+            if not players:
+                await interaction.followup.send(
+                    "No joined players were extracted. Make sure the screenshots clearly show the Join rows."
+                )
+                return
+
+            guild_id = interaction.guild_id or interaction.user.id
+            self._store_roster(guild_id, players)
+
+            body = roster_text(players)
+            header = f"Scanned {len(players)} joined players"
+            await send_long_message(interaction, header, body)
+
+        except Exception as e:
+            await interaction.followup.send(f"Scan failed: {e}")
+
+    @app_commands.command(name="canyon_list", description="Show the last scanned canyon roster")
+    async def canyon_list(self, interaction: discord.Interaction) -> None:
+        await interaction.response.defer(thinking=True)
+
+        guild_id = interaction.guild_id or interaction.user.id
+        players = self._load_roster(guild_id)
+
+        if not players:
+            await interaction.followup.send("No saved canyon roster. Run `/canyon_scan` first.")
+            return
+
+        await send_long_message(interaction, f"Saved roster ({len(players)})", roster_text(players))
+
+    @app_commands.command(name="canyon_rows", description="Build balanced canyon rows from the saved roster")
+    @app_commands.describe(
+        leaders="Exactly 4 leaders in lane order: Left, Left middle, Right middle, Right",
+        combine="Optional. Example: AstraJ+Asteria; Name3+Name4",
+        exclude="Optional. Example: Pigu, Name2",
+    )
+    async def canyon_rows(
+        self,
+        interaction: discord.Interaction,
+        leaders: str,
+        combine: Optional[str] = None,
+        exclude: Optional[str] = None,
+    ) -> None:
+        await interaction.response.defer(thinking=True)
+
+        try:
+            guild_id = interaction.guild_id or interaction.user.id
+            players = self._load_roster(guild_id)
+
+            if not players:
+                await interaction.followup.send("No saved canyon roster. Run `/canyon_scan` first.")
+                return
+
+            rows, totals, working_players = build_balanced_rows(
+                players=players,
+                leaders_csv=leaders,
+                combine_raw=combine,
+                exclude_csv=exclude,
+            )
+
+            leader_names = parse_csv_names(leaders)
+            summary = (
+                f"Lane leaders: "
+                f"Left={leader_names[0]} | "
+                f"Left middle={leader_names[1]} | "
+                f"Right middle={leader_names[2]} | "
+                f"Right={leader_names[3]}\n"
+                f"Players used: {sum(len(v) for v in rows.values())}\n"
+                f"Source roster size: {len(working_players)}\n\n"
+            )
+
+            await send_long_message(interaction, "Canyon rows", summary + rows_text(rows, totals))
+
+        except Exception as e:
+            await interaction.followup.send(f"Row build failed: {e}")
+
+    @app_commands.command(name="canyon_clear", description="Clear the saved canyon roster")
+    async def canyon_clear(self, interaction: discord.Interaction) -> None:
+        await interaction.response.defer(thinking=True)
+
+        guild_id = interaction.guild_id or interaction.user.id
+        sessions = load_sessions()
+        sessions.pop(str(guild_id), None)
+        save_sessions(sessions)
+
+        await interaction.followup.send("Saved canyon roster cleared.")
+
+
+async def setup(bot: commands.Bot) -> None:
+    await bot.add_cog(CanyonCog(bot))
