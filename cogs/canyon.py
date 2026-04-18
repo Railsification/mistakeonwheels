@@ -9,17 +9,14 @@ import re
 import time
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Optional
+from typing import Optional, Any
 
 import discord
 from discord import app_commands
 from discord.ext import commands
 from dotenv import load_dotenv
-from openai import AsyncOpenAI
-from pydantic import BaseModel, Field
 
 
-# Load .env here so this cog works without needing changes elsewhere
 load_dotenv()
 
 DATA_DIR = Path("data")
@@ -28,19 +25,6 @@ DATA_DIR.mkdir(parents=True, exist_ok=True)
 SESSIONS_FILE = DATA_DIR / "canyon_sessions.json"
 LANES = ["Left", "Left middle", "Right middle", "Right"]
 
-
-# ---------- OpenAI structured output models ----------
-
-class ScanPlayer(BaseModel):
-    name: str = Field(description="Exact player name as shown in the screenshot")
-    power_text: str = Field(description="Power exactly as shown, e.g. 616m, 1.2b")
-
-
-class ScanPayload(BaseModel):
-    players: list[ScanPlayer]
-
-
-# ---------- Internal models ----------
 
 @dataclass(slots=True)
 class Player:
@@ -57,8 +41,6 @@ class GroupItem:
         return sum(p.power for p in self.members)
 
 
-# ---------- File helpers ----------
-
 def load_sessions() -> dict:
     if not SESSIONS_FILE.exists():
         return {}
@@ -71,8 +53,6 @@ def load_sessions() -> dict:
 def save_sessions(data: dict) -> None:
     SESSIONS_FILE.write_text(json.dumps(data, indent=2), encoding="utf-8")
 
-
-# ---------- General helpers ----------
 
 def normalize_name(name: str) -> str:
     return re.sub(r"[^a-z0-9]", "", name.lower())
@@ -118,10 +98,6 @@ def format_power(value: int) -> str:
 
 
 def dedupe_players(players: list[Player]) -> list[Player]:
-    """
-    Keep the highest power if the same player is seen multiple times
-    across overlapping screenshots.
-    """
     seen: dict[str, Player] = {}
     for p in players:
         key = normalize_name(p.name)
@@ -154,10 +130,6 @@ def parse_csv_names(raw: str) -> list[str]:
 
 
 def parse_semicolon_groups(raw: str) -> list[list[str]]:
-    """
-    Example:
-    AstraJ+Asteria; Name3+Name4
-    """
     groups: list[list[str]] = []
     for group in raw.split(";"):
         group = group.strip()
@@ -213,6 +185,51 @@ def get_attachment_mime(attachment: discord.Attachment) -> str:
     raise ValueError(f"Unsupported image type: {attachment.filename}")
 
 
+def strip_code_fences(text: str) -> str:
+    text = text.strip()
+    if text.startswith("```"):
+        text = re.sub(r"^```[a-zA-Z0-9_-]*\n?", "", text)
+        text = re.sub(r"\n?```$", "", text)
+    return text.strip()
+
+
+def parse_scan_payload(raw_text: str) -> list[Player]:
+    raw_text = strip_code_fences(raw_text)
+
+    try:
+        payload = json.loads(raw_text)
+    except json.JSONDecodeError:
+        match = re.search(r"\{.*\}", raw_text, flags=re.S)
+        if not match:
+            raise ValueError("Model did not return valid JSON.")
+        payload = json.loads(match.group(0))
+
+    raw_players = payload.get("players", [])
+    if not isinstance(raw_players, list):
+        raise ValueError("Invalid JSON shape: players must be a list.")
+
+    players: list[Player] = []
+
+    for item in raw_players:
+        if not isinstance(item, dict):
+            continue
+
+        name = clean_name(str(item.get("name", "")).strip())
+        power_text = str(item.get("power_text", "")).strip()
+
+        if not name or not power_text:
+            continue
+
+        try:
+            power = power_to_int(power_text)
+        except Exception:
+            continue
+
+        players.append(Player(name=name, power=power))
+
+    return dedupe_players(players)
+
+
 async def send_long_message(
     interaction: discord.Interaction,
     title: str,
@@ -227,8 +244,6 @@ async def send_long_message(
     file = discord.File(fp, filename=f"{title.lower().replace(' ', '_')}.txt")
     await interaction.followup.send(f"**{title}**", file=file)
 
-
-# ---------- Row balancing ----------
 
 def build_balanced_rows(
     players: list[Player],
@@ -260,12 +275,10 @@ def build_balanced_rows(
 
     rows: dict[str, list[Player]] = {}
     totals: dict[str, int] = {}
-    leader_lane_by_norm: dict[str, str] = {}
 
     for lane, leader in zip(LANES, leaders):
         rows[lane] = [leader]
         totals[lane] = leader.power
-        leader_lane_by_norm[normalize_name(leader.name)] = lane
 
     non_leaders = [p for p in working if normalize_name(p.name) not in set(leader_norms)]
 
@@ -312,21 +325,42 @@ def build_balanced_rows(
     return rows, totals, sorted(working, key=lambda p: (-p.power, p.name.lower()))
 
 
-# ---------- Cog ----------
-
 class CanyonCog(commands.Cog):
     def __init__(self, bot: commands.Bot):
         self.bot = bot
-        self.oa: AsyncOpenAI | None = None
+        self.oa = None
         self.model = os.getenv("OPENAI_MODEL", "gpt-4.1-mini")
 
-    def _get_openai_client(self) -> AsyncOpenAI:
+    async def _get_openai_client(self):
+        if self.oa is not None:
+            return self.oa
+
         api_key = os.getenv("OPENAI_API_KEY")
         if not api_key:
-            raise RuntimeError("OPENAI_API_KEY is missing. Check your .env file.")
-        if self.oa is None:
-            self.oa = AsyncOpenAI(api_key=api_key)
+            raise RuntimeError("OPENAI_API_KEY is missing.")
+
+        from openai import AsyncOpenAI
+
+        self.oa = AsyncOpenAI(api_key=api_key)
         return self.oa
+
+    def _extract_response_text(self, response: Any) -> str:
+        output_text = getattr(response, "output_text", None)
+        if isinstance(output_text, str) and output_text.strip():
+            return output_text.strip()
+
+        chunks: list[str] = []
+
+        for item in getattr(response, "output", []) or []:
+            for content in getattr(item, "content", []) or []:
+                text_value = getattr(content, "text", None)
+                if isinstance(text_value, str) and text_value.strip():
+                    chunks.append(text_value)
+
+        text = "\n".join(chunks).strip()
+        if not text:
+            raise RuntimeError("No text content returned from OpenAI response.")
+        return text
 
     def _store_roster(self, guild_id: int, players: list[Player]) -> None:
         sessions = load_sessions()
@@ -344,22 +378,26 @@ class CanyonCog(commands.Cog):
         return [Player(name=x["name"], power=int(x["power"])) for x in data["players"]]
 
     async def _extract_from_attachments(self, attachments: list[discord.Attachment]) -> list[Player]:
-        client = self._get_openai_client()
+        client = await self._get_openai_client()
 
         if not attachments:
             raise ValueError("No images provided.")
 
-        content_parts: list[dict] = [
+        content_parts: list[dict[str, Any]] = [
             {
                 "type": "input_text",
                 "text": (
-                    "These are Whiteout Survival Canyon combat screenshots. "
-                    "Extract ONLY players whose row clearly shows the button/status text 'Join'. "
-                    "For each joined player, return the exact display name and the power text exactly as shown. "
-                    "Ignore rows that do not say Join. "
-                    "Ignore headers, empty slots, totals, substitutes, and anything not clearly a joined player row. "
-                    "Do not invent players. "
-                    "If a row is unclear, omit it."
+                    "These are Whiteout Survival Canyon combat screenshots.\n"
+                    "Extract ONLY players whose row clearly shows the button/status text 'Join'.\n"
+                    "Ignore every row that does not say 'Join'.\n"
+                    "Ignore headers, empty slots, totals, substitutes, and anything unclear.\n"
+                    "Return ONLY valid JSON in this exact shape:\n"
+                    '{\n'
+                    '  "players": [\n'
+                    '    {"name": "Player Name", "power_text": "616m"}\n'
+                    "  ]\n"
+                    "}\n"
+                    "Do not wrap in markdown. Do not add commentary."
                 ),
             }
         ]
@@ -380,37 +418,25 @@ class CanyonCog(commands.Cog):
                 }
             )
 
-        response = await client.responses.parse(
+        response = await client.responses.create(
             model=self.model,
             input=[
                 {
                     "role": "system",
-                    "content": "You are a precise data extractor. Return only structured data matching the schema.",
+                    "content": (
+                        "You are a precise data extractor. "
+                        "Return only the requested JSON."
+                    ),
                 },
                 {
                     "role": "user",
                     "content": content_parts,
                 },
             ],
-            text_format=ScanPayload,
         )
 
-        parsed = response.output_parsed
-        if not parsed or not parsed.players:
-            return []
-
-        players: list[Player] = []
-        for item in parsed.players:
-            name = clean_name(item.name)
-            if not name:
-                continue
-            try:
-                power = power_to_int(item.power_text)
-            except Exception:
-                continue
-            players.append(Player(name=name, power=power))
-
-        return dedupe_players(players)
+        raw_text = self._extract_response_text(response)
+        return parse_scan_payload(raw_text)
 
     @app_commands.command(name="canyon_scan", description="Scan canyon screenshots and save the roster")
     @app_commands.describe(
@@ -533,4 +559,6 @@ class CanyonCog(commands.Cog):
 
 
 async def setup(bot: commands.Bot) -> None:
+    print("[canyon] setup starting")
     await bot.add_cog(CanyonCog(bot))
+    print("[canyon] setup complete")
