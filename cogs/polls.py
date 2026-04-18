@@ -580,7 +580,7 @@ class Polls(commands.Cog):
             poll["option_names"].append(option_name)
 
             self.save_polls(polls)
-            await self.refresh_poll_messages(poll)
+            #await self.refresh_poll_messages(poll)
 
             await interaction.edit_original_response(
                 content=f"Added option {new_option_number} to poll `{poll['id']}`"
