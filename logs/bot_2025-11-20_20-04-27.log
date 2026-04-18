@@ -1,0 +1,16 @@
+  File "C:\Users\djlan\mistakesonwheel-bot\hot_v1.2.py", line 18
+    os.environ["PYTHONIOENCODING"] = "utf-8'
+                                     ^
+SyntaxError: unterminated string literal (detected at line 18)
+  File "C:\Users\djlan\mistakesonwheel-bot\hot_v1.2.py", line 18
+    os.environ["PYTHONIOENCODING"] = "utf-8'
+                                     ^
+SyntaxError: unterminated string literal (detected at line 18)
+  File "C:\Users\djlan\mistakesonwheel-bot\hot_v1.2.py", line 18
+    os.environ["PYTHONIOENCODING"] = "utf-8'
+                                     ^
+SyntaxError: unterminated string literal (detected at line 18)
+  File "C:\Users\djlan\mistakesonwheel-bot\hot_v1.2.py", line 18
+    os.environ["PYTHONIOENCODING"] = "utf-8'
+                                     ^
+SyntaxError: unterminated string literal (detected at line 18)

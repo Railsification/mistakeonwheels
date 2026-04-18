@@ -1,0 +1,67 @@
+[2025-11-20 19:50:34] [INFO    ] discord.client: logging in using static token
+[2025-11-20 19:50:57] [INFO    ] discord.gateway: Shard ID None has connected to Gateway (Session ID: 86b814fc712097bff372d3a4319bc722).
+[19:50:59] [2025-11-20 19:50:59] [ERROR   ] discord.client: Ignoring exception in on_ready
+Traceback (most recent call last):
+  File "C:\Users\djlan\mistakesonwheel-bot\.venv\Lib\site-packages\discord\client.py", line 504, in _run_event
+    await coro(*args, **kwargs)
+  File "C:\Users\djlan\mistakesonwheel-bot\hot_v1.2.py", line 355, in on_ready
+    ok(f"HotBot v1.2 ready as {bot.user}")
+    ~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\djlan\mistakesonwheel-bot\hot_v1.2.py", line 21, in ok
+    def ok(msg: str): print(f"[{_ts()}] {Fore.GREEN}\u2705 [OK]{Style.RESET_ALL} {msg}")
+                      ~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\djlan\mistakesonwheel-bot\.venv\Lib\site-packages\colorama\ansitowin32.py", line 47, in write
+    self.__convertor.write(text)
+    ~~~~~~~~~~~~~~~~~~~~~~^^^^^^
+  File "C:\Users\djlan\mistakesonwheel-bot\.venv\Lib\site-packages\colorama\ansitowin32.py", line 177, in write
+    self.write_and_convert(text)
+    ~~~~~~~~~~~~~~~~~~~~~~^^^^^^
+  File "C:\Users\djlan\mistakesonwheel-bot\.venv\Lib\site-packages\colorama\ansitowin32.py", line 202, in write_and_convert
+    self.write_plain_text(text, cursor, start)
+    ~~~~~~~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\djlan\mistakesonwheel-bot\.venv\Lib\site-packages\colorama\ansitowin32.py", line 210, in write_plain_text
+    self.wrapped.write(text[start:end])
+    ~~~~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^
+  File "C:\Users\djlan\AppData\Local\Python\pythoncore-3.14-64\Lib\encodings\cp1252.py", line 19, in encode
+    return codecs.charmap_encode(input,self.errors,encoding_table)[0]
+           ~~~~~~~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+UnicodeEncodeError: 'charmap' codec can't encode character '\u2705' in position 0: character maps to <undefined>
+[2025-11-20 19:52:19] [ERROR   ] discord.app_commands.tree: Ignoring exception in command 'hello'
+Traceback (most recent call last):
+  File "C:\Users\djlan\mistakesonwheel-bot\.venv\Lib\site-packages\discord\app_commands\commands.py", line 859, in _do_call
+    return await self._callback(interaction, **params)  # type: ignore
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\djlan\mistakesonwheel-bot\hot_v1.2.py", line 824, in hello
+    log_cmd("hello", inter)
+    ~~~~~~~^^^^^^^^^^^^^^^^
+  File "C:\Users\djlan\mistakesonwheel-bot\hot_v1.2.py", line 30, in log_cmd
+    print(f"[{_ts()}] \U0001f504 [CMD] /{name} by {user} in {chan} ({guild})")
+    ~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\djlan\mistakesonwheel-bot\.venv\Lib\site-packages\colorama\ansitowin32.py", line 47, in write
+    self.__convertor.write(text)
+    ~~~~~~~~~~~~~~~~~~~~~~^^^^^^
+  File "C:\Users\djlan\mistakesonwheel-bot\.venv\Lib\site-packages\colorama\ansitowin32.py", line 177, in write
+    self.write_and_convert(text)
+    ~~~~~~~~~~~~~~~~~~~~~~^^^^^^
+  File "C:\Users\djlan\mistakesonwheel-bot\.venv\Lib\site-packages\colorama\ansitowin32.py", line 205, in write_and_convert
+    self.write_plain_text(text, cursor, len(text))
+    ~~~~~~~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\djlan\mistakesonwheel-bot\.venv\Lib\site-packages\colorama\ansitowin32.py", line 210, in write_plain_text
+    self.wrapped.write(text[start:end])
+    ~~~~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^
+  File "C:\Users\djlan\AppData\Local\Python\pythoncore-3.14-64\Lib\encodings\cp1252.py", line 19, in encode
+    return codecs.charmap_encode(input,self.errors,encoding_table)[0]
+           ~~~~~~~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+UnicodeEncodeError: 'charmap' codec can't encode character '\U0001f504' in position 11: character maps to <undefined>
+
+The above exception was the direct cause of the following exception:
+
+Traceback (most recent call last):
+  File "C:\Users\djlan\mistakesonwheel-bot\.venv\Lib\site-packages\discord\app_commands\tree.py", line 1297, in _call
+    await command._invoke_with_namespace(interaction, namespace)
+  File "C:\Users\djlan\mistakesonwheel-bot\.venv\Lib\site-packages\discord\app_commands\commands.py", line 884, in _invoke_with_namespace
+    return await self._do_call(interaction, transformed_values)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\djlan\mistakesonwheel-bot\.venv\Lib\site-packages\discord\app_commands\commands.py", line 877, in _do_call
+    raise CommandInvokeError(self, e) from e
+discord.app_commands.errors.CommandInvokeError: Command 'hello' raised an exception: UnicodeEncodeError: 'charmap' codec can't encode character '\U0001f504' in position 11: character maps to <undefined>

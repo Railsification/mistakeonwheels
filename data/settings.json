@@ -1,0 +1,55 @@
+{
+  "guilds": {
+    "1433335614463279196": {
+      "topic": "dwarves",
+      "pfp_theme": "Cute Cartoon thanksgiving turkeys",
+      "feature_channels": {
+        "speech": [
+          1433335615520378923,
+          1433927319189459207
+        ],
+        "tag_image": [
+          1433335615520378923,
+          1433927319189459207
+        ],
+        "pfp": [
+          1442091170674249729,
+          1433927319189459207
+        ],
+        "join_fact": [
+          1433335615520378923,
+          1433927319189459207
+        ],
+        "image_poll": [
+          1434083311906586664,
+          1433927319189459207
+        ],
+        "connect4": [
+          1464529996323487774
+        ],
+        "tictactoe": [
+          1464529996323487774
+        ],
+        "games": [
+          1464529996323487774
+        ]
+      }
+    },
+    "1433963491584249939": {
+      "topic": "astronomy",
+      "pfp_theme": "Cute Cartoon thanksgiving turkeys",
+      "feature_channels": {
+        "speech": [],
+        "tag_image": [],
+        "pfp": [],
+        "join_fact": [],
+        "image_poll": [],
+        "connect4": [
+          1433963492209332366
+        ],
+        "tictactoe": [],
+        "games": []
+      }
+    }
+  }
+}

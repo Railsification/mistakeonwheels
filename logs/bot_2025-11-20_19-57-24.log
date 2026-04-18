@@ -1,0 +1,28 @@
+[2025-11-20 19:57:25] [INFO    ] discord.client: logging in using static token
+[2025-11-20 19:57:46] [INFO    ] discord.gateway: Shard ID None has connected to Gateway (Session ID: ce6384d4d4b105101b6c275c5580031f).
+[19:57:48] [2025-11-20 19:57:48] [ERROR   ] discord.client: Ignoring exception in on_ready
+Traceback (most recent call last):
+  File "C:\Users\djlan\mistakesonwheel-bot\.venv\Lib\site-packages\discord\client.py", line 504, in _run_event
+    await coro(*args, **kwargs)
+  File "C:\Users\djlan\mistakesonwheel-bot\hot_v1.2.py", line 355, in on_ready
+    ok(f"HotBot v1.2 ready as {bot.user}")
+    ~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\djlan\mistakesonwheel-bot\hot_v1.2.py", line 21, in ok
+    def ok(msg: str): print(f"[{_ts()}] {Fore.GREEN}\u2705 [OK]{Style.RESET_ALL} {msg}")
+                      ~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\djlan\mistakesonwheel-bot\.venv\Lib\site-packages\colorama\ansitowin32.py", line 47, in write
+    self.__convertor.write(text)
+    ~~~~~~~~~~~~~~~~~~~~~~^^^^^^
+  File "C:\Users\djlan\mistakesonwheel-bot\.venv\Lib\site-packages\colorama\ansitowin32.py", line 177, in write
+    self.write_and_convert(text)
+    ~~~~~~~~~~~~~~~~~~~~~~^^^^^^
+  File "C:\Users\djlan\mistakesonwheel-bot\.venv\Lib\site-packages\colorama\ansitowin32.py", line 202, in write_and_convert
+    self.write_plain_text(text, cursor, start)
+    ~~~~~~~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\djlan\mistakesonwheel-bot\.venv\Lib\site-packages\colorama\ansitowin32.py", line 210, in write_plain_text
+    self.wrapped.write(text[start:end])
+    ~~~~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^
+  File "C:\Users\djlan\AppData\Local\Python\pythoncore-3.14-64\Lib\encodings\cp1252.py", line 19, in encode
+    return codecs.charmap_encode(input,self.errors,encoding_table)[0]
+           ~~~~~~~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+UnicodeEncodeError: 'charmap' codec can't encode character '\u2705' in position 0: character maps to <undefined>

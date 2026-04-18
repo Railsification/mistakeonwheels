@@ -1,0 +1,41 @@
+  File "C:\Users\djlan\mistakesonwheel-bot\hot_v1.2.py", line 16
+    sys.stdout = io.TextIOWrapper(sys.stdout.detach(), encoding='utf-8', errors='replace'
+                                 ^
+SyntaxError: '(' was never closed
+  File "C:\Users\djlan\mistakesonwheel-bot\hot_v1.2.py", line 16
+    sys.stdout = io.TextIOWrapper(sys.stdout.detach(), encoding='utf-8', errors='replace'
+                                 ^
+SyntaxError: '(' was never closed
+  File "C:\Users\djlan\mistakesonwheel-bot\hot_v1.2.py", line 16
+    sys.stdout = io.TextIOWrapper(sys.stdout.detach(), encoding='utf-8', errors='replace'
+                                 ^
+SyntaxError: '(' was never closed
+  File "C:\Users\djlan\mistakesonwheel-bot\hot_v1.2.py", line 16
+    sys.stdout = io.TextIOWrapper(sys.stdout.detach(), encoding='utf-8', errors='replace'
+                                 ^
+SyntaxError: '(' was never closed
+Traceback (most recent call last):
+  File "C:\Users\djlan\mistakesonwheel-bot\hot_v1.2.py", line 17, in <module>
+    sys.stderr = io.TextIOWrapper(ssys.stderr.detach(), encoding='utf-8', errors='replace')
+                                  ^^^^
+NameError: name 'ssys' is not defined. Did you mean: 'sys'?
+Traceback (most recent call last):
+  File "C:\Users\djlan\mistakesonwheel-bot\hot_v1.2.py", line 17, in <module>
+    sys.stderr = io.TextIOWrapper(ssys.stderr.detach(), encoding='utf-8', errors='replace')
+                                  ^^^^
+NameError: name 'ssys' is not defined. Did you mean: 'sys'?
+Traceback (most recent call last):
+  File "C:\Users\djlan\mistakesonwheel-bot\hot_v1.2.py", line 17, in <module>
+    sys.stderr = io.TextIOWrapper(ssys.stderr.detach(), encoding='utf-8', errors='replace')
+                                  ^^^^
+NameError: name 'ssys' is not defined. Did you mean: 'sys'?
+Traceback (most recent call last):
+  File "C:\Users\djlan\mistakesonwheel-bot\hot_v1.2.py", line 17, in <module>
+    sys.stderr = io.TextIOWrapper(ssys.stderr.detach(), encoding='utf-8', errors='replace')
+                                  ^^^^
+NameError: name 'ssys' is not defined. Did you mean: 'sys'?
+[2025-11-20 20:05:54] [INFO    ] discord.client: logging in using static token
+[2025-11-20 20:06:16] [INFO    ] discord.gateway: Shard ID None has connected to Gateway (Session ID: a84882662afb75fdc82c2b800315dae7).
+[20:06:18] ✅ [OK] HotBot v1.2 ready as mistakesonwheel#1573
+[20:06:19] 💬 [INFO] Synced 20 cmds: ['defer_test', 'join_fact_topic_set', 'join_fact_topic_check', 'fact', 'image_poll', 'poll_list', 'poll_cancel', 'tag_member_image', 'diagnostics', 'test_all', 'hello', 'acktest', 'test_join_fact', 'dump_profiles', 'purge_profile', 'purge_all_profiles', 'server_age', 'server_age_config', 'help', 'sync']
+[20:06:19] ✅ [OK] Resumed active polls if any.
