@@ -51,6 +51,7 @@ class HotBot(commands.Bot):
         await self.load_extension("cogs.games")
         await self.load_extension("cogs.tictactoe")
         await self.load_extension("cogs.connect4")
+        await self.load_extension("cogs.canyon")
 
         if not GUILD_ID:
             err("GUILD_ID missing or invalid in .env")
