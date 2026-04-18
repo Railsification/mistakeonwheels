@@ -9,7 +9,7 @@ import re
 import time
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Optional, Any
+from typing import Any, Optional
 
 import discord
 from discord import app_commands
@@ -392,7 +392,7 @@ class CanyonCog(commands.Cog):
                     "Ignore every row that does not say 'Join'.\n"
                     "Ignore headers, empty slots, totals, substitutes, and anything unclear.\n"
                     "Return ONLY valid JSON in this exact shape:\n"
-                    '{\n'
+                    "{\n"
                     '  "players": [\n'
                     '    {"name": "Player Name", "power_text": "616m"}\n'
                     "  ]\n"
@@ -559,6 +559,13 @@ class CanyonCog(commands.Cog):
 
 
 async def setup(bot: commands.Bot) -> None:
-    print("[canyon] setup starting")
-    await bot.add_cog(CanyonCog(bot))
-    print("[canyon] setup complete")
+    cog = CanyonCog(bot)
+    guild_id = bot.hot_config["guild_id"]
+    guild_obj = discord.Object(id=guild_id)
+
+    for cmd in cog.get_app_commands():
+        cmd.guild_only = True
+        cmd._guild_ids = {guild_id}
+        cmd.guilds = (guild_obj,)
+
+    await bot.add_cog(cog)
