@@ -303,7 +303,8 @@ class Polls(commands.Cog):
                     option_name=option_name,
                 )
                 await msg.edit(embed=embed)
-            except Exception:
+            except Exception as e:
+                print(f"[polls] refresh failed for message {message_id}: {e!r}")
                 continue
 
     async def finalize_poll(self, poll_id: str) -> None:
@@ -557,7 +558,6 @@ class Polls(commands.Cog):
 
             self.upgrade_poll_record(poll)
             poll["vault_channel_id"] = self.media_vault_channel_id
-            poll["title"] = f"{poll['title']}; {new_option_number} = {option_name}"
 
             poll_channel = await self.get_message_channel(poll["channel_id"])
             embed = self.build_option_embed(
@@ -580,7 +580,6 @@ class Polls(commands.Cog):
             poll["option_names"].append(option_name)
 
             self.save_polls(polls)
-            #await self.refresh_poll_messages(poll)
 
             await interaction.edit_original_response(
                 content=f"Added option {new_option_number} to poll `{poll['id']}`"
@@ -589,6 +588,33 @@ class Polls(commands.Cog):
         except Exception as e:
             await interaction.edit_original_response(
                 content=f"Failed to add option: {e}"
+            )
+
+    @app_commands.command(name="poll_refresh", description="Refresh an existing poll's messages")
+    @app_commands.checks.has_permissions(manage_messages=True)
+    async def poll_refresh(self, interaction: discord.Interaction, poll_id: str):
+        if not await self.safe_ack(interaction, "Refreshing poll..."):
+            return
+
+        try:
+            if not interaction.guild:
+                raise ValueError("This command must be used in a server")
+
+            polls = self.load_polls()
+            poll = self.resolve_poll(polls, poll_id, guild_id=interaction.guild.id)
+
+            if poll is None:
+                raise ValueError("Poll not found")
+
+            await self.refresh_poll_messages(poll)
+
+            await interaction.edit_original_response(
+                content=f"Refreshed poll `{poll['id']}`"
+            )
+
+        except Exception as e:
+            await interaction.edit_original_response(
+                content=f"Failed to refresh poll: {e}"
             )
 
     @app_commands.command(name="poll_list", description="List active polls")
