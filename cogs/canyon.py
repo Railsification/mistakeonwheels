@@ -448,6 +448,13 @@ class CanyonCog(commands.Cog):
         image6="Sixth screenshot",
         image7="Seventh screenshot",
         image8="Eighth screenshot",
+        image9="Ninth screenshot",
+        image10="Tenth screenshot",
+        image11="Eleventh screenshot",
+        image12="Twelfth screenshot",
+        image13="Thirteenth screenshot",
+        image14="Fourteenth screenshot",
+        image15="Fifteenth screenshot",
     )
     async def canyon_scan(
         self,
@@ -460,12 +467,35 @@ class CanyonCog(commands.Cog):
         image6: Optional[discord.Attachment] = None,
         image7: Optional[discord.Attachment] = None,
         image8: Optional[discord.Attachment] = None,
+        image9: Optional[discord.Attachment] = None,
+        image10: Optional[discord.Attachment] = None,
+        image11: Optional[discord.Attachment] = None,
+        image12: Optional[discord.Attachment] = None,
+        image13: Optional[discord.Attachment] = None,
+        image14: Optional[discord.Attachment] = None,
+        image15: Optional[discord.Attachment] = None,
     ) -> None:
         await interaction.response.defer(thinking=True)
 
         try:
             attachments = [
-                x for x in [image1, image2, image3, image4, image5, image6, image7, image8]
+                x for x in [
+                    image1,
+                    image2,
+                    image3,
+                    image4,
+                    image5,
+                    image6,
+                    image7,
+                    image8,
+                    image9,
+                    image10,
+                    image11,
+                    image12,
+                    image13,
+                    image14,
+                    image15,
+                ]
                 if x is not None
             ]
 
