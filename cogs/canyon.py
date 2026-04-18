@@ -14,9 +14,13 @@ from typing import Optional
 import discord
 from discord import app_commands
 from discord.ext import commands
+from dotenv import load_dotenv
 from openai import AsyncOpenAI
 from pydantic import BaseModel, Field
 
+
+# Load .env here so this cog works without needing changes elsewhere
+load_dotenv()
 
 DATA_DIR = Path("data")
 DATA_DIR.mkdir(parents=True, exist_ok=True)
@@ -167,8 +171,7 @@ def parse_semicolon_groups(raw: str) -> list[list[str]]:
 
 
 def roster_text(players: list[Player]) -> str:
-    lines = [f"{p.name} - {format_power(p.power)}" for p in players]
-    return "\n".join(lines)
+    return "\n".join(f"{p.name} - {format_power(p.power)}" for p in players)
 
 
 def rows_text(rows: dict[str, list[Player]], totals: dict[str, int]) -> str:
@@ -185,6 +188,29 @@ def rows_text(rows: dict[str, list[Player]], totals: dict[str, int]) -> str:
         out.append(f"{lane} - {format_power(totals[lane])}")
 
     return "\n".join(out).strip()
+
+
+def is_image_attachment(attachment: discord.Attachment) -> bool:
+    if attachment.content_type and attachment.content_type.startswith("image/"):
+        return True
+
+    filename = attachment.filename.lower()
+    return filename.endswith((".png", ".jpg", ".jpeg", ".webp"))
+
+
+def get_attachment_mime(attachment: discord.Attachment) -> str:
+    if attachment.content_type and attachment.content_type.startswith("image/"):
+        return attachment.content_type
+
+    filename = attachment.filename.lower()
+    if filename.endswith(".png"):
+        return "image/png"
+    if filename.endswith(".jpg") or filename.endswith(".jpeg"):
+        return "image/jpeg"
+    if filename.endswith(".webp"):
+        return "image/webp"
+
+    raise ValueError(f"Unsupported image type: {attachment.filename}")
 
 
 async def send_long_message(
@@ -256,7 +282,9 @@ def build_balanced_rows(
 
             overlap = grouped_player_norms.intersection(norms)
             if overlap:
-                raise ValueError(f"Player used in more than one combine group: {', '.join(sorted(overlap))}")
+                raise ValueError(
+                    f"Player used in more than one combine group: {', '.join(sorted(overlap))}"
+                )
 
             grouped_player_norms.update(norms)
             items.append(GroupItem(members=members))
@@ -269,19 +297,8 @@ def build_balanced_rows(
     items.sort(key=lambda item: (-item.power, len(item.members), item.members[0].name.lower()))
 
     for item in items:
-        fixed_lanes = {
-            leader_lane_by_norm[normalize_name(member.name)]
-            for member in item.members
-            if normalize_name(member.name) in leader_lane_by_norm
-        }
-
-        if len(fixed_lanes) > 1:
-            raise ValueError("A combined group contains players locked to different leader lanes.")
-
-        candidate_lanes = list(fixed_lanes) if fixed_lanes else LANES
-
         chosen_lane = min(
-            candidate_lanes,
+            LANES,
             key=lambda lane: (
                 totals[lane],
                 len(rows[lane]),
@@ -292,10 +309,6 @@ def build_balanced_rows(
         rows[chosen_lane].extend(item.members)
         totals[chosen_lane] += item.power
 
-    used_players: list[Player] = []
-    for lane in LANES:
-        used_players.extend(rows[lane])
-
     return rows, totals, sorted(working, key=lambda p: (-p.power, p.name.lower()))
 
 
@@ -304,8 +317,16 @@ def build_balanced_rows(
 class CanyonCog(commands.Cog):
     def __init__(self, bot: commands.Bot):
         self.bot = bot
-        self.oa = AsyncOpenAI()  # uses OPENAI_API_KEY from .env
+        self.oa: AsyncOpenAI | None = None
         self.model = os.getenv("OPENAI_MODEL", "gpt-4.1-mini")
+
+    def _get_openai_client(self) -> AsyncOpenAI:
+        api_key = os.getenv("OPENAI_API_KEY")
+        if not api_key:
+            raise RuntimeError("OPENAI_API_KEY is missing. Check your .env file.")
+        if self.oa is None:
+            self.oa = AsyncOpenAI(api_key=api_key)
+        return self.oa
 
     def _store_roster(self, guild_id: int, players: list[Player]) -> None:
         sessions = load_sessions()
@@ -322,10 +343,9 @@ class CanyonCog(commands.Cog):
             return []
         return [Player(name=x["name"], power=int(x["power"])) for x in data["players"]]
 
-    async def _extract_from_attachments(
-        self,
-        attachments: list[discord.Attachment],
-    ) -> list[Player]:
+    async def _extract_from_attachments(self, attachments: list[discord.Attachment]) -> list[Player]:
+        client = self._get_openai_client()
+
         if not attachments:
             raise ValueError("No images provided.")
 
@@ -345,12 +365,13 @@ class CanyonCog(commands.Cog):
         ]
 
         for attachment in attachments:
-            if not attachment.content_type or not attachment.content_type.startswith("image/"):
-                raise ValueError(f"{attachment.filename} is not an image.")
+            if not is_image_attachment(attachment):
+                raise ValueError(f"{attachment.filename} is not a supported image.")
 
             raw = await attachment.read()
+            mime = get_attachment_mime(attachment)
             b64 = base64.b64encode(raw).decode("utf-8")
-            data_url = f"data:{attachment.content_type};base64,{b64}"
+            data_url = f"data:{mime};base64,{b64}"
 
             content_parts.append(
                 {
@@ -359,7 +380,7 @@ class CanyonCog(commands.Cog):
                 }
             )
 
-        response = await self.oa.responses.parse(
+        response = await client.responses.parse(
             model=self.model,
             input=[
                 {
@@ -417,7 +438,11 @@ class CanyonCog(commands.Cog):
         await interaction.response.defer(thinking=True)
 
         try:
-            attachments = [x for x in [image1, image2, image3, image4, image5, image6, image7, image8] if x is not None]
+            attachments = [
+                x for x in [image1, image2, image3, image4, image5, image6, image7, image8]
+                if x is not None
+            ]
+
             players = await self._extract_from_attachments(attachments)
 
             if not players:
