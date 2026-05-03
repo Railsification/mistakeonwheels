@@ -4,3 +4,5 @@ aiohttp
 colorama
 openai
 pydantic
+opencv-python-headless
+numpy
