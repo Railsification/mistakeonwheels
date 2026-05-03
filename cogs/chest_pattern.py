@@ -1,5 +1,3 @@
-from __future__ import annotations
-
 import csv
 import hashlib
 import io
@@ -12,11 +10,7 @@ from discord import app_commands
 from discord.ext import commands
 
 
-try:
-    from core.utils import DATA_DIR
-except Exception:
-    DATA_DIR = Path("data")
-
+DATA_DIR = Path("data")
 DATA_DIR.mkdir(parents=True, exist_ok=True)
 KNOWLEDGE_FILE = DATA_DIR / "chest_pattern_knowledge.json"
 
@@ -35,43 +29,16 @@ DEFAULT_WEIGHTS = {
 }
 
 
-def _import_cv_stack():
+def import_image_libs():
     try:
-        import cv2  # type: ignore
-        import numpy as np  # type: ignore
+        import cv2
+        import numpy as np
         return cv2, np, None
     except Exception as e:
         return None, None, str(e)
 
 
-def load_knowledge() -> dict:
-    if not KNOWLEDGE_FILE.exists():
-        return {"guilds": {}}
-
-    try:
-        with KNOWLEDGE_FILE.open("r", encoding="utf-8") as f:
-            data = json.load(f)
-            if not isinstance(data, dict):
-                return {"guilds": {}}
-            data.setdefault("guilds", {})
-            return data
-    except Exception:
-        return {"guilds": {}}
-
-
-def save_knowledge(data: dict) -> None:
-    KNOWLEDGE_FILE.parent.mkdir(parents=True, exist_ok=True)
-    tmp = KNOWLEDGE_FILE.with_suffix(".tmp")
-    with tmp.open("w", encoding="utf-8") as f:
-        json.dump(data, f, indent=2)
-    tmp.replace(KNOWLEDGE_FILE)
-
-
-def guild_key(interaction: discord.Interaction) -> str:
-    return str(interaction.guild_id or "dm")
-
-
-def fresh_guild() -> dict:
+def fresh_guild_data():
     totals = {}
     for r in range(1, 4):
         for c in range(1, 5):
@@ -83,27 +50,56 @@ def fresh_guild() -> dict:
     }
 
 
-def ensure_guild(data: dict, gk: str) -> dict:
-    data.setdefault("guilds", {})
-    if gk not in data["guilds"]:
-        data["guilds"][gk] = fresh_guild()
+def load_knowledge():
+    if not KNOWLEDGE_FILE.exists():
+        return {"guilds": {}}
 
-    g = data["guilds"][gk]
-    g.setdefault("totals", fresh_guild()["totals"])
+    try:
+        with KNOWLEDGE_FILE.open("r", encoding="utf-8") as f:
+            data = json.load(f)
+        if not isinstance(data, dict):
+            return {"guilds": {}}
+        if "guilds" not in data or not isinstance(data["guilds"], dict):
+            data["guilds"] = {}
+        return data
+    except Exception:
+        return {"guilds": {}}
+
+
+def save_knowledge(data):
+    tmp = KNOWLEDGE_FILE.with_suffix(".tmp")
+    with tmp.open("w", encoding="utf-8") as f:
+        json.dump(data, f, indent=2)
+    tmp.replace(KNOWLEDGE_FILE)
+
+
+def get_guild_key(interaction: discord.Interaction):
+    return str(interaction.guild_id or "dm")
+
+
+def ensure_guild_data(data, guild_key):
+    data.setdefault("guilds", {})
+    if guild_key not in data["guilds"]:
+        data["guilds"][guild_key] = fresh_guild_data()
+
+    g = data["guilds"][guild_key]
+    g.setdefault("totals", {})
     g.setdefault("hashes", [])
     g.setdefault("images", 0)
 
     for r in range(1, 4):
         for c in range(1, 5):
             cell = f"R{r}C{c}"
-            g["totals"].setdefault(cell, {})
-            for s in SYMBOLS:
-                g["totals"][cell].setdefault(s, 0)
+            if cell not in g["totals"]:
+                g["totals"][cell] = {s: 0 for s in SYMBOLS}
+            else:
+                for s in SYMBOLS:
+                    g["totals"][cell].setdefault(s, 0)
 
     return g
 
 
-def crop_cell(img, row: int, col: int):
+def crop_cell(img, row, col):
     h, w = img.shape[:2]
     cx = int(w * CELL_X[col])
     cy = int(h * CELL_Y[row])
@@ -118,7 +114,7 @@ def crop_cell(img, row: int, col: int):
     return img[y1:y2, x1:x2]
 
 
-def classify_cell(cv2, np, crop) -> str:
+def classify_cell(cv2, np, crop):
     hsv = cv2.cvtColor(crop, cv2.COLOR_BGR2HSV)
     area = max(crop.shape[0] * crop.shape[1], 1)
 
@@ -140,9 +136,8 @@ def classify_cell(cv2, np, crop) -> str:
     return "UPGRADE"
 
 
-def analyse_image(cv2, np, img) -> list[dict]:
-    rows: list[dict] = []
-
+def analyse_image(cv2, np, img):
+    rows = []
     for r in range(3):
         for c in range(4):
             crop = crop_cell(img, r, c)
@@ -151,16 +146,15 @@ def analyse_image(cv2, np, img) -> list[dict]:
                 "cell": f"R{r + 1}C{c + 1}",
                 "symbol": symbol,
             })
-
     return rows
 
 
-def add_to_totals(totals: dict, rows: list[dict]) -> None:
+def add_rows_to_totals(totals, rows):
     for row in rows:
         totals[row["cell"]][row["symbol"]] += 1
 
 
-def score_totals(totals: dict) -> list[dict]:
+def score_totals(totals):
     scored = []
 
     for cell, counts in totals.items():
@@ -168,13 +162,13 @@ def score_totals(totals: dict) -> list[dict]:
         if total <= 0:
             continue
 
-        expected_score = 0.0
+        score = 0.0
         for s in SYMBOLS:
-            expected_score += (int(counts.get(s, 0)) / total) * DEFAULT_WEIGHTS[s]
+            score += (int(counts.get(s, 0)) / total) * DEFAULT_WEIGHTS[s]
 
         scored.append({
             "cell": cell,
-            "score": expected_score,
+            "score": score,
             "total": total,
             "counts": {
                 "UPGRADE": int(counts.get("UPGRADE", 0)),
@@ -189,15 +183,27 @@ def score_totals(totals: dict) -> list[dict]:
     return scored
 
 
-def build_summary(scored: list[dict], uploads: int, learned: int, dupes: int, total_images: int) -> str:
+def build_summary(scored, uploads, learned, dupes, total_images, bad_files):
     if not scored:
-        return "No usable chest data yet."
+        text = [
+            "**Chest Pattern**",
+            f"Uploads this run: `{uploads}`",
+            f"Learned this run: `{learned}`",
+            f"Duplicates skipped: `{dupes}`",
+            f"Total knowledge base images: `{total_images}`",
+        ]
+        if bad_files:
+            text.append("")
+            text.append("Skipped unreadable files:")
+            for name in bad_files:
+                text.append(f"- `{name}`")
+        return "\n".join(text)
 
     best = scored[0]
     top = scored[:5]
     avoid = sorted(scored, key=lambda x: x["key_rate"], reverse=True)[:5]
 
-    lines = [
+    text = [
         "**Chest Pattern**",
         f"Uploads this run: `{uploads}`",
         f"Learned this run: `{learned}`",
@@ -211,27 +217,35 @@ def build_summary(scored: list[dict], uploads: int, learned: int, dupes: int, to
     ]
 
     for row in top:
-        lines.append(
+        text.append(
             f"`{row['cell']}` | score `{row['score']:.2f}` | "
             f"🔑 `{row['counts']['KEY']}/{row['total']}` | "
             f"⬆️ `{row['counts']['UPGRADE']}` | +1 `{row['counts']['PLUS']}` | 🎯 `{row['counts']['TARGET']}`"
         )
 
-    lines.append("")
-    lines.append("**Avoid / key-heavy:**")
+    text.append("")
+    text.append("**Avoid / key-heavy:**")
+
     for row in avoid:
-        lines.append(
+        text.append(
             f"`{row['cell']}` | keys `{row['counts']['KEY']}/{row['total']}` "
             f"({row['key_rate'] * 100:.0f}%)"
         )
 
-    lines.append("")
-    lines.append("Rows/cols counted from top-left.")
-    lines.append("KEY is treated as bad.")
-    return "\n".join(lines)
+    if bad_files:
+        text.append("")
+        text.append("Skipped unreadable files:")
+        for name in bad_files:
+            text.append(f"- `{name}`")
+
+    text.append("")
+    text.append("Rows/cols counted from top-left.")
+    text.append("KEY is treated as bad.")
+
+    return "\n".join(text)
 
 
-def make_csv(scored: list[dict]) -> discord.File:
+def make_csv(scored):
     s = io.StringIO()
     w = csv.writer(s)
     w.writerow(["cell", "score", "keys", "upgrade", "plus", "target", "total"])
@@ -254,10 +268,27 @@ def make_csv(scored: list[dict]) -> discord.File:
 
 
 class ChestPatternCog(commands.Cog):
-    def __init__(self, bot: commands.Bot):
+    def __init__(self, bot):
         self.bot = bot
 
     @app_commands.command(name="chest_pattern", description="Privately analyse chest screenshots")
+    @app_commands.describe(
+        screenshot_1="Screenshot 1",
+        screenshot_2="Screenshot 2",
+        screenshot_3="Screenshot 3",
+        screenshot_4="Screenshot 4",
+        screenshot_5="Screenshot 5",
+        screenshot_6="Screenshot 6",
+        screenshot_7="Screenshot 7",
+        screenshot_8="Screenshot 8",
+        screenshot_9="Screenshot 9",
+        screenshot_10="Screenshot 10",
+        screenshot_11="Screenshot 11",
+        screenshot_12="Screenshot 12",
+        screenshot_13="Screenshot 13",
+        screenshot_14="Screenshot 14",
+        screenshot_15="Screenshot 15",
+    )
     async def chest_pattern(
         self,
         interaction: discord.Interaction,
@@ -279,10 +310,10 @@ class ChestPatternCog(commands.Cog):
     ):
         await interaction.response.defer(ephemeral=True, thinking=True)
 
-        cv2, np, import_error = _import_cv_stack()
+        cv2, np, import_error = import_image_libs()
         if import_error:
             await interaction.followup.send(
-                f"Command loaded, but image libs failed to import:\n`{import_error}`",
+                f"`/chest_pattern` is registered, but image libs failed to load:\n`{import_error}`",
                 ephemeral=True,
             )
             return
@@ -295,14 +326,13 @@ class ChestPatternCog(commands.Cog):
         attachments = [a for a in attachments if a is not None]
 
         data = load_knowledge()
-        gk = guild_key(interaction)
-        g = ensure_guild(data, gk)
+        g = ensure_guild_data(data, get_guild_key(interaction))
 
         known_hashes = set(g["hashes"])
         learned = 0
         dupes = 0
-        bad_files: list[str] = []
-        all_new_rows: list[dict] = []
+        bad_files = []
+        new_rows = []
 
         for att in attachments:
             filename = att.filename or "unknown"
@@ -312,7 +342,7 @@ class ChestPatternCog(commands.Cog):
                 continue
 
             try:
-                raw = await att.read(use_cached=True)
+                raw = await att.read()
                 file_hash = hashlib.sha256(raw).hexdigest()
 
                 if file_hash in known_hashes:
@@ -321,12 +351,13 @@ class ChestPatternCog(commands.Cog):
 
                 arr = np.frombuffer(raw, np.uint8)
                 img = cv2.imdecode(arr, cv2.IMREAD_COLOR)
+
                 if img is None:
                     bad_files.append(filename)
                     continue
 
                 rows = analyse_image(cv2, np, img)
-                all_new_rows.extend(rows)
+                new_rows.extend(rows)
 
                 known_hashes.add(file_hash)
                 g["hashes"].append(file_hash)
@@ -336,15 +367,12 @@ class ChestPatternCog(commands.Cog):
             except Exception:
                 bad_files.append(filename)
 
-        if all_new_rows:
-            add_to_totals(g["totals"], all_new_rows)
+        if new_rows:
+            add_rows_to_totals(g["totals"], new_rows)
             save_knowledge(data)
 
         scored = score_totals(g["totals"])
-        summary = build_summary(scored, len(attachments), learned, dupes, g["images"])
-
-        if bad_files:
-            summary += "\n\nSkipped unreadable files:\n" + "\n".join(f"- `{x}`" for x in bad_files)
+        summary = build_summary(scored, len(attachments), learned, dupes, g["images"], bad_files)
 
         await interaction.followup.send(
             content=summary,
@@ -352,38 +380,7 @@ class ChestPatternCog(commands.Cog):
             ephemeral=True,
         )
 
-    @app_commands.command(name="chest_stats", description="Privately show chest knowledge stats")
-    async def chest_stats(self, interaction: discord.Interaction):
-        await interaction.response.defer(ephemeral=True, thinking=True)
 
-        data = load_knowledge()
-        gk = guild_key(interaction)
-        g = ensure_guild(data, gk)
-        scored = score_totals(g["totals"])
-
-        await interaction.followup.send(
-            content=build_summary(scored, 0, 0, 0, g["images"]),
-            file=make_csv(scored) if scored else None,
-            ephemeral=True,
-        )
-
-    @app_commands.command(name="chest_reset", description="Admin only: reset chest knowledge for this server")
-    async def chest_reset(self, interaction: discord.Interaction):
-        await interaction.response.defer(ephemeral=True, thinking=True)
-
-        if interaction.guild and not interaction.user.guild_permissions.administrator:
-            await interaction.followup.send("Admin only.", ephemeral=True)
-            return
-
-        data = load_knowledge()
-        data.setdefault("guilds", {})
-        data[guild_key(interaction)] = fresh_guild()
-        data["guilds"][guild_key(interaction)] = fresh_guild()
-        save_knowledge(data)
-
-        await interaction.followup.send("Chest knowledge reset.", ephemeral=True)
-
-
-async def setup(bot: commands.Bot):
+async def setup(bot):
     await bot.add_cog(ChestPatternCog(bot))
-    print("Loaded cog: cogs.chest_pattern")
+    
