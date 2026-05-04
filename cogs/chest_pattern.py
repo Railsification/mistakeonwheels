@@ -6,7 +6,6 @@ import hashlib
 from pathlib import Path
 from typing import Optional
 
-
 import discord
 from discord import app_commands
 from discord.ext import commands
@@ -24,17 +23,6 @@ CROP_SIZE_REL = 0.18
 
 VALID_EXTS = {".png", ".jpg", ".jpeg", ".webp"}
 SYMBOLS = ["UPGRADE", "PLUS", "TARGET", "KEY"]
-
-# User logic:
-# - KEY is bad
-# - TARGET is effectively "unopened / unknown"
-# - zero-key / high-target cells should probe early
-DEFAULT_WEIGHTS = {
-    "UPGRADE": 2.0,
-    "PLUS": 3.0,
-    "TARGET": 1.0,
-    "KEY": -100.0,
-}
 
 
 def import_image_libs():
@@ -55,6 +43,7 @@ def fresh_guild_data():
         "totals": totals,
         "hashes": [],
         "images": 0,
+        "runs": [],
     }
 
 
@@ -94,6 +83,7 @@ def ensure_guild_data(data, guild_key):
     g.setdefault("totals", {})
     g.setdefault("hashes", [])
     g.setdefault("images", 0)
+    g.setdefault("runs", [])
 
     for r in range(1, 4):
         for c in range(1, 5):
@@ -165,105 +155,133 @@ def add_rows_to_totals(totals, rows):
         totals[row["cell"]][row["symbol"]] += 1
 
 
-def build_cell_stats(totals):
+def rows_to_run_record(file_hash, rows):
+    cell_map = {row["cell"]: row["symbol"] for row in rows}
+    opened_count = sum(1 for symbol in cell_map.values() if symbol != "TARGET")
+    unopened_count = 12 - opened_count
+    return {
+        "hash": file_hash,
+        "opened_count": opened_count,
+        "unopened_count": unopened_count,
+        "cells": cell_map,
+    }
+
+
+def build_cell_stats(guild_data):
+    totals = guild_data["totals"]
+    runs = guild_data.get("runs", [])
     stats = []
 
     for cell, counts in totals.items():
-        total = sum(int(counts.get(s, 0)) for s in SYMBOLS)
-        if total <= 0:
-            total = 0
+        attempts = sum(int(counts.get(s, 0)) for s in SYMBOLS)
 
         key = int(counts.get("KEY", 0))
         upgrade = int(counts.get("UPGRADE", 0))
         plus = int(counts.get("PLUS", 0))
         target = int(counts.get("TARGET", 0))
+        opened = attempts - target
 
-        if total > 0:
-            key_rate = key / total
-            upgrade_rate = upgrade / total
-            plus_rate = plus / total
-            target_rate = target / total
+        key_rate_opened = key / opened if opened else 1.0
+        upgrade_rate_opened = upgrade / opened if opened else 0.0
+        plus_rate_opened = plus / opened if opened else 0.0
+        target_rate_total = target / attempts if attempts else 1.0
+        opened_rate_total = opened / attempts if attempts else 0.0
+
+        opened_depths = []
+        unopened_penalties = []
+
+        if runs:
+            for run in runs:
+                run_cells = run.get("cells", {})
+                symbol = run_cells.get(cell, "TARGET")
+                opened_count = int(run.get("opened_count", 0))
+                unopened_count = int(run.get("unopened_count", 12))
+
+                if symbol == "TARGET":
+                    # Worse if this cell stayed unopened when lots were still unopened.
+                    unopened_penalties.append(unopened_count / 12.0)
+                else:
+                    # Approximation: cell was opened by the time the run ended.
+                    # Lower end-depth means likely earlier / safer.
+                    opened_depths.append(opened_count)
+
+        if opened_depths:
+            avg_opened_depth = sum(opened_depths) / len(opened_depths)
+            early_bonus = (12.0 - avg_opened_depth) / 11.0
         else:
-            key_rate = 0.0
-            upgrade_rate = 0.0
-            plus_rate = 0.0
-            target_rate = 0.0
+            avg_opened_depth = 12.0
+            early_bonus = 0.0
 
-        weighted_score = (
-            (upgrade_rate * DEFAULT_WEIGHTS["UPGRADE"])
-            + (plus_rate * DEFAULT_WEIGHTS["PLUS"])
-            + (target_rate * DEFAULT_WEIGHTS["TARGET"])
-            + (key_rate * DEFAULT_WEIGHTS["KEY"])
+        if unopened_penalties:
+            unopened_badness = sum(unopened_penalties) / len(unopened_penalties)
+        else:
+            unopened_badness = 0.0
+
+        value_rate_opened = (upgrade_rate_opened * 1.0) + (plus_rate_opened * 1.25)
+
+        # Locked scoring:
+        # - keys are very bad
+        # - being frequently opened is good
+        # - being opened in shallower runs is good
+        # - staying unopened when many are unopened is bad
+        # - upgrades/+1 help, but not more than key safety
+        score = (
+            (value_rate_opened * 3.0)
+            + (opened_rate_total * 1.5)
+            + (early_bonus * 1.5)
+            - (key_rate_opened * 12.0)
+            - (unopened_badness * 2.5)
         )
 
         stats.append({
             "cell": cell,
-            "attempts": total,
+            "attempts": attempts,
+            "opened": opened,
             "key": key,
             "upgrade": upgrade,
             "plus": plus,
             "target": target,
-            "key_rate": key_rate,
-            "upgrade_rate": upgrade_rate,
-            "plus_rate": plus_rate,
-            "target_rate": target_rate,
-            "weighted_score": weighted_score,
+            "key_rate_opened": key_rate_opened,
+            "upgrade_rate_opened": upgrade_rate_opened,
+            "plus_rate_opened": plus_rate_opened,
+            "target_rate_total": target_rate_total,
+            "opened_rate_total": opened_rate_total,
+            "avg_opened_depth": avg_opened_depth,
+            "early_bonus": early_bonus,
+            "unopened_badness": unopened_badness,
+            "score": score,
         })
 
     return stats
 
 
 def rank_cells(stats):
-    # Locked logic:
-    # 1) lowest key rate
-    # 2) lowest key count
-    # 3) highest unopened/unknown rate
-    # 4) highest plus rate
-    # 5) highest upgrade rate
-    # 6) highest weighted score
     ranked = sorted(
         stats,
         key=lambda x: (
-            x["key_rate"],
+            -x["score"],
+            x["key_rate_opened"],
             x["key"],
-            -x["target_rate"],
-            -x["plus_rate"],
-            -x["upgrade_rate"],
-            -x["weighted_score"],
+            x["unopened_badness"],
+            -x["plus_rate_opened"],
+            -x["upgrade_rate_opened"],
             x["cell"],
         ),
     )
 
-    for idx, row in enumerate(ranked, start=1):
-        row["rank"] = idx
+    for i, row in enumerate(ranked, start=1):
+        row["rank"] = i
 
     return ranked
 
 
-def make_order_lines(ranked):
-    return [f"{row['rank']}. `{row['cell']}`" for row in ranked]
+def latest_remaining_cells(latest_rows):
+    if not latest_rows:
+        return set()
+    return {row["cell"] for row in latest_rows if row["symbol"] == "TARGET"}
 
 
-def filter_remaining_from_latest(latest_rows, ranked):
-    latest_by_cell = {row["cell"]: row["symbol"] for row in latest_rows}
-    remaining_cells = {cell for cell, sym in latest_by_cell.items() if sym == "TARGET"}
-    remaining_ranked = [row for row in ranked if row["cell"] in remaining_cells]
-
-    for idx, row in enumerate(remaining_ranked, start=1):
-        row["remaining_rank"] = idx
-
-    return remaining_ranked
-
-
-def build_summary(
-    ranked,
-    uploads,
-    learned,
-    dupes,
-    total_images,
-    bad_files,
-    latest_rows,
-):
+def build_summary(ranked, uploads, learned, dupes, total_images, bad_files, latest_rows):
     lines = [
         "**Chest Pattern**",
         f"Uploads this run: `{uploads}`",
@@ -274,44 +292,56 @@ def build_summary(
 
     if not ranked:
         lines.append("")
-        lines.append("No usable pattern data yet.")
-    else:
-        best = ranked[0]
+        lines.append("No usable data yet.")
+        return "\n".join(lines)
+
+    best = ranked[0]
+    remaining = latest_remaining_cells(latest_rows)
+    remaining_ranked = [row for row in ranked if row["cell"] in remaining]
+
+    lines.extend([
+        "",
+        f"**Best pick now:** `{best['cell']}`",
+        "",
+        "**Full order 1-12:**",
+    ])
+
+    for row in ranked:
+        lines.append(f"{row['rank']}. `{row['cell']}`")
+
+    if remaining_ranked:
         lines.extend([
             "",
-            f"**Best pick now:** `{best['cell']}`",
-            "",
-            "**Full order 1-12:**",
+            "**Remaining unopened from last uploaded screenshot:**",
         ])
-        lines.extend(make_order_lines(ranked))
+        for i, row in enumerate(remaining_ranked, start=1):
+            lines.append(f"{i}. `{row['cell']}`")
 
-        remaining_ranked = filter_remaining_from_latest(latest_rows, ranked) if latest_rows else []
-        if remaining_ranked:
-            lines.extend([
-                "",
-                "**Remaining unopened from last uploaded screenshot:**",
-            ])
-            lines.extend([f"{row['remaining_rank']}. `{row['cell']}`" for row in remaining_ranked])
+    lines.extend([
+        "",
+        "**Top 6 detail:**",
+    ])
 
-        lines.extend([
-            "",
-            "**Top 5 detail:**",
-        ])
-
-        for row in ranked[:5]:
-            lines.append(
-                f"`{row['cell']}` | keys `{row['key']}/{max(row['attempts'], 1)}` | "
-                f"unknown `{row['target']}` | +1 `{row['plus']}` | up `{row['upgrade']}`"
-            )
+    for row in ranked[:6]:
+        lines.append(
+            f"`{row['cell']}` | keys `{row['key']}/{max(row['opened'], 1)}` | "
+            f"unknown `{row['target']}` | +1 `{row['plus']}` | up `{row['upgrade']}` | "
+            f"depth `{row['avg_opened_depth']:.2f}` | unopened-bad `{row['unopened_badness']:.2f}`"
+        )
 
     if bad_files:
-        lines.append("")
-        lines.append("Skipped unreadable files:")
+        lines.extend([
+            "",
+            "Skipped unreadable files:",
+        ])
         for name in bad_files:
             lines.append(f"- `{name}`")
 
-    lines.append("")
-    lines.append("Rows top->bottom. Columns left->right.")
+    lines.extend([
+        "",
+        "Rows top->bottom. Columns left->right.",
+        "Order-aware = approximate from how many cells were already opened when the run ended.",
+    ])
 
     return "\n".join(lines)
 
@@ -323,15 +353,20 @@ def make_csv(ranked):
         "rank",
         "cell",
         "attempts",
+        "opened",
         "key",
         "upgrade",
         "plus",
         "target",
-        "key_rate",
-        "upgrade_rate",
-        "plus_rate",
-        "target_rate",
-        "weighted_score",
+        "key_rate_opened",
+        "upgrade_rate_opened",
+        "plus_rate_opened",
+        "target_rate_total",
+        "opened_rate_total",
+        "avg_opened_depth",
+        "early_bonus",
+        "unopened_badness",
+        "score",
     ])
 
     for row in ranked:
@@ -339,15 +374,20 @@ def make_csv(ranked):
             row["rank"],
             row["cell"],
             row["attempts"],
+            row["opened"],
             row["key"],
             row["upgrade"],
             row["plus"],
             row["target"],
-            round(row["key_rate"], 4),
-            round(row["upgrade_rate"], 4),
-            round(row["plus_rate"], 4),
-            round(row["target_rate"], 4),
-            round(row["weighted_score"], 4),
+            round(row["key_rate_opened"], 4),
+            round(row["upgrade_rate_opened"], 4),
+            round(row["plus_rate_opened"], 4),
+            round(row["target_rate_total"], 4),
+            round(row["opened_rate_total"], 4),
+            round(row["avg_opened_depth"], 4),
+            round(row["early_bonus"], 4),
+            round(row["unopened_badness"], 4),
+            round(row["score"], 4),
         ])
 
     return discord.File(
@@ -398,19 +438,26 @@ class ChestPatternCog(commands.Cog):
             return
 
         attachments = [
-            screenshot_1, screenshot_2, screenshot_3, screenshot_4, screenshot_5,
-            screenshot_6, screenshot_7, screenshot_8, screenshot_9, screenshot_10,
+            screenshot_1,
+            screenshot_2,
+            screenshot_3,
+            screenshot_4,
+            screenshot_5,
+            screenshot_6,
+            screenshot_7,
+            screenshot_8,
+            screenshot_9,
+            screenshot_10,
         ]
         attachments = [a for a in attachments if a is not None]
 
         data = load_knowledge()
-        g = ensure_guild_data(data, get_guild_key(interaction))
+        guild_data = ensure_guild_data(data, get_guild_key(interaction))
 
-        known_hashes = set(g["hashes"])
+        known_hashes = set(guild_data["hashes"])
         learned = 0
         dupes = 0
         bad_files = []
-        new_rows = []
         latest_rows = []
 
         for att in attachments:
@@ -423,9 +470,6 @@ class ChestPatternCog(commands.Cog):
             try:
                 raw = await att.read()
                 file_hash = hashlib.sha256(raw).hexdigest()
-
-                arr = None
-                img = None
 
                 arr = np.frombuffer(raw, np.uint8)
                 img = cv2.imdecode(arr, cv2.IMREAD_COLOR)
@@ -441,27 +485,27 @@ class ChestPatternCog(commands.Cog):
                     dupes += 1
                     continue
 
-                new_rows.extend(current_rows)
+                add_rows_to_totals(guild_data["totals"], current_rows)
+                guild_data["runs"].append(rows_to_run_record(file_hash, current_rows))
+                guild_data["hashes"].append(file_hash)
+                guild_data["images"] += 1
                 known_hashes.add(file_hash)
-                g["hashes"].append(file_hash)
-                g["images"] += 1
                 learned += 1
 
             except Exception:
                 bad_files.append(filename)
 
-        if new_rows:
-            add_rows_to_totals(g["totals"], new_rows)
+        if learned > 0:
             save_knowledge(data)
 
-        stats = build_cell_stats(g["totals"])
+        stats = build_cell_stats(guild_data)
         ranked = rank_cells(stats)
         summary = build_summary(
             ranked=ranked,
             uploads=len(attachments),
             learned=learned,
             dupes=dupes,
-            total_images=g["images"],
+            total_images=guild_data["images"],
             bad_files=bad_files,
             latest_rows=latest_rows,
         )
@@ -483,8 +527,8 @@ class ChestPatternCog(commands.Cog):
         await interaction.response.defer(ephemeral=True, thinking=True)
 
         data = load_knowledge()
-        g = ensure_guild_data(data, get_guild_key(interaction))
-        stats = build_cell_stats(g["totals"])
+        guild_data = ensure_guild_data(data, get_guild_key(interaction))
+        stats = build_cell_stats(guild_data)
         ranked = rank_cells(stats)
 
         summary = build_summary(
@@ -492,7 +536,7 @@ class ChestPatternCog(commands.Cog):
             uploads=0,
             learned=0,
             dupes=0,
-            total_images=g["images"],
+            total_images=guild_data["images"],
             bad_files=[],
             latest_rows=[],
         )
