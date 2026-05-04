@@ -6,6 +6,7 @@ import hashlib
 from pathlib import Path
 from typing import Optional
 
+
 import discord
 from discord import app_commands
 from discord.ext import commands
@@ -24,11 +25,15 @@ CROP_SIZE_REL = 0.18
 VALID_EXTS = {".png", ".jpg", ".jpeg", ".webp"}
 SYMBOLS = ["UPGRADE", "PLUS", "TARGET", "KEY"]
 
+# User logic:
+# - KEY is bad
+# - TARGET is effectively "unopened / unknown"
+# - zero-key / high-target cells should probe early
 DEFAULT_WEIGHTS = {
-    "UPGRADE": 3.0,
-    "PLUS": 2.0,
-    "TARGET": 0.0,
-    "KEY": -10.0,
+    "UPGRADE": 2.0,
+    "PLUS": 3.0,
+    "TARGET": 1.0,
+    "KEY": -100.0,
 }
 
 
@@ -160,36 +165,105 @@ def add_rows_to_totals(totals, rows):
         totals[row["cell"]][row["symbol"]] += 1
 
 
-def score_totals(totals):
-    scored = []
+def build_cell_stats(totals):
+    stats = []
 
     for cell, counts in totals.items():
         total = sum(int(counts.get(s, 0)) for s in SYMBOLS)
         if total <= 0:
-            continue
+            total = 0
 
-        score = 0.0
-        for s in SYMBOLS:
-            score += (int(counts.get(s, 0)) / total) * DEFAULT_WEIGHTS[s]
+        key = int(counts.get("KEY", 0))
+        upgrade = int(counts.get("UPGRADE", 0))
+        plus = int(counts.get("PLUS", 0))
+        target = int(counts.get("TARGET", 0))
 
-        scored.append({
+        if total > 0:
+            key_rate = key / total
+            upgrade_rate = upgrade / total
+            plus_rate = plus / total
+            target_rate = target / total
+        else:
+            key_rate = 0.0
+            upgrade_rate = 0.0
+            plus_rate = 0.0
+            target_rate = 0.0
+
+        weighted_score = (
+            (upgrade_rate * DEFAULT_WEIGHTS["UPGRADE"])
+            + (plus_rate * DEFAULT_WEIGHTS["PLUS"])
+            + (target_rate * DEFAULT_WEIGHTS["TARGET"])
+            + (key_rate * DEFAULT_WEIGHTS["KEY"])
+        )
+
+        stats.append({
             "cell": cell,
-            "score": score,
-            "total": total,
-            "counts": {
-                "UPGRADE": int(counts.get("UPGRADE", 0)),
-                "PLUS": int(counts.get("PLUS", 0)),
-                "TARGET": int(counts.get("TARGET", 0)),
-                "KEY": int(counts.get("KEY", 0)),
-            },
-            "key_rate": int(counts.get("KEY", 0)) / total,
+            "attempts": total,
+            "key": key,
+            "upgrade": upgrade,
+            "plus": plus,
+            "target": target,
+            "key_rate": key_rate,
+            "upgrade_rate": upgrade_rate,
+            "plus_rate": plus_rate,
+            "target_rate": target_rate,
+            "weighted_score": weighted_score,
         })
 
-    scored.sort(key=lambda x: x["score"], reverse=True)
-    return scored
+    return stats
 
 
-def build_summary(scored, uploads, learned, dupes, total_images, bad_files):
+def rank_cells(stats):
+    # Locked logic:
+    # 1) lowest key rate
+    # 2) lowest key count
+    # 3) highest unopened/unknown rate
+    # 4) highest plus rate
+    # 5) highest upgrade rate
+    # 6) highest weighted score
+    ranked = sorted(
+        stats,
+        key=lambda x: (
+            x["key_rate"],
+            x["key"],
+            -x["target_rate"],
+            -x["plus_rate"],
+            -x["upgrade_rate"],
+            -x["weighted_score"],
+            x["cell"],
+        ),
+    )
+
+    for idx, row in enumerate(ranked, start=1):
+        row["rank"] = idx
+
+    return ranked
+
+
+def make_order_lines(ranked):
+    return [f"{row['rank']}. `{row['cell']}`" for row in ranked]
+
+
+def filter_remaining_from_latest(latest_rows, ranked):
+    latest_by_cell = {row["cell"]: row["symbol"] for row in latest_rows}
+    remaining_cells = {cell for cell, sym in latest_by_cell.items() if sym == "TARGET"}
+    remaining_ranked = [row for row in ranked if row["cell"] in remaining_cells]
+
+    for idx, row in enumerate(remaining_ranked, start=1):
+        row["remaining_rank"] = idx
+
+    return remaining_ranked
+
+
+def build_summary(
+    ranked,
+    uploads,
+    learned,
+    dupes,
+    total_images,
+    bad_files,
+    latest_rows,
+):
     lines = [
         "**Chest Pattern**",
         f"Uploads this run: `{uploads}`",
@@ -198,36 +272,36 @@ def build_summary(scored, uploads, learned, dupes, total_images, bad_files):
         f"Total knowledge base images: `{total_images}`",
     ]
 
-    if not scored:
+    if not ranked:
         lines.append("")
         lines.append("No usable pattern data yet.")
     else:
-        best = scored[0]
-        top = scored[:5]
-        avoid = sorted(scored, key=lambda x: x["key_rate"], reverse=True)[:5]
-
+        best = ranked[0]
         lines.extend([
             "",
             f"**Best pick now:** `{best['cell']}`",
-            f"Score: `{best['score']:.2f}` | Keys: `{best['counts']['KEY']}/{best['total']}`",
             "",
-            "**Top cells:**",
+            "**Full order 1-12:**",
+        ])
+        lines.extend(make_order_lines(ranked))
+
+        remaining_ranked = filter_remaining_from_latest(latest_rows, ranked) if latest_rows else []
+        if remaining_ranked:
+            lines.extend([
+                "",
+                "**Remaining unopened from last uploaded screenshot:**",
+            ])
+            lines.extend([f"{row['remaining_rank']}. `{row['cell']}`" for row in remaining_ranked])
+
+        lines.extend([
+            "",
+            "**Top 5 detail:**",
         ])
 
-        for row in top:
+        for row in ranked[:5]:
             lines.append(
-                f"`{row['cell']}` | score `{row['score']:.2f}` | "
-                f"🔑 `{row['counts']['KEY']}/{row['total']}` | "
-                f"⬆️ `{row['counts']['UPGRADE']}` | +1 `{row['counts']['PLUS']}` | 🎯 `{row['counts']['TARGET']}`"
-            )
-
-        lines.append("")
-        lines.append("**Avoid / key-heavy:**")
-
-        for row in avoid:
-            lines.append(
-                f"`{row['cell']}` | keys `{row['counts']['KEY']}/{row['total']}` "
-                f"({row['key_rate'] * 100:.0f}%)"
+                f"`{row['cell']}` | keys `{row['key']}/{max(row['attempts'], 1)}` | "
+                f"unknown `{row['target']}` | +1 `{row['plus']}` | up `{row['upgrade']}`"
             )
 
     if bad_files:
@@ -237,27 +311,43 @@ def build_summary(scored, uploads, learned, dupes, total_images, bad_files):
             lines.append(f"- `{name}`")
 
     lines.append("")
-    lines.append("Rows/cols counted from top-left.")
-    lines.append("KEY is treated as bad.")
+    lines.append("Rows top->bottom. Columns left->right.")
 
     return "\n".join(lines)
 
 
-def make_csv(scored):
+def make_csv(ranked):
     s = io.StringIO()
     w = csv.writer(s)
-    w.writerow(["cell", "score", "keys", "upgrade", "plus", "target", "total", "key_rate"])
+    w.writerow([
+        "rank",
+        "cell",
+        "attempts",
+        "key",
+        "upgrade",
+        "plus",
+        "target",
+        "key_rate",
+        "upgrade_rate",
+        "plus_rate",
+        "target_rate",
+        "weighted_score",
+    ])
 
-    for row in scored:
+    for row in ranked:
         w.writerow([
+            row["rank"],
             row["cell"],
-            round(row["score"], 4),
-            row["counts"]["KEY"],
-            row["counts"]["UPGRADE"],
-            row["counts"]["PLUS"],
-            row["counts"]["TARGET"],
-            row["total"],
+            row["attempts"],
+            row["key"],
+            row["upgrade"],
+            row["plus"],
+            row["target"],
             round(row["key_rate"], 4),
+            round(row["upgrade_rate"], 4),
+            round(row["plus_rate"], 4),
+            round(row["target_rate"], 4),
+            round(row["weighted_score"], 4),
         ])
 
     return discord.File(
@@ -321,6 +411,7 @@ class ChestPatternCog(commands.Cog):
         dupes = 0
         bad_files = []
         new_rows = []
+        latest_rows = []
 
         for att in attachments:
             filename = att.filename or "unknown"
@@ -333,9 +424,8 @@ class ChestPatternCog(commands.Cog):
                 raw = await att.read()
                 file_hash = hashlib.sha256(raw).hexdigest()
 
-                if file_hash in known_hashes:
-                    dupes += 1
-                    continue
+                arr = None
+                img = None
 
                 arr = np.frombuffer(raw, np.uint8)
                 img = cv2.imdecode(arr, cv2.IMREAD_COLOR)
@@ -344,9 +434,14 @@ class ChestPatternCog(commands.Cog):
                     bad_files.append(filename)
                     continue
 
-                rows = analyse_image(cv2, np, img)
-                new_rows.extend(rows)
+                current_rows = analyse_image(cv2, np, img)
+                latest_rows = current_rows
 
+                if file_hash in known_hashes:
+                    dupes += 1
+                    continue
+
+                new_rows.extend(current_rows)
                 known_hashes.add(file_hash)
                 g["hashes"].append(file_hash)
                 g["images"] += 1
@@ -359,13 +454,22 @@ class ChestPatternCog(commands.Cog):
             add_rows_to_totals(g["totals"], new_rows)
             save_knowledge(data)
 
-        scored = score_totals(g["totals"])
-        summary = build_summary(scored, len(attachments), learned, dupes, g["images"], bad_files)
+        stats = build_cell_stats(g["totals"])
+        ranked = rank_cells(stats)
+        summary = build_summary(
+            ranked=ranked,
+            uploads=len(attachments),
+            learned=learned,
+            dupes=dupes,
+            total_images=g["images"],
+            bad_files=bad_files,
+            latest_rows=latest_rows,
+        )
 
-        if scored:
+        if ranked:
             await interaction.followup.send(
                 content=summary,
-                file=make_csv(scored),
+                file=make_csv(ranked),
                 ephemeral=True,
             )
         else:
@@ -380,13 +484,23 @@ class ChestPatternCog(commands.Cog):
 
         data = load_knowledge()
         g = ensure_guild_data(data, get_guild_key(interaction))
-        scored = score_totals(g["totals"])
-        summary = build_summary(scored, 0, 0, 0, g["images"], [])
+        stats = build_cell_stats(g["totals"])
+        ranked = rank_cells(stats)
 
-        if scored:
+        summary = build_summary(
+            ranked=ranked,
+            uploads=0,
+            learned=0,
+            dupes=0,
+            total_images=g["images"],
+            bad_files=[],
+            latest_rows=[],
+        )
+
+        if ranked:
             await interaction.followup.send(
                 content=summary,
-                file=make_csv(scored),
+                file=make_csv(ranked),
                 ephemeral=True,
             )
         else:
