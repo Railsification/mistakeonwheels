@@ -1,4 +1,6 @@
 import os
+from pathlib import Path
+
 import discord
 from discord.ext import commands
 from dotenv import load_dotenv
@@ -40,19 +42,36 @@ class HotBot(commands.Bot):
             "openai_image_model": OPENAI_IMAGE_MODEL,
         }
 
+    async def _autoload_cogs(self):
+        cogs_dir = Path(__file__).parent / "cogs"
+
+        if not cogs_dir.exists():
+            err(f"Cogs folder not found: {cogs_dir}")
+            return
+
+        loaded = []
+        failed = []
+
+        for file in sorted(cogs_dir.glob("*.py")):
+            if file.name == "__init__.py":
+                continue
+
+            ext = f"cogs.{file.stem}"
+
+            try:
+                await self.load_extension(ext)
+                loaded.append(ext)
+            except Exception as e:
+                failed.append((ext, repr(e)))
+
+        ok(f"Loaded {len(loaded)} cog(s)")
+
+        if failed:
+            for ext, reason in failed:
+                err(f"Failed to load {ext}: {reason}")
+
     async def setup_hook(self):
-        await self.load_extension("cogs.joins")
-        await self.load_extension("cogs.polls")
-        await self.load_extension("cogs.images")
-        await self.load_extension("cogs.speech")
-        await self.load_extension("cogs.pfp")
-        await self.load_extension("cogs.admin")
-        await self.load_extension("cogs.misc")
-        await self.load_extension("cogs.games")
-        await self.load_extension("cogs.tictactoe")
-        await self.load_extension("cogs.connect4")
-        await self.load_extension("cogs.canyon")
-        await self.load_extension("cogs.chest_pattern")
+        await self._autoload_cogs()
 
         if not GUILD_ID:
             err("GUILD_ID missing or invalid in .env")
