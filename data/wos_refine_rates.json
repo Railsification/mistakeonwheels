@@ -1,16 +1,7 @@
 {
-  "version": "1.0.0",
   "attempts_above_max_use_last_tier": true,
-  "max_search_attempts": 250000,
-  "weekly_reset_weekday": 0,
   "first_refine_discount": 0.5,
-  "notes": [
-    "Probabilities and RFC outcomes are from the provided screenshot.",
-    "The min/max attempt bands below are still editable and should be confirmed if they differ in-game.",
-    "Current attempt bands are kept as 1-20, 21-40, 41-60, 61-80, 81-100 until corrected.",
-    "The first refine of each day uses the configured 50% discount.",
-    "Refine tiers reset weekly on Monday."
-  ],
+  "max_search_attempts": 250000,
   "tiers": [
     {
       "name": "Tier 1",
@@ -20,15 +11,15 @@
       "outcomes": [
         {
           "refined_fire_crystals": 1,
-          "probability": 65
+          "probability": 65.0
         },
         {
           "refined_fire_crystals": 2,
-          "probability": 25
+          "probability": 25.0
         },
         {
           "refined_fire_crystals": 3,
-          "probability": 10
+          "probability": 10.0
         }
       ]
     },
@@ -40,11 +31,11 @@
       "outcomes": [
         {
           "refined_fire_crystals": 2,
-          "probability": 85
+          "probability": 85.0
         },
         {
           "refined_fire_crystals": 3,
-          "probability": 15
+          "probability": 15.0
         }
       ]
     },
@@ -56,7 +47,7 @@
       "outcomes": [
         {
           "refined_fire_crystals": 3,
-          "probability": 85
+          "probability": 85.0
         },
         {
           "refined_fire_crystals": 4,
@@ -64,7 +55,7 @@
         },
         {
           "refined_fire_crystals": 5,
-          "probability": 2
+          "probability": 2.0
         },
         {
           "refined_fire_crystals": 6,
@@ -80,23 +71,23 @@
       "outcomes": [
         {
           "refined_fire_crystals": 3,
-          "probability": 75
+          "probability": 75.0
         },
         {
           "refined_fire_crystals": 4,
-          "probability": 15
+          "probability": 15.0
         },
         {
           "refined_fire_crystals": 5,
-          "probability": 5
+          "probability": 5.0
         },
         {
           "refined_fire_crystals": 6,
-          "probability": 3
+          "probability": 3.0
         },
         {
           "refined_fire_crystals": 7,
-          "probability": 1
+          "probability": 1.0
         },
         {
           "refined_fire_crystals": 8,
@@ -116,19 +107,19 @@
       "outcomes": [
         {
           "refined_fire_crystals": 3,
-          "probability": 70
+          "probability": 70.0
         },
         {
           "refined_fire_crystals": 4,
-          "probability": 12
+          "probability": 12.0
         },
         {
           "refined_fire_crystals": 5,
-          "probability": 9
+          "probability": 9.0
         },
         {
           "refined_fire_crystals": 6,
-          "probability": 4
+          "probability": 4.0
         },
         {
           "refined_fire_crystals": 7,
@@ -136,11 +127,11 @@
         },
         {
           "refined_fire_crystals": 8,
-          "probability": 1
+          "probability": 1.0
         },
         {
           "refined_fire_crystals": 9,
-          "probability": 1
+          "probability": 1.0
         },
         {
           "refined_fire_crystals": 10,
