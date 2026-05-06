@@ -1,6 +1,7 @@
 {
-  "attempts_above_max_use_last_tier": true,
+  "timezone_note": "All WoS-related date maths should use UTC.",
   "first_refine_discount": 0.5,
+  "attempts_above_max_use_last_tier": true,
   "max_search_attempts": 250000,
   "tiers": [
     {
