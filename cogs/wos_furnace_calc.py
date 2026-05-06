@@ -803,33 +803,40 @@ class WOSFurnaceCalculator(commands.Cog):
     def _build_help_embeds(self) -> List[discord.Embed]:
         overview = self._base_embed(
             "WoS Furnace Calculator Help",
-            "Use saved profiles for your current resources, then run the target-date calculators.",
+            "Use your saved profile for your current resources, then run the calculator you need.",
         )
         overview.add_field(
-            name="Setup once",
+            name="What each command does",
             value=(
-                "1. `/feature_channel_add feature:wos_furnace channel:#channel`\n"
-                "2. `/furnace_profile_set ...`\n"
-                "3. Edit `wos_furnace_upgrades.json` / `wos_refine_rates.json` if needed\n"
-                "4. `/furnace_reference_reload` after JSON changes"
-            ),
-            inline=False,
-        )
-        overview.add_field(
-            name="Main commands",
-            value=(
-                "`/furnace_refines_needed` = bot works out the weekly refines needed by a date\n"
-                "`/furnace_upgrade_forecast` = you enter weekly refines and it tells you what level you can reach\n"
-                "`/furnace_profile_view` = check saved profile"
+                "`/furnace_profile_set` = save your current level, FC, RFC and weekly income
+"
+                "`/furnace_profile_view` = check what you have saved
+"
+                "`/furnace_refines_needed` = bot works out how many refines you need by a target date
+"
+                "`/furnace_upgrade_forecast` = you enter weekly refines and it tells you what level you can reach"
             ),
             inline=False,
         )
         overview.add_field(
             name="Packages",
             value=(
-                "`minimum` = Furnace + Embassy + required troop camp\n"
-                "`all_camps` = Furnace + Embassy + all three troop camps\n"
+                "`minimum` = Furnace + Embassy + required troop camp
+"
+                "`all_camps` = Furnace + Embassy + Infantry + Marksman + Lancer camps
+"
                 "`full_furnace` = Full package including support buildings"
+            ),
+            inline=False,
+        )
+        overview.add_field(
+            name="Quick start",
+            value=(
+                "1. Save your profile with `/furnace_profile_set`
+"
+                "2. Use `/furnace_refines_needed` to solve the weekly refine plan for a target level/date
+"
+                "3. Use `/furnace_upgrade_forecast` if you already know how many weekly refines you want to do"
             ),
             inline=False,
         )
@@ -838,25 +845,31 @@ class WOSFurnaceCalculator(commands.Cog):
         details.add_field(
             name="Refine maths",
             value=(
-                "- Tiers reset each Monday in UTC\n"
-                "- First refine of each day is 50% off\n"
-                "- Weekly template is shown as Monday bulk + 1 each day after that where possible\n"
+                "- Tiers reset each Monday in UTC
+"
+                "- First refine of each day is 50% off
+"
+                "- Weekly plan is shown as Monday bulk + 1 each day after where possible
+"
                 "- Output shows both guaranteed/minimum RFC and expected/theoretical RFC"
             ),
             inline=False,
         )
         details.add_field(
-            name="When budget is short",
+            name="If budget is short",
             value=(
-                "If you do not have enough FC budget for the full target, the bot also shows the biggest refine plan you can afford and what that budget-limited plan can still reach by the date."
+                "If you do not have enough FC or RFC for the full target, the bot shows what is still possible with your current budget and where the blocker is."
             ),
             inline=False,
         )
         details.add_field(
-            name="Example",
+            name="Examples",
             value=(
-                "`/furnace_refines_needed target_level:FC10 target_date:2026-06-16 use_saved:true`\n"
-                "`/furnace_upgrade_forecast target_date:2026-06-16 weekly_refines:60 use_saved:true`"
+                "`/furnace_refines_needed target_level:FC10 target_date:2026-06-16 use_saved:true`
+"
+                "`/furnace_upgrade_forecast target_date:2026-06-16 weekly_refines:60 use_saved:true`
+"
+                "`/furnace_profile_update current_fire_crystals:6000 current_refined_fire_crystals:700`"
             ),
             inline=False,
         )
@@ -1043,7 +1056,7 @@ class WOSFurnaceCalculator(commands.Cog):
         await ensure_deferred(interaction, ephemeral=True)
         await interaction.followup.send(embeds=self._build_help_embeds(), ephemeral=True)
 
-    @app_commands.command(name="furnace_post_help", description="Post the furnace help sheet into a channel.")
+    @app_commands.command(name="furnace_post_help", description="Post the player help sheet into a channel.")
     @app_commands.describe(channel="Channel to post the help sheet into")
     async def furnace_post_help(self, interaction: discord.Interaction, channel: discord.TextChannel) -> None:
         log_cmd("furnace_post_help", interaction)
