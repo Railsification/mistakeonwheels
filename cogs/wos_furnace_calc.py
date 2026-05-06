@@ -1,10 +1,8 @@
 from __future__ import annotations
 
-import json
-import math
 from dataclasses import dataclass
 from datetime import date, datetime, timedelta
-from pathlib import Path
+import math
 from typing import Any, Dict, List, Optional
 from zoneinfo import ZoneInfo
 
@@ -14,474 +12,134 @@ from discord.ext import commands
 
 from core.logger import log_cmd
 from core.settings import SettingsManager
-from core.utils import DATA_DIR, ensure_deferred, save_json
+from core.utils import DATA_DIR, ensure_deferred, load_json, save_json
 
 
+FEATURE_KEY = "wos_furnace"
 UPGRADES_PATH = DATA_DIR / "wos_furnace_upgrades.json"
 REFINES_PATH = DATA_DIR / "wos_refine_rates.json"
 PROFILES_PATH = DATA_DIR / "wos_furnace_profiles.json"
-FEATURE_KEY = "wos_furnace"
 
 
-DEFAULT_UPGRADES: Dict[str, Any] = {
-    "timezone": "UTC",
-    "levels": [
-        {
-            "level": "FC0",
-            "next_level": "FC1",
-            "packages": {
-                "minimum": {
-                    "description": "Furnace + Embassy + choose 1 troop camp.",
-                    "requirements": [
-                        {"building": "Furnace", "fire_crystals": 132, "refined_fire_crystals": 0},
-                        {"building": "Embassy", "fire_crystals": 33, "refined_fire_crystals": 0},
-                        {
-                            "choice_group": "Troop Camp",
-                            "choose": 1,
-                            "options": [
-                                {"building": "Infantry Camp", "fire_crystals": 59, "refined_fire_crystals": 0},
-                                {"building": "Marksman Camp", "fire_crystals": 59, "refined_fire_crystals": 0},
-                                {"building": "Lancer Camp", "fire_crystals": 59, "refined_fire_crystals": 0},
-                            ],
-                        },
-                    ],
-                },
-                "all_camps": {
-                    "description": "Furnace + Embassy + all 3 troop camps.",
-                    "requirements": [
-                        {"building": "Furnace", "fire_crystals": 132, "refined_fire_crystals": 0},
-                        {"building": "Embassy", "fire_crystals": 33, "refined_fire_crystals": 0},
-                        {"building": "Infantry Camp", "fire_crystals": 59, "refined_fire_crystals": 0},
-                        {"building": "Marksman Camp", "fire_crystals": 59, "refined_fire_crystals": 0},
-                        {"building": "Lancer Camp", "fire_crystals": 59, "refined_fire_crystals": 0},
-                    ],
-                },
-                "full_furnace": {
-                    "description": "Furnace + Embassy + all camps + Command Center + Infirmary.",
-                    "requirements": [
-                        {"building": "Furnace", "fire_crystals": 132, "refined_fire_crystals": 0},
-                        {"building": "Embassy", "fire_crystals": 33, "refined_fire_crystals": 0},
-                        {"building": "Infantry Camp", "fire_crystals": 59, "refined_fire_crystals": 0},
-                        {"building": "Marksman Camp", "fire_crystals": 59, "refined_fire_crystals": 0},
-                        {"building": "Lancer Camp", "fire_crystals": 59, "refined_fire_crystals": 0},
-                        {"building": "Command Center", "fire_crystals": 26, "refined_fire_crystals": 0},
-                        {"building": "Infirmary", "fire_crystals": 26, "refined_fire_crystals": 0},
-                    ],
-                },
-            },
-        },
-        {
-            "level": "FC1",
-            "next_level": "FC2",
-            "packages": {
-                "minimum": {
-                    "description": "Furnace + Embassy + choose 1 troop camp.",
-                    "requirements": [
-                        {"building": "Furnace", "fire_crystals": 158, "refined_fire_crystals": 0},
-                        {"building": "Embassy", "fire_crystals": 39, "refined_fire_crystals": 0},
-                        {
-                            "choice_group": "Troop Camp",
-                            "choose": 1,
-                            "options": [
-                                {"building": "Infantry Camp", "fire_crystals": 71, "refined_fire_crystals": 0},
-                                {"building": "Marksman Camp", "fire_crystals": 71, "refined_fire_crystals": 0},
-                                {"building": "Lancer Camp", "fire_crystals": 71, "refined_fire_crystals": 0},
-                            ],
-                        },
-                    ],
-                },
-                "all_camps": {
-                    "description": "Furnace + Embassy + all 3 troop camps.",
-                    "requirements": [
-                        {"building": "Furnace", "fire_crystals": 158, "refined_fire_crystals": 0},
-                        {"building": "Embassy", "fire_crystals": 39, "refined_fire_crystals": 0},
-                        {"building": "Infantry Camp", "fire_crystals": 71, "refined_fire_crystals": 0},
-                        {"building": "Marksman Camp", "fire_crystals": 71, "refined_fire_crystals": 0},
-                        {"building": "Lancer Camp", "fire_crystals": 71, "refined_fire_crystals": 0},
-                    ],
-                },
-                "full_furnace": {
-                    "description": "Furnace + Embassy + all camps + Command Center + Infirmary.",
-                    "requirements": [
-                        {"building": "Furnace", "fire_crystals": 158, "refined_fire_crystals": 0},
-                        {"building": "Embassy", "fire_crystals": 39, "refined_fire_crystals": 0},
-                        {"building": "Infantry Camp", "fire_crystals": 71, "refined_fire_crystals": 0},
-                        {"building": "Marksman Camp", "fire_crystals": 71, "refined_fire_crystals": 0},
-                        {"building": "Lancer Camp", "fire_crystals": 71, "refined_fire_crystals": 0},
-                        {"building": "Command Center", "fire_crystals": 31, "refined_fire_crystals": 0},
-                        {"building": "Infirmary", "fire_crystals": 31, "refined_fire_crystals": 0},
-                    ],
-                },
-            },
-        },
-        {
-            "level": "FC2",
-            "next_level": "FC3",
-            "packages": {
-                "minimum": {
-                    "description": "Furnace + Embassy + choose 1 troop camp.",
-                    "requirements": [
-                        {"building": "Furnace", "fire_crystals": 238, "refined_fire_crystals": 0},
-                        {"building": "Embassy", "fire_crystals": 59, "refined_fire_crystals": 0},
-                        {
-                            "choice_group": "Troop Camp",
-                            "choose": 1,
-                            "options": [
-                                {"building": "Infantry Camp", "fire_crystals": 107, "refined_fire_crystals": 0},
-                                {"building": "Marksman Camp", "fire_crystals": 107, "refined_fire_crystals": 0},
-                                {"building": "Lancer Camp", "fire_crystals": 107, "refined_fire_crystals": 0},
-                            ],
-                        },
-                    ],
-                },
-                "all_camps": {
-                    "description": "Furnace + Embassy + all 3 troop camps.",
-                    "requirements": [
-                        {"building": "Furnace", "fire_crystals": 238, "refined_fire_crystals": 0},
-                        {"building": "Embassy", "fire_crystals": 59, "refined_fire_crystals": 0},
-                        {"building": "Infantry Camp", "fire_crystals": 107, "refined_fire_crystals": 0},
-                        {"building": "Marksman Camp", "fire_crystals": 107, "refined_fire_crystals": 0},
-                        {"building": "Lancer Camp", "fire_crystals": 107, "refined_fire_crystals": 0},
-                    ],
-                },
-                "full_furnace": {
-                    "description": "Furnace + Embassy + all camps + Command Center + Infirmary.",
-                    "requirements": [
-                        {"building": "Furnace", "fire_crystals": 238, "refined_fire_crystals": 0},
-                        {"building": "Embassy", "fire_crystals": 59, "refined_fire_crystals": 0},
-                        {"building": "Infantry Camp", "fire_crystals": 107, "refined_fire_crystals": 0},
-                        {"building": "Marksman Camp", "fire_crystals": 107, "refined_fire_crystals": 0},
-                        {"building": "Lancer Camp", "fire_crystals": 107, "refined_fire_crystals": 0},
-                        {"building": "Command Center", "fire_crystals": 47, "refined_fire_crystals": 0},
-                        {"building": "Infirmary", "fire_crystals": 47, "refined_fire_crystals": 0},
-                    ],
-                },
-            },
-        },
-        {
-            "level": "FC3",
-            "next_level": "FC4",
-            "packages": {
-                "minimum": {
-                    "description": "Furnace + Embassy + choose 1 troop camp.",
-                    "requirements": [
-                        {"building": "Furnace", "fire_crystals": 280, "refined_fire_crystals": 0},
-                        {"building": "Embassy", "fire_crystals": 70, "refined_fire_crystals": 0},
-                        {
-                            "choice_group": "Troop Camp",
-                            "choose": 1,
-                            "options": [
-                                {"building": "Infantry Camp", "fire_crystals": 126, "refined_fire_crystals": 0},
-                                {"building": "Marksman Camp", "fire_crystals": 126, "refined_fire_crystals": 0},
-                                {"building": "Lancer Camp", "fire_crystals": 126, "refined_fire_crystals": 0},
-                            ],
-                        },
-                    ],
-                },
-                "all_camps": {
-                    "description": "Furnace + Embassy + all 3 troop camps.",
-                    "requirements": [
-                        {"building": "Furnace", "fire_crystals": 280, "refined_fire_crystals": 0},
-                        {"building": "Embassy", "fire_crystals": 70, "refined_fire_crystals": 0},
-                        {"building": "Infantry Camp", "fire_crystals": 126, "refined_fire_crystals": 0},
-                        {"building": "Marksman Camp", "fire_crystals": 126, "refined_fire_crystals": 0},
-                        {"building": "Lancer Camp", "fire_crystals": 126, "refined_fire_crystals": 0},
-                    ],
-                },
-                "full_furnace": {
-                    "description": "Furnace + Embassy + all camps + Command Center + Infirmary.",
-                    "requirements": [
-                        {"building": "Furnace", "fire_crystals": 280, "refined_fire_crystals": 0},
-                        {"building": "Embassy", "fire_crystals": 70, "refined_fire_crystals": 0},
-                        {"building": "Infantry Camp", "fire_crystals": 126, "refined_fire_crystals": 0},
-                        {"building": "Marksman Camp", "fire_crystals": 126, "refined_fire_crystals": 0},
-                        {"building": "Lancer Camp", "fire_crystals": 126, "refined_fire_crystals": 0},
-                        {"building": "Command Center", "fire_crystals": 56, "refined_fire_crystals": 0},
-                        {"building": "Infirmary", "fire_crystals": 56, "refined_fire_crystals": 0},
-                    ],
-                },
-            },
-        },
-        {
-            "level": "FC4",
-            "next_level": "FC5",
-            "packages": {
-                "minimum": {
-                    "description": "Furnace + Embassy + choose 1 troop camp.",
-                    "requirements": [
-                        {"building": "Furnace", "fire_crystals": 335, "refined_fire_crystals": 0},
-                        {"building": "Embassy", "fire_crystals": 83, "refined_fire_crystals": 0},
-                        {
-                            "choice_group": "Troop Camp",
-                            "choose": 1,
-                            "options": [
-                                {"building": "Infantry Camp", "fire_crystals": 150, "refined_fire_crystals": 0},
-                                {"building": "Marksman Camp", "fire_crystals": 150, "refined_fire_crystals": 0},
-                                {"building": "Lancer Camp", "fire_crystals": 150, "refined_fire_crystals": 0},
-                            ],
-                        },
-                    ],
-                },
-                "all_camps": {
-                    "description": "Furnace + Embassy + all 3 troop camps.",
-                    "requirements": [
-                        {"building": "Furnace", "fire_crystals": 335, "refined_fire_crystals": 0},
-                        {"building": "Embassy", "fire_crystals": 83, "refined_fire_crystals": 0},
-                        {"building": "Infantry Camp", "fire_crystals": 150, "refined_fire_crystals": 0},
-                        {"building": "Marksman Camp", "fire_crystals": 150, "refined_fire_crystals": 0},
-                        {"building": "Lancer Camp", "fire_crystals": 150, "refined_fire_crystals": 0},
-                    ],
-                },
-                "full_furnace": {
-                    "description": "Furnace + Embassy + all camps + Command Center + Infirmary.",
-                    "requirements": [
-                        {"building": "Furnace", "fire_crystals": 335, "refined_fire_crystals": 0},
-                        {"building": "Embassy", "fire_crystals": 83, "refined_fire_crystals": 0},
-                        {"building": "Infantry Camp", "fire_crystals": 150, "refined_fire_crystals": 0},
-                        {"building": "Marksman Camp", "fire_crystals": 150, "refined_fire_crystals": 0},
-                        {"building": "Lancer Camp", "fire_crystals": 150, "refined_fire_crystals": 0},
-                        {"building": "Command Center", "fire_crystals": 67, "refined_fire_crystals": 0},
-                        {"building": "Infirmary", "fire_crystals": 67, "refined_fire_crystals": 0},
-                    ],
-                },
-            },
-        },
-        {
-            "level": "FC5",
-            "next_level": "FC6",
-            "packages": {
-                "minimum": {
-                    "description": "Furnace + Embassy + choose 1 troop camp.",
-                    "requirements": [
-                        {"building": "Furnace", "fire_crystals": 900, "refined_fire_crystals": 60},
-                        {"building": "Embassy", "fire_crystals": 225, "refined_fire_crystals": 13},
-                        {
-                            "choice_group": "Troop Camp",
-                            "choose": 1,
-                            "options": [
-                                {"building": "Infantry Camp", "fire_crystals": 405, "refined_fire_crystals": 26},
-                                {"building": "Marksman Camp", "fire_crystals": 405, "refined_fire_crystals": 26},
-                                {"building": "Lancer Camp", "fire_crystals": 405, "refined_fire_crystals": 26},
-                            ],
-                        },
-                    ],
-                },
-                "all_camps": {
-                    "description": "Furnace + Embassy + all 3 troop camps.",
-                    "requirements": [
-                        {"building": "Furnace", "fire_crystals": 900, "refined_fire_crystals": 60},
-                        {"building": "Embassy", "fire_crystals": 225, "refined_fire_crystals": 13},
-                        {"building": "Infantry Camp", "fire_crystals": 405, "refined_fire_crystals": 26},
-                        {"building": "Marksman Camp", "fire_crystals": 405, "refined_fire_crystals": 26},
-                        {"building": "Lancer Camp", "fire_crystals": 405, "refined_fire_crystals": 26},
-                    ],
-                },
-                "full_furnace": {
-                    "description": "Furnace + Embassy + all camps + Command Center + Infirmary + War Academy.",
-                    "requirements": [
-                        {"building": "Furnace", "fire_crystals": 900, "refined_fire_crystals": 60},
-                        {"building": "Embassy", "fire_crystals": 225, "refined_fire_crystals": 13},
-                        {"building": "Infantry Camp", "fire_crystals": 405, "refined_fire_crystals": 26},
-                        {"building": "Marksman Camp", "fire_crystals": 405, "refined_fire_crystals": 26},
-                        {"building": "Lancer Camp", "fire_crystals": 405, "refined_fire_crystals": 26},
-                        {"building": "Command Center", "fire_crystals": 180, "refined_fire_crystals": 13},
-                        {"building": "Infirmary", "fire_crystals": 180, "refined_fire_crystals": 13},
-                        {"building": "War Academy", "fire_crystals": 405, "refined_fire_crystals": 26},
-                    ],
-                },
-            },
-        },
-        {
-            "level": "FC6",
-            "next_level": "FC7",
-            "packages": {
-                "minimum": {
-                    "description": "Furnace + Embassy + choose 1 troop camp.",
-                    "requirements": [
-                        {"building": "Furnace", "fire_crystals": 1080, "refined_fire_crystals": 90},
-                        {"building": "Embassy", "fire_crystals": 270, "refined_fire_crystals": 19},
-                        {
-                            "choice_group": "Troop Camp",
-                            "choose": 1,
-                            "options": [
-                                {"building": "Infantry Camp", "fire_crystals": 486, "refined_fire_crystals": 37},
-                                {"building": "Marksman Camp", "fire_crystals": 486, "refined_fire_crystals": 37},
-                                {"building": "Lancer Camp", "fire_crystals": 486, "refined_fire_crystals": 37},
-                            ],
-                        },
-                    ],
-                },
-                "all_camps": {
-                    "description": "Furnace + Embassy + all 3 troop camps.",
-                    "requirements": [
-                        {"building": "Furnace", "fire_crystals": 1080, "refined_fire_crystals": 90},
-                        {"building": "Embassy", "fire_crystals": 270, "refined_fire_crystals": 19},
-                        {"building": "Infantry Camp", "fire_crystals": 486, "refined_fire_crystals": 37},
-                        {"building": "Marksman Camp", "fire_crystals": 486, "refined_fire_crystals": 37},
-                        {"building": "Lancer Camp", "fire_crystals": 486, "refined_fire_crystals": 37},
-                    ],
-                },
-                "full_furnace": {
-                    "description": "Furnace + Embassy + all camps + Command Center + Infirmary + War Academy.",
-                    "requirements": [
-                        {"building": "Furnace", "fire_crystals": 1080, "refined_fire_crystals": 90},
-                        {"building": "Embassy", "fire_crystals": 270, "refined_fire_crystals": 19},
-                        {"building": "Infantry Camp", "fire_crystals": 486, "refined_fire_crystals": 37},
-                        {"building": "Marksman Camp", "fire_crystals": 486, "refined_fire_crystals": 37},
-                        {"building": "Lancer Camp", "fire_crystals": 486, "refined_fire_crystals": 37},
-                        {"building": "Command Center", "fire_crystals": 216, "refined_fire_crystals": 19},
-                        {"building": "Infirmary", "fire_crystals": 216, "refined_fire_crystals": 19},
-                        {"building": "War Academy", "fire_crystals": 486, "refined_fire_crystals": 37},
-                    ],
-                },
-            },
-        },
-        {
-            "level": "FC7",
-            "next_level": "FC8",
-            "packages": {
-                "minimum": {
-                    "description": "Furnace + Embassy + choose 1 troop camp.",
-                    "requirements": [
-                        {"building": "Furnace", "fire_crystals": 1080, "refined_fire_crystals": 120},
-                        {"building": "Embassy", "fire_crystals": 270, "refined_fire_crystals": 30},
-                        {
-                            "choice_group": "Troop Camp",
-                            "choose": 1,
-                            "options": [
-                                {"building": "Infantry Camp", "fire_crystals": 486, "refined_fire_crystals": 53},
-                                {"building": "Marksman Camp", "fire_crystals": 486, "refined_fire_crystals": 53},
-                                {"building": "Lancer Camp", "fire_crystals": 486, "refined_fire_crystals": 53},
-                            ],
-                        },
-                    ],
-                },
-                "all_camps": {
-                    "description": "Furnace + Embassy + all 3 troop camps.",
-                    "requirements": [
-                        {"building": "Furnace", "fire_crystals": 1080, "refined_fire_crystals": 120},
-                        {"building": "Embassy", "fire_crystals": 270, "refined_fire_crystals": 30},
-                        {"building": "Infantry Camp", "fire_crystals": 486, "refined_fire_crystals": 53},
-                        {"building": "Marksman Camp", "fire_crystals": 486, "refined_fire_crystals": 53},
-                        {"building": "Lancer Camp", "fire_crystals": 486, "refined_fire_crystals": 53},
-                    ],
-                },
-                "full_furnace": {
-                    "description": "Furnace + Embassy + all camps + Command Center + Infirmary + War Academy.",
-                    "requirements": [
-                        {"building": "Furnace", "fire_crystals": 1080, "refined_fire_crystals": 120},
-                        {"building": "Embassy", "fire_crystals": 270, "refined_fire_crystals": 30},
-                        {"building": "Infantry Camp", "fire_crystals": 486, "refined_fire_crystals": 53},
-                        {"building": "Marksman Camp", "fire_crystals": 486, "refined_fire_crystals": 53},
-                        {"building": "Lancer Camp", "fire_crystals": 486, "refined_fire_crystals": 53},
-                        {"building": "Command Center", "fire_crystals": 216, "refined_fire_crystals": 29},
-                        {"building": "Infirmary", "fire_crystals": 216, "refined_fire_crystals": 30},
-                        {"building": "War Academy", "fire_crystals": 486, "refined_fire_crystals": 53},
-                    ],
-                },
-            },
-        },
-        {
-            "level": "FC8",
-            "next_level": "FC9",
-            "packages": {
-                "minimum": {
-                    "description": "Furnace + Embassy + choose 1 troop camp.",
-                    "requirements": [
-                        {"building": "Furnace", "fire_crystals": 1260, "refined_fire_crystals": 180},
-                        {"building": "Embassy", "fire_crystals": 315, "refined_fire_crystals": 43},
-                        {
-                            "choice_group": "Troop Camp",
-                            "choose": 1,
-                            "options": [
-                                {"building": "Infantry Camp", "fire_crystals": 567, "refined_fire_crystals": 79},
-                                {"building": "Marksman Camp", "fire_crystals": 567, "refined_fire_crystals": 79},
-                                {"building": "Lancer Camp", "fire_crystals": 567, "refined_fire_crystals": 79},
-                            ],
-                        },
-                    ],
-                },
-                "all_camps": {
-                    "description": "Furnace + Embassy + all 3 troop camps.",
-                    "requirements": [
-                        {"building": "Furnace", "fire_crystals": 1260, "refined_fire_crystals": 180},
-                        {"building": "Embassy", "fire_crystals": 315, "refined_fire_crystals": 43},
-                        {"building": "Infantry Camp", "fire_crystals": 567, "refined_fire_crystals": 79},
-                        {"building": "Marksman Camp", "fire_crystals": 567, "refined_fire_crystals": 79},
-                        {"building": "Lancer Camp", "fire_crystals": 567, "refined_fire_crystals": 79},
-                    ],
-                },
-                "full_furnace": {
-                    "description": "Furnace + Embassy + all camps + Command Center + Infirmary + War Academy.",
-                    "requirements": [
-                        {"building": "Furnace", "fire_crystals": 1260, "refined_fire_crystals": 180},
-                        {"building": "Embassy", "fire_crystals": 315, "refined_fire_crystals": 43},
-                        {"building": "Infantry Camp", "fire_crystals": 567, "refined_fire_crystals": 79},
-                        {"building": "Marksman Camp", "fire_crystals": 567, "refined_fire_crystals": 79},
-                        {"building": "Lancer Camp", "fire_crystals": 567, "refined_fire_crystals": 79},
-                        {"building": "Command Center", "fire_crystals": 252, "refined_fire_crystals": 36},
-                        {"building": "Infirmary", "fire_crystals": 252, "refined_fire_crystals": 36},
-                        {"building": "War Academy", "fire_crystals": 567, "refined_fire_crystals": 79},
-                    ],
-                },
-            },
-        },
-        {
-            "level": "FC9",
-            "next_level": "FC10",
-            "packages": {
-                "minimum": {
-                    "description": "Furnace + Embassy + choose 1 troop camp.",
-                    "requirements": [
-                        {"building": "Furnace", "fire_crystals": 1575, "refined_fire_crystals": 420},
-                        {"building": "Embassy", "fire_crystals": 391, "refined_fire_crystals": 103},
-                        {
-                            "choice_group": "Troop Camp",
-                            "choose": 1,
-                            "options": [
-                                {"building": "Infantry Camp", "fire_crystals": 706, "refined_fire_crystals": 187},
-                                {"building": "Marksman Camp", "fire_crystals": 706, "refined_fire_crystals": 187},
-                                {"building": "Lancer Camp", "fire_crystals": 706, "refined_fire_crystals": 187},
-                            ],
-                        },
-                    ],
-                },
-                "all_camps": {
-                    "description": "Furnace + Embassy + all 3 troop camps.",
-                    "requirements": [
-                        {"building": "Furnace", "fire_crystals": 1575, "refined_fire_crystals": 420},
-                        {"building": "Embassy", "fire_crystals": 391, "refined_fire_crystals": 103},
-                        {"building": "Infantry Camp", "fire_crystals": 706, "refined_fire_crystals": 187},
-                        {"building": "Marksman Camp", "fire_crystals": 706, "refined_fire_crystals": 187},
-                        {"building": "Lancer Camp", "fire_crystals": 706, "refined_fire_crystals": 187},
-                    ],
-                },
-                "full_furnace": {
-                    "description": "Furnace + Embassy + all camps + Command Center + Infirmary + War Academy.",
-                    "requirements": [
-                        {"building": "Furnace", "fire_crystals": 1575, "refined_fire_crystals": 420},
-                        {"building": "Embassy", "fire_crystals": 391, "refined_fire_crystals": 103},
-                        {"building": "Infantry Camp", "fire_crystals": 706, "refined_fire_crystals": 187},
-                        {"building": "Marksman Camp", "fire_crystals": 706, "refined_fire_crystals": 187},
-                        {"building": "Lancer Camp", "fire_crystals": 706, "refined_fire_crystals": 187},
-                        {"building": "Command Center", "fire_crystals": 315, "refined_fire_crystals": 84},
-                        {"building": "Infirmary", "fire_crystals": 315, "refined_fire_crystals": 84},
-                        {"building": "War Academy", "fire_crystals": 706, "refined_fire_crystals": 187},
-                    ],
-                },
-            },
-        },
-        {
-            "level": "FC10",
-            "next_level": None,
-            "packages": {},
-        },
-    ],
+DEFAULT_BUILDING_COSTS_BY_TARGET: Dict[str, Dict[str, Dict[str, int]]] = {
+    "FC1": {
+        "furnace": {"fc": 132, "rfc": 0},
+        "embassy": {"fc": 33, "rfc": 0},
+        "command_center": {"fc": 26, "rfc": 0},
+        "infirmary": {"fc": 26, "rfc": 0},
+        "infantry_camp": {"fc": 59, "rfc": 0},
+        "marksman_camp": {"fc": 59, "rfc": 0},
+        "lancer_camp": {"fc": 59, "rfc": 0},
+        "war_academy": {"fc": 0, "rfc": 0},
+    },
+    "FC2": {
+        "furnace": {"fc": 158, "rfc": 0},
+        "embassy": {"fc": 39, "rfc": 0},
+        "command_center": {"fc": 31, "rfc": 0},
+        "infirmary": {"fc": 31, "rfc": 0},
+        "infantry_camp": {"fc": 71, "rfc": 0},
+        "marksman_camp": {"fc": 71, "rfc": 0},
+        "lancer_camp": {"fc": 71, "rfc": 0},
+        "war_academy": {"fc": 0, "rfc": 0},
+    },
+    "FC3": {
+        "furnace": {"fc": 238, "rfc": 0},
+        "embassy": {"fc": 59, "rfc": 0},
+        "command_center": {"fc": 47, "rfc": 0},
+        "infirmary": {"fc": 47, "rfc": 0},
+        "infantry_camp": {"fc": 107, "rfc": 0},
+        "marksman_camp": {"fc": 107, "rfc": 0},
+        "lancer_camp": {"fc": 107, "rfc": 0},
+        "war_academy": {"fc": 0, "rfc": 0},
+    },
+    "FC4": {
+        "furnace": {"fc": 280, "rfc": 0},
+        "embassy": {"fc": 70, "rfc": 0},
+        "command_center": {"fc": 56, "rfc": 0},
+        "infirmary": {"fc": 56, "rfc": 0},
+        "infantry_camp": {"fc": 126, "rfc": 0},
+        "marksman_camp": {"fc": 126, "rfc": 0},
+        "lancer_camp": {"fc": 126, "rfc": 0},
+        "war_academy": {"fc": 0, "rfc": 0},
+    },
+    "FC5": {
+        "furnace": {"fc": 335, "rfc": 0},
+        "embassy": {"fc": 83, "rfc": 0},
+        "command_center": {"fc": 67, "rfc": 0},
+        "infirmary": {"fc": 67, "rfc": 0},
+        "infantry_camp": {"fc": 150, "rfc": 0},
+        "marksman_camp": {"fc": 150, "rfc": 0},
+        "lancer_camp": {"fc": 150, "rfc": 0},
+        "war_academy": {"fc": 0, "rfc": 0},
+    },
+    "FC6": {
+        "furnace": {"fc": 900, "rfc": 60},
+        "embassy": {"fc": 225, "rfc": 13},
+        "command_center": {"fc": 180, "rfc": 13},
+        "infirmary": {"fc": 180, "rfc": 13},
+        "infantry_camp": {"fc": 405, "rfc": 26},
+        "marksman_camp": {"fc": 405, "rfc": 26},
+        "lancer_camp": {"fc": 405, "rfc": 26},
+        "war_academy": {"fc": 405, "rfc": 26},
+    },
+    "FC7": {
+        "furnace": {"fc": 1080, "rfc": 90},
+        "embassy": {"fc": 270, "rfc": 19},
+        "command_center": {"fc": 216, "rfc": 19},
+        "infirmary": {"fc": 216, "rfc": 19},
+        "infantry_camp": {"fc": 486, "rfc": 37},
+        "marksman_camp": {"fc": 486, "rfc": 37},
+        "lancer_camp": {"fc": 486, "rfc": 37},
+        "war_academy": {"fc": 486, "rfc": 37},
+    },
+    "FC8": {
+        "furnace": {"fc": 1080, "rfc": 120},
+        "embassy": {"fc": 270, "rfc": 30},
+        "command_center": {"fc": 216, "rfc": 29},
+        "infirmary": {"fc": 216, "rfc": 30},
+        "infantry_camp": {"fc": 486, "rfc": 53},
+        "marksman_camp": {"fc": 486, "rfc": 53},
+        "lancer_camp": {"fc": 486, "rfc": 53},
+        "war_academy": {"fc": 486, "rfc": 53},
+    },
+    "FC9": {
+        "furnace": {"fc": 1260, "rfc": 180},
+        "embassy": {"fc": 315, "rfc": 43},
+        "command_center": {"fc": 252, "rfc": 36},
+        "infirmary": {"fc": 252, "rfc": 36},
+        "infantry_camp": {"fc": 567, "rfc": 79},
+        "marksman_camp": {"fc": 567, "rfc": 79},
+        "lancer_camp": {"fc": 567, "rfc": 79},
+        "war_academy": {"fc": 567, "rfc": 79},
+    },
+    "FC10": {
+        "furnace": {"fc": 1575, "rfc": 420},
+        "embassy": {"fc": 391, "rfc": 103},
+        "command_center": {"fc": 315, "rfc": 84},
+        "infirmary": {"fc": 315, "rfc": 84},
+        "infantry_camp": {"fc": 706, "rfc": 187},
+        "marksman_camp": {"fc": 706, "rfc": 187},
+        "lancer_camp": {"fc": 706, "rfc": 187},
+        "war_academy": {"fc": 706, "rfc": 187},
+    },
+}
+
+REQUIRED_CAMP_BY_CURRENT_LEVEL: Dict[str, str] = {
+    "FC1": "lancer_camp",
+    "FC2": "infantry_camp",
+    "FC3": "marksman_camp",
+    "FC4": "lancer_camp",
+    "FC5": "infantry_camp",
+    "FC6": "marksman_camp",
+    "FC7": "lancer_camp",
+    "FC8": "infantry_camp",
+    "FC9": "marksman_camp",
 }
 
 DEFAULT_REFINES: Dict[str, Any] = {
-    "attempts_above_max_use_last_tier": True,
+    "timezone_note": "All WoS-related date maths should use UTC.",
     "first_refine_discount": 0.5,
+    "attempts_above_max_use_last_tier": True,
     "max_search_attempts": 250000,
     "tiers": [
         {
@@ -554,6 +212,96 @@ DEFAULT_REFINES: Dict[str, Any] = {
 }
 
 
+def _building_req(label: str, fc: int, rfc: int) -> Dict[str, Any]:
+    return {
+        "building": label,
+        "fire_crystals": fc,
+        "refined_fire_crystals": rfc,
+    }
+
+
+def build_default_upgrades() -> Dict[str, Any]:
+    levels: List[Dict[str, Any]] = []
+    ordered_levels = [f"FC{i}" for i in range(1, 11)]
+
+    for idx, current_level in enumerate(ordered_levels):
+        if current_level == "FC10":
+            levels.append({
+                "level": "FC10",
+                "next_level": None,
+                "packages": {},
+            })
+            break
+
+        target_level = ordered_levels[idx + 1]
+        costs = DEFAULT_BUILDING_COSTS_BY_TARGET[target_level]
+        required_camp_key = REQUIRED_CAMP_BY_CURRENT_LEVEL[current_level]
+
+        minimum_requirements = [
+            _building_req("Furnace", costs["furnace"]["fc"], costs["furnace"]["rfc"]),
+            _building_req("Embassy", costs["embassy"]["fc"], costs["embassy"]["rfc"]),
+        ]
+        camp_labels = {
+            "infantry_camp": "Infantry Camp",
+            "marksman_camp": "Marksman Camp",
+            "lancer_camp": "Lancer Camp",
+        }
+        minimum_requirements.append(
+            _building_req(
+                camp_labels[required_camp_key],
+                costs[required_camp_key]["fc"],
+                costs[required_camp_key]["rfc"],
+            )
+        )
+
+        all_camps_requirements = [
+            _building_req("Furnace", costs["furnace"]["fc"], costs["furnace"]["rfc"]),
+            _building_req("Embassy", costs["embassy"]["fc"], costs["embassy"]["rfc"]),
+            _building_req("Infantry Camp", costs["infantry_camp"]["fc"], costs["infantry_camp"]["rfc"]),
+            _building_req("Marksman Camp", costs["marksman_camp"]["fc"], costs["marksman_camp"]["rfc"]),
+            _building_req("Lancer Camp", costs["lancer_camp"]["fc"], costs["lancer_camp"]["rfc"]),
+        ]
+
+        full_furnace_requirements = list(all_camps_requirements)
+        full_furnace_requirements.extend(
+            [
+                _building_req("Command Center", costs["command_center"]["fc"], costs["command_center"]["rfc"]),
+                _building_req("Infirmary", costs["infirmary"]["fc"], costs["infirmary"]["rfc"]),
+            ]
+        )
+        if costs["war_academy"]["fc"] > 0 or costs["war_academy"]["rfc"] > 0:
+            full_furnace_requirements.append(
+                _building_req("War Academy", costs["war_academy"]["fc"], costs["war_academy"]["rfc"])
+            )
+
+        levels.append(
+            {
+                "level": current_level,
+                "next_level": target_level,
+                "packages": {
+                    "minimum": {
+                        "description": f"Furnace + Embassy + required troop camp for {current_level} → {target_level}",
+                        "requirements": minimum_requirements,
+                    },
+                    "all_camps": {
+                        "description": f"Furnace + Embassy + all troop camps for {current_level} → {target_level}",
+                        "requirements": all_camps_requirements,
+                    },
+                    "full_furnace": {
+                        "description": f"Full furnace package for {current_level} → {target_level}",
+                        "requirements": full_furnace_requirements,
+                    },
+                },
+            }
+        )
+
+    return {
+        "timezone": "UTC",
+        "feature_key": FEATURE_KEY,
+        "levels": levels,
+    }
+
+
 class ReferenceError(ValueError):
     pass
 
@@ -561,7 +309,6 @@ class ReferenceError(ValueError):
 @dataclass
 class RefineWindowProjection:
     weekly_refines: int
-    full_week_counts: List[int]
     total_attempts: int
     fire_crystal_spent: int
     minimum_rfc: int
@@ -570,8 +317,6 @@ class RefineWindowProjection:
 
 
 class WOSFurnaceCalculator(commands.Cog):
-    """Whiteout Survival furnace calculator with editable JSON references and saved user profiles."""
-
     def __init__(self, bot: commands.Bot):
         self.bot = bot
         self.settings: SettingsManager = bot.settings
@@ -580,58 +325,19 @@ class WOSFurnaceCalculator(commands.Cog):
         self.profiles: Dict[str, Any] = {}
         self.level_map: Dict[str, Dict[str, Any]] = {}
         self.level_names: List[str] = []
-        self.timezone_name: str = "Australia/Brisbane"
-        self._ensure_default_files()
+        self.timezone_name: str = "UTC"
         self.load_reference_files()
         self.load_profiles()
 
-    # ------------------------------------------------------------------
-    # Access control
-    # ------------------------------------------------------------------
-    def _is_allowed_channel(self, interaction: discord.Interaction) -> bool:
-        if interaction.guild_id is None or interaction.channel_id is None:
-            return False
-        allowed_channels = self.settings.feature_channels(interaction.guild_id, FEATURE_KEY)
-        return interaction.channel_id in allowed_channels
-
-    async def _require_allowed_channel(self, interaction: discord.Interaction) -> bool:
-        if self._is_allowed_channel(interaction):
-            return True
-
-        allowed_channels = []
-        if interaction.guild is not None and interaction.guild_id is not None:
-            for cid in self.settings.feature_channels(interaction.guild_id, FEATURE_KEY):
-                channel = interaction.guild.get_channel(cid)
-                allowed_channels.append(channel.mention if channel else f"`#{cid}`")
-
-        message = (
-            f"❌ This command is not allowed in this channel. "
-            f"Use `/feature_channel_add` with feature `{FEATURE_KEY}` to allow it in a channel."
-        )
-        if allowed_channels:
-            message += f"\nAllowed channels: {', '.join(allowed_channels)}"
-
-        await interaction.followup.send(message, ephemeral=True)
-        return False
-
-    # ------------------------------------------------------------------
-    # Loading / saving
-    # ------------------------------------------------------------------
-    def _ensure_default_files(self) -> None:
-        DATA_DIR.mkdir(parents=True, exist_ok=True)
-        if not UPGRADES_PATH.exists():
-            save_json(UPGRADES_PATH, DEFAULT_UPGRADES)
-        if not REFINES_PATH.exists():
-            save_json(REFINES_PATH, DEFAULT_REFINES)
-        if not PROFILES_PATH.exists():
-            save_json(PROFILES_PATH, {})
-
+    # -----------------------------
+    # loading
+    # -----------------------------
     def load_reference_files(self) -> None:
-        self.upgrades = self._load_json_or_raise(UPGRADES_PATH)
-        self.refines = self._load_json_or_raise(REFINES_PATH)
+        self.upgrades = self._load_or_create_json(UPGRADES_PATH, build_default_upgrades())
+        self.refines = self._load_or_create_json(REFINES_PATH, DEFAULT_REFINES)
         self._validate_upgrades(self.upgrades)
         self._validate_refines(self.refines)
-        self.timezone_name = self.upgrades.get("timezone", "Australia/Brisbane")
+        self.timezone_name = str(self.upgrades.get("timezone", "UTC"))
         self.level_map = {
             str(entry["level"]).strip().casefold(): entry
             for entry in self.upgrades["levels"]
@@ -639,39 +345,33 @@ class WOSFurnaceCalculator(commands.Cog):
         self.level_names = [entry["level"] for entry in self.upgrades["levels"]]
 
     def load_profiles(self) -> None:
-        data = self._load_json_or_raise(PROFILES_PATH)
+        data = self._load_or_create_json(PROFILES_PATH, {})
         if not isinstance(data, dict):
             raise ReferenceError("wos_furnace_profiles.json must be a JSON object.")
         self.profiles = {str(k): v for k, v in data.items() if isinstance(v, dict)}
 
     def save_profiles(self) -> None:
-        DATA_DIR.mkdir(parents=True, exist_ok=True)
         save_json(PROFILES_PATH, self.profiles)
 
     @staticmethod
-    def _load_json_or_raise(path: Path) -> Dict[str, Any]:
+    def _load_or_create_json(path, default_value: Any) -> Any:
+        path.parent.mkdir(parents=True, exist_ok=True)
         if not path.exists():
-            raise ReferenceError(f"Missing reference file: {path}")
-        try:
-            with path.open("r", encoding="utf-8") as f:
-                data = json.load(f)
-        except json.JSONDecodeError as exc:
-            raise ReferenceError(f"Invalid JSON in {path.name}: {exc}") from exc
-        if not isinstance(data, dict):
-            raise ReferenceError(f"{path.name} must be a JSON object.")
-        return data
+            save_json(path, default_value)
+            return load_json(path, default_value)
+        return load_json(path, default_value)
 
     @staticmethod
     def _validate_upgrades(data: Dict[str, Any]) -> None:
+        if not isinstance(data, dict):
+            raise ReferenceError("wos_furnace_upgrades.json must be a JSON object.")
         levels = data.get("levels")
         if not isinstance(levels, list) or not levels:
             raise ReferenceError("wos_furnace_upgrades.json must contain a non-empty 'levels' list.")
-
         seen: set[str] = set()
         for idx, entry in enumerate(levels, start=1):
             if not isinstance(entry, dict):
                 raise ReferenceError(f"levels[{idx}] must be an object.")
-
             level = entry.get("level")
             next_level = entry.get("next_level")
             packages = entry.get("packages", {})
@@ -681,142 +381,75 @@ class WOSFurnaceCalculator(commands.Cog):
             if key in seen:
                 raise ReferenceError(f"Duplicate level found in upgrades reference: {level}")
             seen.add(key)
-
             if next_level is not None and (not isinstance(next_level, str) or not next_level.strip()):
                 raise ReferenceError(f"levels[{idx}].next_level must be null or a non-empty string.")
             if not isinstance(packages, dict):
                 raise ReferenceError(f"levels[{idx}].packages must be an object.")
-            if next_level is None:
-                continue
-            if not packages:
-                raise ReferenceError(f"levels[{idx}] must define packages while next_level exists.")
-            for package_name, package in packages.items():
-                if not isinstance(package_name, str) or not package_name.strip():
-                    raise ReferenceError(f"levels[{idx}] has an invalid package name.")
-                if not isinstance(package, dict):
-                    raise ReferenceError(f"Package '{package_name}' at {level} must be an object.")
-                requirements = package.get("requirements")
-                if not isinstance(requirements, list):
-                    raise ReferenceError(
-                        f"Package '{package_name}' at {level} must contain a 'requirements' list."
-                    )
-                for req_index, req in enumerate(requirements, start=1):
-                    WOSFurnaceCalculator._validate_requirement(level, package_name, req_index, req)
-
-    @staticmethod
-    def _validate_requirement(level: str, package_name: str, req_index: int, req: Dict[str, Any]) -> None:
-        if not isinstance(req, dict):
-            raise ReferenceError(
-                f"Requirement {req_index} in package '{package_name}' at level {level} must be an object."
-            )
-        if "options" in req:
-            options = req.get("options")
-            choose = req.get("choose", 1)
-            if not isinstance(options, list) or not options:
-                raise ReferenceError(
-                    f"Choice requirement {req_index} in package '{package_name}' at level {level} must have options."
-                )
-            if not isinstance(choose, int) or choose < 1 or choose > len(options):
-                raise ReferenceError(
-                    f"Choice requirement {req_index} in package '{package_name}' at level {level} has invalid choose."
-                )
-            for opt_index, opt in enumerate(options, start=1):
-                WOSFurnaceCalculator._validate_building_cost(level, package_name, f"{req_index}.{opt_index}", opt)
-            return
-        WOSFurnaceCalculator._validate_building_cost(level, package_name, str(req_index), req)
-
-    @staticmethod
-    def _validate_building_cost(level: str, package_name: str, req_label: str, req: Dict[str, Any]) -> None:
-        building = req.get("building")
-        fire_crystals = req.get("fire_crystals")
-        refined_fire_crystals = req.get("refined_fire_crystals")
-        if not isinstance(building, str) or not building.strip():
-            raise ReferenceError(
-                f"Requirement {req_label} in package '{package_name}' at {level} must have a building name."
-            )
-        if not isinstance(fire_crystals, int) or fire_crystals < 0:
-            raise ReferenceError(
-                f"Requirement {req_label} in package '{package_name}' at {level} must have integer fire_crystals >= 0."
-            )
-        if not isinstance(refined_fire_crystals, int) or refined_fire_crystals < 0:
-            raise ReferenceError(
-                f"Requirement {req_label} in package '{package_name}' at {level} must have integer refined_fire_crystals >= 0."
-            )
 
     @staticmethod
     def _validate_refines(data: Dict[str, Any]) -> None:
+        if not isinstance(data, dict):
+            raise ReferenceError("wos_refine_rates.json must be a JSON object.")
         tiers = data.get("tiers")
         if not isinstance(tiers, list) or not tiers:
             raise ReferenceError("wos_refine_rates.json must contain a non-empty 'tiers' list.")
-
         previous_max = 0
         for idx, tier in enumerate(tiers, start=1):
-            if not isinstance(tier, dict):
-                raise ReferenceError(f"tiers[{idx}] must be an object.")
-            name = tier.get("name")
             min_attempt = tier.get("min_attempt")
             max_attempt = tier.get("max_attempt")
-            fire_cost = tier.get("fire_crystal_cost")
-            outcomes = tier.get("outcomes")
-            if not isinstance(name, str) or not name.strip():
-                raise ReferenceError(f"tiers[{idx}].name must be a non-empty string.")
-            if not isinstance(min_attempt, int) or min_attempt < 1:
-                raise ReferenceError(f"tiers[{idx}].min_attempt must be an integer >= 1.")
-            if not isinstance(max_attempt, int) or max_attempt < min_attempt:
-                raise ReferenceError(f"tiers[{idx}].max_attempt must be an integer >= min_attempt.")
+            if not isinstance(min_attempt, int) or not isinstance(max_attempt, int):
+                raise ReferenceError(f"tiers[{idx}] needs integer min_attempt and max_attempt.")
             if min_attempt != previous_max + 1:
                 raise ReferenceError(
-                    f"Refine tiers must be contiguous. Tier '{name}' starts at {min_attempt}, expected {previous_max + 1}."
+                    f"Refine tiers must be contiguous. Tier {tier.get('name', idx)} starts at {min_attempt}, expected {previous_max + 1}."
                 )
             previous_max = max_attempt
-            if not isinstance(fire_cost, int) or fire_cost < 0:
-                raise ReferenceError(f"tiers[{idx}].fire_crystal_cost must be an integer >= 0.")
+            outcomes = tier.get("outcomes")
             if not isinstance(outcomes, list) or not outcomes:
-                raise ReferenceError(f"tiers[{idx}].outcomes must be a non-empty list.")
+                raise ReferenceError(f"tiers[{idx}] must contain outcomes.")
+            total = sum(float(outcome.get("probability", 0.0)) for outcome in outcomes)
+            if not (math.isclose(total, 100.0, abs_tol=1e-9) or math.isclose(total, 1.0, abs_tol=1e-9)):
+                raise ReferenceError(f"Tier {tier.get('name', idx)} probabilities must sum to 100 or 1.0.")
 
-            probability_total = 0.0
-            for outcome_index, outcome in enumerate(outcomes, start=1):
-                if not isinstance(outcome, dict):
-                    raise ReferenceError(f"tiers[{idx}].outcomes[{outcome_index}] must be an object.")
-                rfc = outcome.get("refined_fire_crystals")
-                probability = outcome.get("probability")
-                if not isinstance(rfc, int) or rfc < 0:
-                    raise ReferenceError(
-                        f"tiers[{idx}].outcomes[{outcome_index}].refined_fire_crystals must be an integer >= 0."
-                    )
-                if not isinstance(probability, (int, float)) or float(probability) < 0:
-                    raise ReferenceError(
-                        f"tiers[{idx}].outcomes[{outcome_index}].probability must be a number >= 0."
-                    )
-                probability_total += float(probability)
+    # -----------------------------
+    # access / restriction
+    # -----------------------------
+    async def _ensure_allowed(self, interaction: discord.Interaction) -> bool:
+        if interaction.guild_id is None or interaction.channel_id is None:
+            if interaction.response.is_done():
+                await interaction.followup.send("❌ This command can only be used inside a server channel.", ephemeral=True)
+            else:
+                await interaction.response.send_message("❌ This command can only be used inside a server channel.", ephemeral=True)
+            return False
+        if self.settings.is_feature_allowed(interaction.guild_id, interaction.channel_id, FEATURE_KEY):
+            return True
+        msg = (
+            f"❌ This command is not allowed in this channel. "
+            f"Use `/feature_channel_add` with feature `{FEATURE_KEY}` to allow it in a channel."
+        )
+        if interaction.response.is_done():
+            await interaction.followup.send(msg, ephemeral=True)
+        else:
+            await interaction.response.send_message(msg, ephemeral=True)
+        return False
 
-            if not (
-                math.isclose(probability_total, 1.0, rel_tol=1e-9, abs_tol=1e-9)
-                or math.isclose(probability_total, 100.0, rel_tol=1e-9, abs_tol=1e-9)
-            ):
-                raise ReferenceError(
-                    f"Tier '{name}' probabilities must sum to 1.0 or 100.0. Found {probability_total}."
-                )
+    # -----------------------------
+    # general helpers
+    # -----------------------------
+    def _tz(self) -> ZoneInfo:
+        return ZoneInfo(self.timezone_name)
 
-        discount = data.get("first_refine_discount", 0.5)
-        if not isinstance(discount, (int, float)) or not (0.0 <= float(discount) <= 1.0):
-            raise ReferenceError("first_refine_discount must be a number between 0.0 and 1.0.")
-
-    # ------------------------------------------------------------------
-    # General helpers
-    # ------------------------------------------------------------------
     def _now_local_date(self) -> date:
-        return datetime.now(ZoneInfo(self.timezone_name)).date()
+        return datetime.now(self._tz()).date()
 
     def _parse_target_date(self, value: str) -> date:
         value = value.strip()
-        formats = ["%Y-%m-%d", "%d/%m/%Y", "%d-%m-%Y"]
-        for fmt in formats:
+        for fmt in ("%Y-%m-%d", "%d/%m/%Y", "%d-%m-%Y"):
             try:
                 return datetime.strptime(value, fmt).date()
             except ValueError:
                 continue
-        raise ReferenceError("Date must be one of: YYYY-MM-DD, DD/MM/YYYY, DD-MM-YYYY")
+        raise ReferenceError("Date must be YYYY-MM-DD, DD/MM/YYYY, or DD-MM-YYYY.")
 
     @staticmethod
     def _normalize_level_name(level_name: str) -> str:
@@ -825,11 +458,40 @@ class WOSFurnaceCalculator(commands.Cog):
     def _get_level_entry(self, level_name: str) -> Dict[str, Any]:
         entry = self.level_map.get(self._normalize_level_name(level_name))
         if entry is None:
-            raise ReferenceError(f"Unknown level '{level_name}'. Known levels: {', '.join(self.level_names)}")
+            raise ReferenceError(f"Unknown level '{level_name}'.")
         return entry
 
     def _get_profile(self, user_id: int) -> Dict[str, Any]:
         return self.profiles.get(str(user_id), {})
+
+    @staticmethod
+    def _require_non_negative(name: str, value: Optional[int]) -> int:
+        if value is None:
+            return 0
+        if value < 0:
+            raise ReferenceError(f"{name} cannot be negative.")
+        return value
+
+    @staticmethod
+    def _fmt_int(value: int) -> str:
+        return f"{value:,}"
+
+    @staticmethod
+    def _fmt_float(value: float) -> str:
+        return f"{value:,.2f}"
+
+    def _base_embed(self, title: str, description: str = "") -> discord.Embed:
+        embed = discord.Embed(title=title, description=description, colour=discord.Colour.orange())
+        embed.set_footer(text=f"TZ: {self.timezone_name}")
+        return embed
+
+    def _project_weekly_amount(self, amount_per_week: int, start_date: date, target_date: date) -> int:
+        if amount_per_week <= 0 or target_date < start_date:
+            return 0
+        total_days = (target_date - start_date).days + 1
+        full_weeks = total_days // 7
+        partial_days = total_days % 7
+        return (full_weeks * amount_per_week) + math.floor((amount_per_week * partial_days) / 7)
 
     def _merge_profile_defaults(
         self,
@@ -840,7 +502,7 @@ class WOSFurnaceCalculator(commands.Cog):
         current_refined_fire_crystals: Optional[int],
         package: Optional[str],
         weekly_fire_crystals_income: Optional[int],
-        weekly_refined_fire_crystals_income: Optional[int],
+        weekly_rfc_income: Optional[int],
     ) -> Dict[str, Any]:
         profile = self._get_profile(user_id) if use_saved else {}
         merged = {
@@ -859,9 +521,9 @@ class WOSFurnaceCalculator(commands.Cog):
                 if weekly_fire_crystals_income is not None
                 else profile.get("weekly_fire_crystals_income", 0)
             ),
-            "weekly_refined_fire_crystals_income": (
-                weekly_refined_fire_crystals_income
-                if weekly_refined_fire_crystals_income is not None
+            "weekly_rfc_income": (
+                weekly_rfc_income
+                if weekly_rfc_income is not None
                 else profile.get("weekly_refined_fire_crystals_income", 0)
             ),
         }
@@ -869,42 +531,12 @@ class WOSFurnaceCalculator(commands.Cog):
             raise ReferenceError("current_level is required. Set a profile or pass it in the command.")
         return merged
 
-    @staticmethod
-    def _require_non_negative(name: str, value: Optional[int]) -> int:
-        if value is None:
-            return 0
-        if value < 0:
-            raise ReferenceError(f"{name} cannot be negative.")
-        return value
-
-    @staticmethod
-    def _fmt_int(value: int) -> str:
-        return f"{value:,}"
-
-    @staticmethod
-    def _fmt_float(value: float) -> str:
-        return f"{value:,.2f}"
-
-    @staticmethod
-    def _project_weekly_amount(amount_per_week: int, start_date: date, target_date: date) -> int:
-        if amount_per_week <= 0 or target_date < start_date:
-            return 0
-        total_days = (target_date - start_date).days + 1
-        full_weeks = total_days // 7
-        partial_days = total_days % 7
-        return (full_weeks * amount_per_week) + math.floor((amount_per_week * partial_days) / 7)
-
-    def _base_embed(self, title: str, description: str = "") -> discord.Embed:
-        embed = discord.Embed(title=title, description=description, colour=discord.Colour.orange())
-        embed.set_footer(text=f"TZ: {self.timezone_name}")
-        return embed
-
-    # ------------------------------------------------------------------
-    # Refine helpers
-    # ------------------------------------------------------------------
+    # -----------------------------
+    # refine helpers
+    # -----------------------------
     def _tier_probability_scale(self, tier: Dict[str, Any]) -> float:
         total = sum(float(outcome["probability"]) for outcome in tier["outcomes"])
-        return 100.0 if math.isclose(total, 100.0, rel_tol=1e-9, abs_tol=1e-9) else 1.0
+        return 100.0 if math.isclose(total, 100.0, abs_tol=1e-9) else 1.0
 
     def _tier_min_rfc(self, tier: Dict[str, Any]) -> int:
         return min(outcome["refined_fire_crystals"] for outcome in tier["outcomes"])
@@ -926,47 +558,22 @@ class WOSFurnaceCalculator(commands.Cog):
                 return tier
         if self.refines.get("attempts_above_max_use_last_tier", True):
             return tiers[-1]
-        raise ReferenceError(
-            f"Attempt #{attempt_number} exceeds the last defined refine tier and attempts_above_max_use_last_tier is false."
-        )
+        raise ReferenceError("Refine attempt exceeds the configured tiers.")
 
     @staticmethod
     def _weekly_day_counts(total_attempts: int, days: int = 7) -> List[int]:
         if total_attempts <= 0 or days <= 0:
             return [0] * days
-
-        triangle = days * (days - 1) // 2
-        if total_attempts >= triangle:
-            monday_base = max(0, (total_attempts - triangle) // days)
-            counts = [monday_base + i for i in range(days)]
-            remainder = total_attempts - sum(counts)
-            for idx in range(days - 1, days - remainder - 1, -1):
-                if 0 <= idx < days:
-                    counts[idx] += 1
-            return counts
-
-        counts = [0] * days
-        active_days = min(total_attempts, days)
-        for idx in range(active_days):
-            counts[idx] = 1
-        remaining = total_attempts - active_days
-        idx = active_days - 1
-        while remaining > 0 and idx >= 0:
-            counts[idx] += 1
-            remaining -= 1
-            idx -= 1
-            if idx < 0:
-                idx = active_days - 1
+        if total_attempts <= days:
+            return [1 if i < total_attempts else 0 for i in range(days)]
+        counts = [1] * days
+        counts[0] += total_attempts - days
         return counts
-
-    @staticmethod
-    def _weekday_labels() -> List[str]:
-        return ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"]
 
     def _format_weekly_schedule(self, weekly_refines: int) -> str:
         counts = self._weekly_day_counts(weekly_refines, 7)
-        labels = self._weekday_labels()
-        return " | ".join(f"{labels[i]} **{counts[i]}**" for i in range(7))
+        labels = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"]
+        return " | ".join(f"{labels[i]} {counts[i]}" for i in range(7))
 
     def _window_segments(self, start_date: date, target_date: date) -> List[int]:
         if target_date < start_date:
@@ -984,7 +591,7 @@ class WOSFurnaceCalculator(commands.Cog):
         if weekly_refines < 0:
             raise ReferenceError("weekly_refines cannot be negative.")
         if target_date < start_date:
-            return RefineWindowProjection(weekly_refines, [0] * 7, 0, 0, 0, 0.0, 0)
+            return RefineWindowProjection(weekly_refines, 0, 0, 0, 0.0, 0)
 
         total_attempts = 0
         total_fc_spent = 0.0
@@ -1012,7 +619,6 @@ class WOSFurnaceCalculator(commands.Cog):
 
         return RefineWindowProjection(
             weekly_refines=weekly_refines,
-            full_week_counts=self._weekly_day_counts(weekly_refines, 7),
             total_attempts=total_attempts,
             fire_crystal_spent=int(round(total_fc_spent)),
             minimum_rfc=total_min_rfc,
@@ -1020,17 +626,11 @@ class WOSFurnaceCalculator(commands.Cog):
             maximum_rfc=total_max_rfc,
         )
 
-    def find_min_weekly_refines_for_rfc(
-        self,
-        required_rfc: int,
-        start_date: date,
-        target_date: date,
-        mode: str,
-    ) -> RefineWindowProjection:
+    def find_min_weekly_refines_for_rfc(self, required_rfc: int, start_date: date, target_date: date, mode: str) -> RefineWindowProjection:
         if required_rfc <= 0:
             return self.simulate_window_refines(0, start_date, target_date)
         if mode not in {"minimum", "expected"}:
-            raise ReferenceError("mode must be 'minimum' or 'expected'.")
+            raise ReferenceError("mode must be minimum or expected.")
 
         def produced(weekly_refines: int) -> float:
             projection = self.simulate_window_refines(weekly_refines, start_date, target_date)
@@ -1043,9 +643,7 @@ class WOSFurnaceCalculator(commands.Cog):
         if high > max_weekly_refines:
             high = max_weekly_refines
         if produced(high) < required_rfc:
-            raise ReferenceError(
-                f"Could not satisfy required RFC within a weekly refine plan up to {max_weekly_refines:,}."
-            )
+            raise ReferenceError("Could not satisfy required RFC inside the configured search range.")
 
         low = 0
         while low < high:
@@ -1056,18 +654,41 @@ class WOSFurnaceCalculator(commands.Cog):
                 low = mid + 1
         return self.simulate_window_refines(low, start_date, target_date)
 
-    # ------------------------------------------------------------------
-    # Upgrade helpers
-    # ------------------------------------------------------------------
+    def find_max_weekly_refines_for_fc_budget(self, fc_budget: int, start_date: date, target_date: date) -> RefineWindowProjection:
+        if fc_budget <= 0:
+            return self.simulate_window_refines(0, start_date, target_date)
+
+        def spent(weekly_refines: int) -> int:
+            return self.simulate_window_refines(weekly_refines, start_date, target_date).fire_crystal_spent
+
+        low = 0
+        high = 1
+        max_weekly_refines = int(self.refines.get("max_search_attempts", 250000))
+        while high <= max_weekly_refines and spent(high) <= fc_budget:
+            high *= 2
+        if high > max_weekly_refines:
+            high = max_weekly_refines
+        if spent(high) <= fc_budget:
+            return self.simulate_window_refines(high, start_date, target_date)
+
+        while low < high:
+            mid = (low + high + 1) // 2
+            if spent(mid) <= fc_budget:
+                low = mid
+            else:
+                high = mid - 1
+        return self.simulate_window_refines(low, start_date, target_date)
+
+    # -----------------------------
+    # upgrade helpers
+    # -----------------------------
     def _get_package_name(self, level_entry: Dict[str, Any], package_name: str) -> str:
         wanted = package_name.strip().casefold()
         for actual_name in level_entry.get("packages", {}).keys():
             if actual_name.casefold() == wanted:
                 return actual_name
         available = ", ".join(level_entry.get("packages", {}).keys())
-        raise ReferenceError(
-            f"Unknown package '{package_name}' for level {level_entry['level']}. Available: {available}"
-        )
+        raise ReferenceError(f"Unknown package '{package_name}' for level {level_entry['level']}. Available: {available}")
 
     def resolve_package(self, level_entry: Dict[str, Any], package_name: str) -> Dict[str, Any]:
         if level_entry.get("next_level") is None:
@@ -1078,43 +699,21 @@ class WOSFurnaceCalculator(commands.Cog):
                 "refined_fire_crystals": 0,
                 "selected_buildings": [],
             }
-
         actual_package_name = self._get_package_name(level_entry, package_name)
         package = level_entry["packages"][actual_package_name]
         total_fc = 0
         total_rfc = 0
         selected_buildings: List[Dict[str, Any]] = []
-
-        for req in package["requirements"]:
-            if "options" in req:
-                choose = req.get("choose", 1)
-                options = sorted(
-                    req["options"],
-                    key=lambda x: (x["refined_fire_crystals"], x["fire_crystals"], x["building"].casefold()),
-                )
-                chosen = options[:choose]
-                for option in chosen:
-                    total_fc += option["fire_crystals"]
-                    total_rfc += option["refined_fire_crystals"]
-                    selected_buildings.append(
-                        {
-                            "building": option["building"],
-                            "fire_crystals": option["fire_crystals"],
-                            "refined_fire_crystals": option["refined_fire_crystals"],
-                            "selected_from_choice_group": req.get("choice_group", "choice"),
-                        }
-                    )
-            else:
-                total_fc += req["fire_crystals"]
-                total_rfc += req["refined_fire_crystals"]
-                selected_buildings.append(
-                    {
-                        "building": req["building"],
-                        "fire_crystals": req["fire_crystals"],
-                        "refined_fire_crystals": req["refined_fire_crystals"],
-                    }
-                )
-
+        for req in package.get("requirements", []):
+            total_fc += int(req.get("fire_crystals", 0))
+            total_rfc += int(req.get("refined_fire_crystals", 0))
+            selected_buildings.append(
+                {
+                    "building": req.get("building", "Unknown"),
+                    "fire_crystals": int(req.get("fire_crystals", 0)),
+                    "refined_fire_crystals": int(req.get("refined_fire_crystals", 0)),
+                }
+            )
         return {
             "package_name": actual_package_name,
             "description": package.get("description", ""),
@@ -1125,33 +724,27 @@ class WOSFurnaceCalculator(commands.Cog):
 
     def build_upgrade_steps(self, current_level: str, target_level: str, package_name: str) -> List[Dict[str, Any]]:
         current_entry = self._get_level_entry(current_level)
-        target_name = self._normalize_level_name(target_level)
-        if self._normalize_level_name(current_entry["level"]) == target_name:
+        target_key = self._normalize_level_name(target_level)
+        if self._normalize_level_name(current_entry["level"]) == target_key:
             return []
-
         steps: List[Dict[str, Any]] = []
         visited: set[str] = set()
         level_name = current_entry["level"]
-
-        while self._normalize_level_name(level_name) != target_name:
+        while self._normalize_level_name(level_name) != target_key:
             level_entry = self._get_level_entry(level_name)
             key = self._normalize_level_name(level_entry["level"])
             if key in visited:
                 raise ReferenceError("Upgrade path loop detected in reference file.")
             visited.add(key)
-
             next_level = level_entry.get("next_level")
             if not next_level:
-                raise ReferenceError(f"Cannot continue from level {level_entry['level']}. It has no next_level defined.")
-
+                raise ReferenceError(f"Cannot continue from level {level_entry['level']}.")
             resolved = self.resolve_package(level_entry, package_name)
-            steps.append(
-                {
-                    "from_level": level_entry["level"],
-                    "to_level": next_level,
-                    **resolved,
-                }
-            )
+            steps.append({
+                "from_level": level_entry["level"],
+                "to_level": next_level,
+                **resolved,
+            })
             level_name = next_level
         return steps
 
@@ -1162,18 +755,11 @@ class WOSFurnaceCalculator(commands.Cog):
             "steps": steps,
         }
 
-    def forecast_reachable_level(
-        self,
-        current_level: str,
-        available_fc: int,
-        available_rfc: int,
-        package_name: str,
-    ) -> Dict[str, Any]:
+    def forecast_reachable_level(self, current_level: str, available_fc: int, available_rfc: int, package_name: str) -> Dict[str, Any]:
         steps_taken: List[Dict[str, Any]] = []
         cursor_level = current_level
         remaining_fc = available_fc
         remaining_rfc = available_rfc
-
         while True:
             level_entry = self._get_level_entry(cursor_level)
             next_level = level_entry.get("next_level")
@@ -1184,14 +770,12 @@ class WOSFurnaceCalculator(commands.Cog):
                 break
             remaining_fc -= resolved["fire_crystals"]
             remaining_rfc -= resolved["refined_fire_crystals"]
-            step = {
+            steps_taken.append({
                 "from_level": level_entry["level"],
                 "to_level": next_level,
                 **resolved,
-            }
-            steps_taken.append(step)
+            })
             cursor_level = next_level
-
         next_step = None
         level_entry = self._get_level_entry(cursor_level)
         if level_entry.get("next_level"):
@@ -1200,7 +784,6 @@ class WOSFurnaceCalculator(commands.Cog):
                 "to_level": level_entry["next_level"],
                 **self.resolve_package(level_entry, package_name),
             }
-
         return {
             "reached_level": cursor_level,
             "remaining_fc": remaining_fc,
@@ -1214,9 +797,74 @@ class WOSFurnaceCalculator(commands.Cog):
             return "No buildings"
         return ", ".join(building["building"] for building in step["selected_buildings"])
 
-    # ------------------------------------------------------------------
-    # Autocomplete helpers
-    # ------------------------------------------------------------------
+    # -----------------------------
+    # help embeds
+    # -----------------------------
+    def _build_help_embeds(self) -> List[discord.Embed]:
+        overview = self._base_embed(
+            "WoS Furnace Calculator Help",
+            "Use saved profiles for your current resources, then run the target-date calculators.",
+        )
+        overview.add_field(
+            name="Setup once",
+            value=(
+                "1. `/feature_channel_add feature:wos_furnace channel:#channel`\n"
+                "2. `/furnace_profile_set ...`\n"
+                "3. Edit `wos_furnace_upgrades.json` / `wos_refine_rates.json` if needed\n"
+                "4. `/furnace_reference_reload` after JSON changes"
+            ),
+            inline=False,
+        )
+        overview.add_field(
+            name="Main commands",
+            value=(
+                "`/furnace_refines_needed` = bot works out the weekly refines needed by a date\n"
+                "`/furnace_upgrade_forecast` = you enter weekly refines and it tells you what level you can reach\n"
+                "`/furnace_profile_view` = check saved profile"
+            ),
+            inline=False,
+        )
+        overview.add_field(
+            name="Packages",
+            value=(
+                "`minimum` = Furnace + Embassy + required troop camp\n"
+                "`all_camps` = Furnace + Embassy + all three troop camps\n"
+                "`full_furnace` = Full package including support buildings"
+            ),
+            inline=False,
+        )
+
+        details = self._base_embed("WoS Furnace Calculator Notes")
+        details.add_field(
+            name="Refine maths",
+            value=(
+                "- Tiers reset each Monday in UTC\n"
+                "- First refine of each day is 50% off\n"
+                "- Weekly template is shown as Monday bulk + 1 each day after that where possible\n"
+                "- Output shows both guaranteed/minimum RFC and expected/theoretical RFC"
+            ),
+            inline=False,
+        )
+        details.add_field(
+            name="When budget is short",
+            value=(
+                "If you do not have enough FC budget for the full target, the bot also shows the biggest refine plan you can afford and what that budget-limited plan can still reach by the date."
+            ),
+            inline=False,
+        )
+        details.add_field(
+            name="Example",
+            value=(
+                "`/furnace_refines_needed target_level:FC10 target_date:2026-06-16 use_saved:true`\n"
+                "`/furnace_upgrade_forecast target_date:2026-06-16 weekly_refines:60 use_saved:true`"
+            ),
+            inline=False,
+        )
+        return [overview, details]
+
+    # -----------------------------
+    # autocomplete
+    # -----------------------------
     async def _level_choices(self, current: str) -> List[app_commands.Choice[str]]:
         current_cf = current.casefold().strip()
         matches = [level for level in self.level_names if current_cf in level.casefold()]
@@ -1248,18 +896,18 @@ class WOSFurnaceCalculator(commands.Cog):
         matches = [name for name in package_names if current_cf in name.casefold()]
         return [app_commands.Choice(name=name, value=name) for name in matches[:25]]
 
-    # ------------------------------------------------------------------
-    # Profile commands
-    # ------------------------------------------------------------------
+    # -----------------------------
+    # profile commands
+    # -----------------------------
     @app_commands.command(name="furnace_profile_set", description="Create or replace your saved furnace profile.")
     @app_commands.describe(
-        current_level="Your current furnace level, e.g. FC5",
+        current_level="Your current furnace level",
         current_fire_crystals="Current Fire Crystals",
         current_refined_fire_crystals="Current Refined Fire Crystals",
-        weekly_refines="Your usual planned refines per week",
-        preferred_package="Default upgrade package name",
-        weekly_fire_crystals_income="Optional weekly Fire Crystal gain",
-        weekly_rfc_income="Optional weekly Refined Fire Crystal gain",
+        weekly_refines="Planned refines per week",
+        preferred_package="Default package name",
+        weekly_fire_crystals_income="Optional Fire Crystal gain per week",
+        weekly_rfc_income="Optional Refined Fire Crystal gain per week",
     )
     async def furnace_profile_set(
         self,
@@ -1273,18 +921,16 @@ class WOSFurnaceCalculator(commands.Cog):
         weekly_rfc_income: int = 0,
     ) -> None:
         log_cmd("furnace_profile_set", interaction)
-        await ensure_deferred(interaction, ephemeral=True)
-        if not await self._require_allowed_channel(interaction):
+        if not await self._ensure_allowed(interaction):
             return
+        await ensure_deferred(interaction, ephemeral=True)
         try:
             self._get_level_entry(current_level)
             self._require_non_negative("current_fire_crystals", current_fire_crystals)
             self._require_non_negative("current_refined_fire_crystals", current_refined_fire_crystals)
             self._require_non_negative("weekly_refines", weekly_refines)
             self._require_non_negative("weekly_fire_crystals_income", weekly_fire_crystals_income)
-            self._require_non_negative(
-                "weekly_refined_fire_crystals_income", weekly_rfc_income
-            )
+            self._require_non_negative("weekly_rfc_income", weekly_rfc_income)
             self.profiles[str(interaction.user.id)] = {
                 "current_level": current_level,
                 "fire_crystals": current_fire_crystals,
@@ -1293,7 +939,7 @@ class WOSFurnaceCalculator(commands.Cog):
                 "preferred_package": preferred_package,
                 "weekly_fire_crystals_income": weekly_fire_crystals_income,
                 "weekly_refined_fire_crystals_income": weekly_rfc_income,
-                "updated_at": datetime.now(ZoneInfo(self.timezone_name)).isoformat(timespec="seconds"),
+                "updated_at": datetime.now(self._tz()).isoformat(timespec="seconds"),
             }
             self.save_profiles()
             await interaction.followup.send("✅ Furnace profile saved.", ephemeral=True)
@@ -1303,9 +949,9 @@ class WOSFurnaceCalculator(commands.Cog):
     @app_commands.command(name="furnace_profile_view", description="View your saved furnace profile.")
     async def furnace_profile_view(self, interaction: discord.Interaction) -> None:
         log_cmd("furnace_profile_view", interaction)
-        await ensure_deferred(interaction, ephemeral=True)
-        if not await self._require_allowed_channel(interaction):
+        if not await self._ensure_allowed(interaction):
             return
+        await ensure_deferred(interaction, ephemeral=True)
         profile = self._get_profile(interaction.user.id)
         if not profile:
             await interaction.followup.send("No saved furnace profile found.", ephemeral=True)
@@ -1313,11 +959,7 @@ class WOSFurnaceCalculator(commands.Cog):
         embed = self._base_embed("Saved Furnace Profile")
         embed.add_field(name="Current level", value=str(profile.get("current_level", "-")), inline=True)
         embed.add_field(name="Fire Crystals", value=self._fmt_int(int(profile.get("fire_crystals", 0))), inline=True)
-        embed.add_field(
-            name="Refined Fire Crystals",
-            value=self._fmt_int(int(profile.get("refined_fire_crystals", 0))),
-            inline=True,
-        )
+        embed.add_field(name="Refined Fire Crystals", value=self._fmt_int(int(profile.get("refined_fire_crystals", 0))), inline=True)
         embed.add_field(name="Weekly refines", value=self._fmt_int(int(profile.get("weekly_refines", 0))), inline=True)
         embed.add_field(name="Preferred package", value=str(profile.get("preferred_package", "minimum")), inline=True)
         embed.add_field(
@@ -1331,7 +973,7 @@ class WOSFurnaceCalculator(commands.Cog):
         embed.add_field(name="Updated", value=str(profile.get("updated_at", "-")), inline=False)
         await interaction.followup.send(embed=embed, ephemeral=True)
 
-    @app_commands.command(name="furnace_profile_update", description="Update one or more saved furnace profile values.")
+    @app_commands.command(name="furnace_profile_update", description="Update one or more profile values.")
     async def furnace_profile_update(
         self,
         interaction: discord.Interaction,
@@ -1344,9 +986,9 @@ class WOSFurnaceCalculator(commands.Cog):
         weekly_rfc_income: Optional[int] = None,
     ) -> None:
         log_cmd("furnace_profile_update", interaction)
-        await ensure_deferred(interaction, ephemeral=True)
-        if not await self._require_allowed_channel(interaction):
+        if not await self._ensure_allowed(interaction):
             return
+        await ensure_deferred(interaction, ephemeral=True)
         try:
             profile = self._get_profile(interaction.user.id)
             if not profile:
@@ -1369,11 +1011,9 @@ class WOSFurnaceCalculator(commands.Cog):
                 self._require_non_negative("weekly_fire_crystals_income", weekly_fire_crystals_income)
                 profile["weekly_fire_crystals_income"] = weekly_fire_crystals_income
             if weekly_rfc_income is not None:
-                self._require_non_negative(
-                    "weekly_refined_fire_crystals_income", weekly_rfc_income
-                )
+                self._require_non_negative("weekly_rfc_income", weekly_rfc_income)
                 profile["weekly_refined_fire_crystals_income"] = weekly_rfc_income
-            profile["updated_at"] = datetime.now(ZoneInfo(self.timezone_name)).isoformat(timespec="seconds")
+            profile["updated_at"] = datetime.now(self._tz()).isoformat(timespec="seconds")
             self.save_profiles()
             await interaction.followup.send("✅ Furnace profile updated.", ephemeral=True)
         except Exception as exc:
@@ -1382,9 +1022,9 @@ class WOSFurnaceCalculator(commands.Cog):
     @app_commands.command(name="furnace_profile_clear", description="Delete your saved furnace profile.")
     async def furnace_profile_clear(self, interaction: discord.Interaction) -> None:
         log_cmd("furnace_profile_clear", interaction)
-        await ensure_deferred(interaction, ephemeral=True)
-        if not await self._require_allowed_channel(interaction):
+        if not await self._ensure_allowed(interaction):
             return
+        await ensure_deferred(interaction, ephemeral=True)
         if str(interaction.user.id) in self.profiles:
             self.profiles.pop(str(interaction.user.id), None)
             self.save_profiles()
@@ -1392,23 +1032,47 @@ class WOSFurnaceCalculator(commands.Cog):
         else:
             await interaction.followup.send("No saved furnace profile found.", ephemeral=True)
 
-    # ------------------------------------------------------------------
-    # Main commands
-    # ------------------------------------------------------------------
-    @app_commands.command(
-        name="furnace_refines_needed",
-        description="Show the weekly refine pace needed to hit a target furnace level by a target date.",
-    )
+    # -----------------------------
+    # help commands
+    # -----------------------------
+    @app_commands.command(name="furnace_help", description="Show the furnace calculator help sheet.")
+    async def furnace_help(self, interaction: discord.Interaction) -> None:
+        log_cmd("furnace_help", interaction)
+        if not await self._ensure_allowed(interaction):
+            return
+        await ensure_deferred(interaction, ephemeral=True)
+        await interaction.followup.send(embeds=self._build_help_embeds(), ephemeral=True)
+
+    @app_commands.command(name="furnace_post_help", description="Post the furnace help sheet into a channel.")
+    @app_commands.describe(channel="Channel to post the help sheet into")
+    async def furnace_post_help(self, interaction: discord.Interaction, channel: discord.TextChannel) -> None:
+        log_cmd("furnace_post_help", interaction)
+        if not await self._ensure_allowed(interaction):
+            return
+        await ensure_deferred(interaction, ephemeral=True)
+        try:
+            embeds = self._build_help_embeds()
+            await channel.send(embeds=embeds)
+            await interaction.followup.send(f"✅ Posted furnace help in {channel.mention}.", ephemeral=True)
+        except discord.Forbidden:
+            await interaction.followup.send("❌ I do not have permission to post in that channel.", ephemeral=True)
+        except Exception as exc:
+            await interaction.followup.send(f"❌ {exc}", ephemeral=True)
+
+    # -----------------------------
+    # main commands
+    # -----------------------------
+    @app_commands.command(name="furnace_refines_needed", description="Work out the weekly refines needed by a target date.")
     @app_commands.describe(
-        target_level="Target furnace level to reach by the date",
-        target_date="Target date: YYYY-MM-DD, DD/MM/YYYY, or DD-MM-YYYY",
-        current_level="Current furnace level. Leave blank to use saved profile",
-        current_fire_crystals="Current Fire Crystals. Leave blank to use saved profile",
-        current_refined_fire_crystals="Current Refined Fire Crystals. Leave blank to use saved profile",
-        package="Upgrade package name. Leave blank to use saved profile/default",
-        use_saved="Use saved profile defaults for any blank fields",
-        weekly_fire_crystals_income="Optional Fire Crystal income per week before the target date",
-        weekly_rfc_income="Optional Refined Fire Crystal income per week before the target date",
+        target_level="Target furnace level",
+        target_date="YYYY-MM-DD, DD/MM/YYYY, or DD-MM-YYYY",
+        current_level="Leave blank to use saved profile",
+        current_fire_crystals="Leave blank to use saved profile",
+        current_refined_fire_crystals="Leave blank to use saved profile",
+        package="Leave blank to use saved profile/default",
+        use_saved="Use saved profile defaults for blank fields",
+        weekly_fire_crystals_income="Optional Fire Crystal income per week",
+        weekly_rfc_income="Optional Refined Fire Crystal income per week",
     )
     async def furnace_refines_needed(
         self,
@@ -1424,9 +1088,9 @@ class WOSFurnaceCalculator(commands.Cog):
         weekly_rfc_income: Optional[int] = None,
     ) -> None:
         log_cmd("furnace_refines_needed", interaction)
-        await ensure_deferred(interaction, ephemeral=True)
-        if not await self._require_allowed_channel(interaction):
+        if not await self._ensure_allowed(interaction):
             return
+        await ensure_deferred(interaction, ephemeral=True)
         try:
             parsed_date = self._parse_target_date(target_date)
             start_date = self._now_local_date()
@@ -1441,7 +1105,7 @@ class WOSFurnaceCalculator(commands.Cog):
                 current_refined_fire_crystals=current_refined_fire_crystals,
                 package=package,
                 weekly_fire_crystals_income=weekly_fire_crystals_income,
-                weekly_refined_fire_crystals_income=weekly_rfc_income,
+                weekly_rfc_income=weekly_rfc_income,
             )
             package_name = merged["package"]
             current_level_name = str(merged["current_level"])
@@ -1452,35 +1116,32 @@ class WOSFurnaceCalculator(commands.Cog):
             weekly_fc_income = self._require_non_negative(
                 "weekly_fire_crystals_income", int(merged["weekly_fire_crystals_income"])
             )
-            weekly_rfc_income = self._require_non_negative(
-                "weekly_refined_fire_crystals_income", int(merged["weekly_refined_fire_crystals_income"])
-            )
+            weekly_rfc_income_val = self._require_non_negative("weekly_rfc_income", int(merged["weekly_rfc_income"]))
 
             steps = self.build_upgrade_steps(current_level_name, target_level, package_name)
             summary = self.summarize_steps(steps)
             projected_fc_income = self._project_weekly_amount(weekly_fc_income, start_date, parsed_date)
-            projected_rfc_income = self._project_weekly_amount(weekly_rfc_income, start_date, parsed_date)
+            projected_rfc_income = self._project_weekly_amount(weekly_rfc_income_val, start_date, parsed_date)
             fc_budget_for_refines = current_fc + projected_fc_income - summary["fire_crystals"]
-            rfc_shortfall_before_refines = max(0, summary["refined_fire_crystals"] - (current_rfc + projected_rfc_income))
+            current_plus_accrued_rfc = current_rfc + projected_rfc_income
+            rfc_shortfall_before_refines = max(0, summary["refined_fire_crystals"] - current_plus_accrued_rfc)
 
-            min_projection = self.find_min_weekly_refines_for_rfc(
-                rfc_shortfall_before_refines, start_date, parsed_date, mode="minimum"
-            )
-            exp_projection = self.find_min_weekly_refines_for_rfc(
-                rfc_shortfall_before_refines, start_date, parsed_date, mode="expected"
-            )
-
+            min_projection = self.find_min_weekly_refines_for_rfc(rfc_shortfall_before_refines, start_date, parsed_date, mode="minimum")
+            exp_projection = self.find_min_weekly_refines_for_rfc(rfc_shortfall_before_refines, start_date, parsed_date, mode="expected")
             min_viable = min_projection.fire_crystal_spent <= fc_budget_for_refines
             exp_viable = exp_projection.fire_crystal_spent <= fc_budget_for_refines
 
             days_available = (parsed_date - start_date).days + 1
+            weeks_left = days_available / 7.0
+            weekly_rfc_needed = (rfc_shortfall_before_refines / weeks_left) if weeks_left > 0 else 0.0
+
             embed = self._base_embed(
                 title="WoS Furnace Refines Needed",
                 description=(
                     f"**Start:** {current_level_name}\n"
                     f"**Target:** {target_level}\n"
                     f"**Package:** {package_name}\n"
-                    f"**Window:** {start_date.isoformat()} → {parsed_date.isoformat()} ({days_available} day{'s' if days_available != 1 else ''}, inclusive)"
+                    f"**Window:** {start_date.isoformat()} → {parsed_date.isoformat()} ({days_available} days, inclusive)"
                 ),
             )
             embed.add_field(
@@ -1505,35 +1166,61 @@ class WOSFurnaceCalculator(commands.Cog):
                 name="Before-Refine Position",
                 value=(
                     f"FC left for refines: **{self._fmt_int(fc_budget_for_refines)}**\n"
-                    f"RFC still needed: **{self._fmt_int(rfc_shortfall_before_refines)}**"
+                    f"RFC still needed: **{self._fmt_int(rfc_shortfall_before_refines)}**\n"
+                    f"Weeks left: **{self._fmt_float(weeks_left)}**\n"
+                    f"Weekly RFC needed: **{self._fmt_float(weekly_rfc_needed)}**"
                 ),
                 inline=True,
             )
 
             def build_mode_block(projection: RefineWindowProjection, viable: bool, theoretical: bool) -> str:
-                produced = projection.expected_rfc if theoretical else projection.minimum_rfc
+                produced = projection.expected_rfc if theoretical else float(projection.minimum_rfc)
                 remaining_fc_after_refines = fc_budget_for_refines - projection.fire_crystal_spent
                 status = "✅ Works" if viable else "❌ Not enough FC budget"
+                monday_refines = projection.weekly_refines - 6 if projection.weekly_refines >= 7 else min(projection.weekly_refines, 1)
+                delta_rfc = produced - rfc_shortfall_before_refines
                 return (
                     f"{status}\n"
                     f"Weekly refines needed: **{self._fmt_int(projection.weekly_refines)}**\n"
+                    f"Monday refines: **{self._fmt_int(max(monday_refines, 0))}**\n"
                     f"Attempts in window: **{self._fmt_int(projection.total_attempts)}**\n"
                     f"FC spent on refines: **{self._fmt_int(projection.fire_crystal_spent)}**\n"
                     f"RFC from refines: **{self._fmt_float(produced) if theoretical else self._fmt_int(int(produced))}**\n"
+                    f"RFC delta vs target: **{self._fmt_float(delta_rfc) if theoretical else self._fmt_int(int(delta_rfc))}**\n"
                     f"FC left after refines: **{self._fmt_int(remaining_fc_after_refines)}**\n"
                     f"Do this weekly: {self._format_weekly_schedule(projection.weekly_refines)}"
                 )
 
-            embed.add_field(
-                name="Guaranteed / Minimum RFC Plan",
-                value=build_mode_block(min_projection, min_viable, theoretical=False),
-                inline=False,
-            )
-            embed.add_field(
-                name="Expected / Theoretical RFC Plan",
-                value=build_mode_block(exp_projection, exp_viable, theoretical=True),
-                inline=False,
-            )
+            embed.add_field(name="Guaranteed / Minimum RFC Plan", value=build_mode_block(min_projection, min_viable, theoretical=False), inline=False)
+            embed.add_field(name="Expected / Theoretical RFC Plan", value=build_mode_block(exp_projection, exp_viable, theoretical=True), inline=False)
+
+            if not min_viable or not exp_viable:
+                affordable_projection = self.find_max_weekly_refines_for_fc_budget(max(0, fc_budget_for_refines), start_date, parsed_date)
+                guaranteed_budget_result = self.forecast_reachable_level(
+                    current_level=current_level_name,
+                    available_fc=current_fc + projected_fc_income - affordable_projection.fire_crystal_spent,
+                    available_rfc=current_plus_accrued_rfc + affordable_projection.minimum_rfc,
+                    package_name=package_name,
+                )
+                expected_budget_result = self.forecast_reachable_level(
+                    current_level=current_level_name,
+                    available_fc=current_fc + projected_fc_income - affordable_projection.fire_crystal_spent,
+                    available_rfc=current_plus_accrued_rfc + math.floor(affordable_projection.expected_rfc),
+                    package_name=package_name,
+                )
+                embed.add_field(
+                    name="Budget-Limited Best You Can Do",
+                    value=(
+                        f"Max weekly refines affordable: **{self._fmt_int(affordable_projection.weekly_refines)}**\n"
+                        f"Weekly pattern: {self._format_weekly_schedule(affordable_projection.weekly_refines)}\n"
+                        f"FC spent on refines: **{self._fmt_int(affordable_projection.fire_crystal_spent)}**\n"
+                        f"Guaranteed RFC from refines: **{self._fmt_int(affordable_projection.minimum_rfc)}**\n"
+                        f"Expected RFC from refines: **{self._fmt_float(affordable_projection.expected_rfc)}**\n"
+                        f"Guaranteed reachable level: **{guaranteed_budget_result['reached_level']}**\n"
+                        f"Expected reachable level: **{expected_budget_result['reached_level']}**"
+                    ),
+                    inline=False,
+                )
 
             if steps:
                 lines = [
@@ -1544,31 +1231,21 @@ class WOSFurnaceCalculator(commands.Cog):
                     lines.append(f"… and {len(steps) - 10} more step(s)")
                 embed.add_field(name="Upgrade Path", value="\n".join(lines), inline=False)
 
-            if not min_viable and not exp_viable:
-                embed.add_field(
-                    name="Result",
-                    value="You do not have enough Fire Crystal budget left for the required refines in this window, even before considering bad rolls.",
-                    inline=False,
-                )
-
             await interaction.followup.send(embed=embed, ephemeral=True)
         except Exception as exc:
             await interaction.followup.send(f"❌ {exc}", ephemeral=True)
 
-    @app_commands.command(
-        name="furnace_upgrade_forecast",
-        description="Forecast the highest guaranteed and expected furnace level by a target date.",
-    )
+    @app_commands.command(name="furnace_upgrade_forecast", description="Given weekly refines, show the highest level reachable by date.")
     @app_commands.describe(
-        target_date="Target date: YYYY-MM-DD, DD/MM/YYYY, or DD-MM-YYYY",
-        weekly_refines="How many total refines you plan to do per week",
-        current_level="Current furnace level. Leave blank to use saved profile",
-        current_fire_crystals="Current Fire Crystals. Leave blank to use saved profile",
-        current_refined_fire_crystals="Current Refined Fire Crystals. Leave blank to use saved profile",
-        package="Upgrade package name. Leave blank to use saved profile/default",
-        use_saved="Use saved profile defaults for any blank fields",
-        weekly_fire_crystals_income="Optional Fire Crystal income per week before the target date",
-        weekly_rfc_income="Optional Refined Fire Crystal income per week before the target date",
+        target_date="YYYY-MM-DD, DD/MM/YYYY, or DD-MM-YYYY",
+        weekly_refines="Refines you plan to do each week",
+        current_level="Leave blank to use saved profile",
+        current_fire_crystals="Leave blank to use saved profile",
+        current_refined_fire_crystals="Leave blank to use saved profile",
+        package="Leave blank to use saved profile/default",
+        use_saved="Use saved profile defaults for blank fields",
+        weekly_fire_crystals_income="Optional Fire Crystal income per week",
+        weekly_rfc_income="Optional Refined Fire Crystal income per week",
     )
     async def furnace_upgrade_forecast(
         self,
@@ -1584,9 +1261,9 @@ class WOSFurnaceCalculator(commands.Cog):
         weekly_rfc_income: Optional[int] = None,
     ) -> None:
         log_cmd("furnace_upgrade_forecast", interaction)
-        await ensure_deferred(interaction, ephemeral=True)
-        if not await self._require_allowed_channel(interaction):
+        if not await self._ensure_allowed(interaction):
             return
+        await ensure_deferred(interaction, ephemeral=True)
         try:
             parsed_date = self._parse_target_date(target_date)
             start_date = self._now_local_date()
@@ -1601,7 +1278,7 @@ class WOSFurnaceCalculator(commands.Cog):
                 current_refined_fire_crystals=current_refined_fire_crystals,
                 package=package,
                 weekly_fire_crystals_income=weekly_fire_crystals_income,
-                weekly_refined_fire_crystals_income=weekly_rfc_income,
+                weekly_rfc_income=weekly_rfc_income,
             )
             profile = self._get_profile(interaction.user.id) if use_saved else {}
             if weekly_refines is None:
@@ -1617,30 +1294,18 @@ class WOSFurnaceCalculator(commands.Cog):
             weekly_fc_income = self._require_non_negative(
                 "weekly_fire_crystals_income", int(merged["weekly_fire_crystals_income"])
             )
-            weekly_rfc_income = self._require_non_negative(
-                "weekly_refined_fire_crystals_income", int(merged["weekly_refined_fire_crystals_income"])
-            )
+            weekly_rfc_income_val = self._require_non_negative("weekly_rfc_income", int(merged["weekly_rfc_income"]))
 
             projected_fc_income = self._project_weekly_amount(weekly_fc_income, start_date, parsed_date)
-            projected_rfc_income = self._project_weekly_amount(weekly_rfc_income, start_date, parsed_date)
+            projected_rfc_income = self._project_weekly_amount(weekly_rfc_income_val, start_date, parsed_date)
             refine_projection = self.simulate_window_refines(weekly_refines, start_date, parsed_date)
 
             total_fc_pool = current_fc + projected_fc_income - refine_projection.fire_crystal_spent
             guaranteed_rfc_pool = current_rfc + projected_rfc_income + refine_projection.minimum_rfc
             expected_rfc_pool = current_rfc + projected_rfc_income + math.floor(refine_projection.expected_rfc)
 
-            guaranteed_result = self.forecast_reachable_level(
-                current_level=current_level_name,
-                available_fc=total_fc_pool,
-                available_rfc=guaranteed_rfc_pool,
-                package_name=package_name,
-            )
-            expected_result = self.forecast_reachable_level(
-                current_level=current_level_name,
-                available_fc=total_fc_pool,
-                available_rfc=expected_rfc_pool,
-                package_name=package_name,
-            )
+            guaranteed_result = self.forecast_reachable_level(current_level_name, total_fc_pool, guaranteed_rfc_pool, package_name)
+            expected_result = self.forecast_reachable_level(current_level_name, total_fc_pool, expected_rfc_pool, package_name)
 
             days_available = (parsed_date - start_date).days + 1
             embed = self._base_embed(
@@ -1648,13 +1313,15 @@ class WOSFurnaceCalculator(commands.Cog):
                 description=(
                     f"**Start:** {current_level_name}\n"
                     f"**Package:** {package_name}\n"
-                    f"**Window:** {start_date.isoformat()} → {parsed_date.isoformat()} ({days_available} day{'s' if days_available != 1 else ''}, inclusive)"
+                    f"**Window:** {start_date.isoformat()} → {parsed_date.isoformat()} ({days_available} days, inclusive)"
                 ),
             )
+            monday_refines = weekly_refines - 6 if weekly_refines >= 7 else min(weekly_refines, 1)
             embed.add_field(
                 name="Weekly Refine Plan",
                 value=(
                     f"Weekly refines: **{self._fmt_int(weekly_refines)}**\n"
+                    f"Monday refines: **{self._fmt_int(max(monday_refines, 0))}**\n"
                     f"Do this weekly: {self._format_weekly_schedule(weekly_refines)}\n"
                     f"Attempts in window: **{self._fmt_int(refine_projection.total_attempts)}**"
                 ),
@@ -1698,7 +1365,6 @@ class WOSFurnaceCalculator(commands.Cog):
                 ),
                 inline=True,
             )
-
             if guaranteed_result.get("next_step"):
                 next_step = guaranteed_result["next_step"]
                 missing_fc = max(0, next_step["fire_crystals"] - guaranteed_result["remaining_fc"])
@@ -1713,7 +1379,6 @@ class WOSFurnaceCalculator(commands.Cog):
                     ),
                     inline=False,
                 )
-
             if guaranteed_result["steps_taken"]:
                 lines = [
                     f"`{step['from_level']} → {step['to_level']}` — {self._step_building_summary(step)}"
@@ -1722,7 +1387,6 @@ class WOSFurnaceCalculator(commands.Cog):
                 if len(guaranteed_result["steps_taken"]) > 10:
                     lines.append(f"… and {len(guaranteed_result['steps_taken']) - 10} more step(s)")
                 embed.add_field(name="Guaranteed Path", value="\n".join(lines), inline=False)
-
             if expected_result["steps_taken"] and expected_result["steps_taken"] != guaranteed_result["steps_taken"]:
                 lines = [
                     f"`{step['from_level']} → {step['to_level']}` — {self._step_building_summary(step)}"
@@ -1731,17 +1395,16 @@ class WOSFurnaceCalculator(commands.Cog):
                 if len(expected_result["steps_taken"]) > 10:
                     lines.append(f"… and {len(expected_result['steps_taken']) - 10} more step(s)")
                 embed.add_field(name="Expected Path", value="\n".join(lines), inline=False)
-
             await interaction.followup.send(embed=embed, ephemeral=True)
         except Exception as exc:
             await interaction.followup.send(f"❌ {exc}", ephemeral=True)
 
-    @app_commands.command(name="furnace_reference_check", description="Show loaded furnace/reference metadata.")
+    @app_commands.command(name="furnace_reference_check", description="Show loaded furnace reference metadata.")
     async def furnace_reference_check(self, interaction: discord.Interaction) -> None:
         log_cmd("furnace_reference_check", interaction)
-        await ensure_deferred(interaction, ephemeral=True)
-        if not await self._require_allowed_channel(interaction):
+        if not await self._ensure_allowed(interaction):
             return
+        await ensure_deferred(interaction, ephemeral=True)
         try:
             package_names: List[str] = []
             for entry in self.upgrades["levels"]:
@@ -1766,17 +1429,13 @@ class WOSFurnaceCalculator(commands.Cog):
         except Exception as exc:
             await interaction.followup.send(f"❌ {exc}", ephemeral=True)
 
-    @app_commands.command(
-        name="furnace_reference_reload",
-        description="Reload the furnace JSON reference files without restarting the bot.",
-    )
+    @app_commands.command(name="furnace_reference_reload", description="Reload the furnace JSON references.")
     async def furnace_reference_reload(self, interaction: discord.Interaction) -> None:
         log_cmd("furnace_reference_reload", interaction)
-        await ensure_deferred(interaction, ephemeral=True)
-        if not await self._require_allowed_channel(interaction):
+        if not await self._ensure_allowed(interaction):
             return
+        await ensure_deferred(interaction, ephemeral=True)
         try:
-            self._ensure_default_files()
             self.load_reference_files()
             self.load_profiles()
             await interaction.followup.send(
@@ -1786,39 +1445,31 @@ class WOSFurnaceCalculator(commands.Cog):
         except Exception as exc:
             await interaction.followup.send(f"❌ Reload failed: {exc}", ephemeral=True)
 
-    # ------------------------------------------------------------------
-    # Autocomplete bindings
-    # ------------------------------------------------------------------
+    # -----------------------------
+    # autocomplete bindings
+    # -----------------------------
     @furnace_profile_set.autocomplete("current_level")
     @furnace_profile_update.autocomplete("current_level")
     @furnace_refines_needed.autocomplete("current_level")
     @furnace_refines_needed.autocomplete("target_level")
     @furnace_upgrade_forecast.autocomplete("current_level")
-    async def furnace_level_autocomplete(
-        self,
-        interaction: discord.Interaction,
-        current: str,
-    ) -> List[app_commands.Choice[str]]:
+    async def furnace_level_autocomplete(self, interaction: discord.Interaction, current: str) -> List[app_commands.Choice[str]]:
         return await self._level_choices(current)
 
     @furnace_profile_set.autocomplete("preferred_package")
     @furnace_profile_update.autocomplete("preferred_package")
     @furnace_refines_needed.autocomplete("package")
     @furnace_upgrade_forecast.autocomplete("package")
-    async def furnace_package_autocomplete(
-        self,
-        interaction: discord.Interaction,
-        current: str,
-    ) -> List[app_commands.Choice[str]]:
+    async def furnace_package_autocomplete(self, interaction: discord.Interaction, current: str) -> List[app_commands.Choice[str]]:
         return await self._package_choices(interaction, current)
 
 
 async def setup(bot: commands.Bot) -> None:
+    if not hasattr(bot, "settings"):
+        bot.settings = SettingsManager(bot.hot_config)
     cog = WOSFurnaceCalculator(bot)
-
     guild_obj = discord.Object(id=bot.hot_config["guild_id"])
     for cmd in cog.get_app_commands():
         cmd._guild_ids = {bot.hot_config["guild_id"]}
         cmd.guilds = (guild_obj,)
-
     await bot.add_cog(cog)
