@@ -1,0 +1,1189 @@
+{
+  "version": "1.0.0",
+  "timezone": "Australia/Brisbane",
+  "notes": [
+    "This file holds furnace/building upgrade requirements only.",
+    "Each entry describes the cost to go FROM 'level' TO 'next_level'.",
+    "Packages included: minimum, all_camps, full_furnace.",
+    "Minimum = Furnace + Embassy + choose 1 troop camp.",
+    "All camps = Furnace + Embassy + Infantry/Marksman/Lancer Camp.",
+    "Full furnace = Furnace + Embassy + all camps + Command Center + Infirmary + War Academy."
+  ],
+  "levels": [
+    {
+      "level": "FC0",
+      "next_level": "FC1",
+      "packages": {
+        "minimum": {
+          "description": "Furnace, Embassy, and choose 1 troop camp.",
+          "requirements": [
+            {
+              "building": "Furnace",
+              "fire_crystals": 132,
+              "refined_fire_crystals": 0
+            },
+            {
+              "building": "Embassy",
+              "fire_crystals": 33,
+              "refined_fire_crystals": 0
+            },
+            {
+              "choice_group": "one_troop_camp",
+              "choose": 1,
+              "options": [
+                {
+                  "building": "Infantry Camp",
+                  "fire_crystals": 59,
+                  "refined_fire_crystals": 0
+                },
+                {
+                  "building": "Marksman Camp",
+                  "fire_crystals": 59,
+                  "refined_fire_crystals": 0
+                },
+                {
+                  "building": "Lancer Camp",
+                  "fire_crystals": 59,
+                  "refined_fire_crystals": 0
+                }
+              ]
+            }
+          ]
+        },
+        "all_camps": {
+          "description": "Furnace, Embassy, and all three troop camps.",
+          "requirements": [
+            {
+              "building": "Furnace",
+              "fire_crystals": 132,
+              "refined_fire_crystals": 0
+            },
+            {
+              "building": "Embassy",
+              "fire_crystals": 33,
+              "refined_fire_crystals": 0
+            },
+            {
+              "building": "Infantry Camp",
+              "fire_crystals": 59,
+              "refined_fire_crystals": 0
+            },
+            {
+              "building": "Marksman Camp",
+              "fire_crystals": 59,
+              "refined_fire_crystals": 0
+            },
+            {
+              "building": "Lancer Camp",
+              "fire_crystals": 59,
+              "refined_fire_crystals": 0
+            }
+          ]
+        },
+        "full_furnace": {
+          "description": "Furnace, Embassy, all troop camps, Command Center, Infirmary, and War Academy.",
+          "requirements": [
+            {
+              "building": "Furnace",
+              "fire_crystals": 132,
+              "refined_fire_crystals": 0
+            },
+            {
+              "building": "Embassy",
+              "fire_crystals": 33,
+              "refined_fire_crystals": 0
+            },
+            {
+              "building": "Infantry Camp",
+              "fire_crystals": 59,
+              "refined_fire_crystals": 0
+            },
+            {
+              "building": "Marksman Camp",
+              "fire_crystals": 59,
+              "refined_fire_crystals": 0
+            },
+            {
+              "building": "Lancer Camp",
+              "fire_crystals": 59,
+              "refined_fire_crystals": 0
+            },
+            {
+              "building": "Command Center",
+              "fire_crystals": 26,
+              "refined_fire_crystals": 0
+            },
+            {
+              "building": "Infirmary",
+              "fire_crystals": 26,
+              "refined_fire_crystals": 0
+            },
+            {
+              "building": "War Academy",
+              "fire_crystals": 0,
+              "refined_fire_crystals": 0
+            }
+          ]
+        }
+      }
+    },
+    {
+      "level": "FC1",
+      "next_level": "FC2",
+      "packages": {
+        "minimum": {
+          "description": "Furnace, Embassy, and choose 1 troop camp.",
+          "requirements": [
+            {
+              "building": "Furnace",
+              "fire_crystals": 158,
+              "refined_fire_crystals": 0
+            },
+            {
+              "building": "Embassy",
+              "fire_crystals": 39,
+              "refined_fire_crystals": 0
+            },
+            {
+              "choice_group": "one_troop_camp",
+              "choose": 1,
+              "options": [
+                {
+                  "building": "Infantry Camp",
+                  "fire_crystals": 71,
+                  "refined_fire_crystals": 0
+                },
+                {
+                  "building": "Marksman Camp",
+                  "fire_crystals": 71,
+                  "refined_fire_crystals": 0
+                },
+                {
+                  "building": "Lancer Camp",
+                  "fire_crystals": 71,
+                  "refined_fire_crystals": 0
+                }
+              ]
+            }
+          ]
+        },
+        "all_camps": {
+          "description": "Furnace, Embassy, and all three troop camps.",
+          "requirements": [
+            {
+              "building": "Furnace",
+              "fire_crystals": 158,
+              "refined_fire_crystals": 0
+            },
+            {
+              "building": "Embassy",
+              "fire_crystals": 39,
+              "refined_fire_crystals": 0
+            },
+            {
+              "building": "Infantry Camp",
+              "fire_crystals": 71,
+              "refined_fire_crystals": 0
+            },
+            {
+              "building": "Marksman Camp",
+              "fire_crystals": 71,
+              "refined_fire_crystals": 0
+            },
+            {
+              "building": "Lancer Camp",
+              "fire_crystals": 71,
+              "refined_fire_crystals": 0
+            }
+          ]
+        },
+        "full_furnace": {
+          "description": "Furnace, Embassy, all troop camps, Command Center, Infirmary, and War Academy.",
+          "requirements": [
+            {
+              "building": "Furnace",
+              "fire_crystals": 158,
+              "refined_fire_crystals": 0
+            },
+            {
+              "building": "Embassy",
+              "fire_crystals": 39,
+              "refined_fire_crystals": 0
+            },
+            {
+              "building": "Infantry Camp",
+              "fire_crystals": 71,
+              "refined_fire_crystals": 0
+            },
+            {
+              "building": "Marksman Camp",
+              "fire_crystals": 71,
+              "refined_fire_crystals": 0
+            },
+            {
+              "building": "Lancer Camp",
+              "fire_crystals": 71,
+              "refined_fire_crystals": 0
+            },
+            {
+              "building": "Command Center",
+              "fire_crystals": 31,
+              "refined_fire_crystals": 0
+            },
+            {
+              "building": "Infirmary",
+              "fire_crystals": 31,
+              "refined_fire_crystals": 0
+            },
+            {
+              "building": "War Academy",
+              "fire_crystals": 0,
+              "refined_fire_crystals": 0
+            }
+          ]
+        }
+      }
+    },
+    {
+      "level": "FC2",
+      "next_level": "FC3",
+      "packages": {
+        "minimum": {
+          "description": "Furnace, Embassy, and choose 1 troop camp.",
+          "requirements": [
+            {
+              "building": "Furnace",
+              "fire_crystals": 238,
+              "refined_fire_crystals": 0
+            },
+            {
+              "building": "Embassy",
+              "fire_crystals": 59,
+              "refined_fire_crystals": 0
+            },
+            {
+              "choice_group": "one_troop_camp",
+              "choose": 1,
+              "options": [
+                {
+                  "building": "Infantry Camp",
+                  "fire_crystals": 107,
+                  "refined_fire_crystals": 0
+                },
+                {
+                  "building": "Marksman Camp",
+                  "fire_crystals": 107,
+                  "refined_fire_crystals": 0
+                },
+                {
+                  "building": "Lancer Camp",
+                  "fire_crystals": 107,
+                  "refined_fire_crystals": 0
+                }
+              ]
+            }
+          ]
+        },
+        "all_camps": {
+          "description": "Furnace, Embassy, and all three troop camps.",
+          "requirements": [
+            {
+              "building": "Furnace",
+              "fire_crystals": 238,
+              "refined_fire_crystals": 0
+            },
+            {
+              "building": "Embassy",
+              "fire_crystals": 59,
+              "refined_fire_crystals": 0
+            },
+            {
+              "building": "Infantry Camp",
+              "fire_crystals": 107,
+              "refined_fire_crystals": 0
+            },
+            {
+              "building": "Marksman Camp",
+              "fire_crystals": 107,
+              "refined_fire_crystals": 0
+            },
+            {
+              "building": "Lancer Camp",
+              "fire_crystals": 107,
+              "refined_fire_crystals": 0
+            }
+          ]
+        },
+        "full_furnace": {
+          "description": "Furnace, Embassy, all troop camps, Command Center, Infirmary, and War Academy.",
+          "requirements": [
+            {
+              "building": "Furnace",
+              "fire_crystals": 238,
+              "refined_fire_crystals": 0
+            },
+            {
+              "building": "Embassy",
+              "fire_crystals": 59,
+              "refined_fire_crystals": 0
+            },
+            {
+              "building": "Infantry Camp",
+              "fire_crystals": 107,
+              "refined_fire_crystals": 0
+            },
+            {
+              "building": "Marksman Camp",
+              "fire_crystals": 107,
+              "refined_fire_crystals": 0
+            },
+            {
+              "building": "Lancer Camp",
+              "fire_crystals": 107,
+              "refined_fire_crystals": 0
+            },
+            {
+              "building": "Command Center",
+              "fire_crystals": 47,
+              "refined_fire_crystals": 0
+            },
+            {
+              "building": "Infirmary",
+              "fire_crystals": 47,
+              "refined_fire_crystals": 0
+            },
+            {
+              "building": "War Academy",
+              "fire_crystals": 0,
+              "refined_fire_crystals": 0
+            }
+          ]
+        }
+      }
+    },
+    {
+      "level": "FC3",
+      "next_level": "FC4",
+      "packages": {
+        "minimum": {
+          "description": "Furnace, Embassy, and choose 1 troop camp.",
+          "requirements": [
+            {
+              "building": "Furnace",
+              "fire_crystals": 280,
+              "refined_fire_crystals": 0
+            },
+            {
+              "building": "Embassy",
+              "fire_crystals": 70,
+              "refined_fire_crystals": 0
+            },
+            {
+              "choice_group": "one_troop_camp",
+              "choose": 1,
+              "options": [
+                {
+                  "building": "Infantry Camp",
+                  "fire_crystals": 126,
+                  "refined_fire_crystals": 0
+                },
+                {
+                  "building": "Marksman Camp",
+                  "fire_crystals": 126,
+                  "refined_fire_crystals": 0
+                },
+                {
+                  "building": "Lancer Camp",
+                  "fire_crystals": 126,
+                  "refined_fire_crystals": 0
+                }
+              ]
+            }
+          ]
+        },
+        "all_camps": {
+          "description": "Furnace, Embassy, and all three troop camps.",
+          "requirements": [
+            {
+              "building": "Furnace",
+              "fire_crystals": 280,
+              "refined_fire_crystals": 0
+            },
+            {
+              "building": "Embassy",
+              "fire_crystals": 70,
+              "refined_fire_crystals": 0
+            },
+            {
+              "building": "Infantry Camp",
+              "fire_crystals": 126,
+              "refined_fire_crystals": 0
+            },
+            {
+              "building": "Marksman Camp",
+              "fire_crystals": 126,
+              "refined_fire_crystals": 0
+            },
+            {
+              "building": "Lancer Camp",
+              "fire_crystals": 126,
+              "refined_fire_crystals": 0
+            }
+          ]
+        },
+        "full_furnace": {
+          "description": "Furnace, Embassy, all troop camps, Command Center, Infirmary, and War Academy.",
+          "requirements": [
+            {
+              "building": "Furnace",
+              "fire_crystals": 280,
+              "refined_fire_crystals": 0
+            },
+            {
+              "building": "Embassy",
+              "fire_crystals": 70,
+              "refined_fire_crystals": 0
+            },
+            {
+              "building": "Infantry Camp",
+              "fire_crystals": 126,
+              "refined_fire_crystals": 0
+            },
+            {
+              "building": "Marksman Camp",
+              "fire_crystals": 126,
+              "refined_fire_crystals": 0
+            },
+            {
+              "building": "Lancer Camp",
+              "fire_crystals": 126,
+              "refined_fire_crystals": 0
+            },
+            {
+              "building": "Command Center",
+              "fire_crystals": 56,
+              "refined_fire_crystals": 0
+            },
+            {
+              "building": "Infirmary",
+              "fire_crystals": 56,
+              "refined_fire_crystals": 0
+            },
+            {
+              "building": "War Academy",
+              "fire_crystals": 0,
+              "refined_fire_crystals": 0
+            }
+          ]
+        }
+      }
+    },
+    {
+      "level": "FC4",
+      "next_level": "FC5",
+      "packages": {
+        "minimum": {
+          "description": "Furnace, Embassy, and choose 1 troop camp.",
+          "requirements": [
+            {
+              "building": "Furnace",
+              "fire_crystals": 335,
+              "refined_fire_crystals": 0
+            },
+            {
+              "building": "Embassy",
+              "fire_crystals": 83,
+              "refined_fire_crystals": 0
+            },
+            {
+              "choice_group": "one_troop_camp",
+              "choose": 1,
+              "options": [
+                {
+                  "building": "Infantry Camp",
+                  "fire_crystals": 150,
+                  "refined_fire_crystals": 0
+                },
+                {
+                  "building": "Marksman Camp",
+                  "fire_crystals": 150,
+                  "refined_fire_crystals": 0
+                },
+                {
+                  "building": "Lancer Camp",
+                  "fire_crystals": 150,
+                  "refined_fire_crystals": 0
+                }
+              ]
+            }
+          ]
+        },
+        "all_camps": {
+          "description": "Furnace, Embassy, and all three troop camps.",
+          "requirements": [
+            {
+              "building": "Furnace",
+              "fire_crystals": 335,
+              "refined_fire_crystals": 0
+            },
+            {
+              "building": "Embassy",
+              "fire_crystals": 83,
+              "refined_fire_crystals": 0
+            },
+            {
+              "building": "Infantry Camp",
+              "fire_crystals": 150,
+              "refined_fire_crystals": 0
+            },
+            {
+              "building": "Marksman Camp",
+              "fire_crystals": 150,
+              "refined_fire_crystals": 0
+            },
+            {
+              "building": "Lancer Camp",
+              "fire_crystals": 150,
+              "refined_fire_crystals": 0
+            }
+          ]
+        },
+        "full_furnace": {
+          "description": "Furnace, Embassy, all troop camps, Command Center, Infirmary, and War Academy.",
+          "requirements": [
+            {
+              "building": "Furnace",
+              "fire_crystals": 335,
+              "refined_fire_crystals": 0
+            },
+            {
+              "building": "Embassy",
+              "fire_crystals": 83,
+              "refined_fire_crystals": 0
+            },
+            {
+              "building": "Infantry Camp",
+              "fire_crystals": 150,
+              "refined_fire_crystals": 0
+            },
+            {
+              "building": "Marksman Camp",
+              "fire_crystals": 150,
+              "refined_fire_crystals": 0
+            },
+            {
+              "building": "Lancer Camp",
+              "fire_crystals": 150,
+              "refined_fire_crystals": 0
+            },
+            {
+              "building": "Command Center",
+              "fire_crystals": 67,
+              "refined_fire_crystals": 0
+            },
+            {
+              "building": "Infirmary",
+              "fire_crystals": 67,
+              "refined_fire_crystals": 0
+            },
+            {
+              "building": "War Academy",
+              "fire_crystals": 0,
+              "refined_fire_crystals": 0
+            }
+          ]
+        }
+      }
+    },
+    {
+      "level": "FC5",
+      "next_level": "FC6",
+      "packages": {
+        "minimum": {
+          "description": "Furnace, Embassy, and choose 1 troop camp.",
+          "requirements": [
+            {
+              "building": "Furnace",
+              "fire_crystals": 900,
+              "refined_fire_crystals": 60
+            },
+            {
+              "building": "Embassy",
+              "fire_crystals": 225,
+              "refined_fire_crystals": 13
+            },
+            {
+              "choice_group": "one_troop_camp",
+              "choose": 1,
+              "options": [
+                {
+                  "building": "Infantry Camp",
+                  "fire_crystals": 405,
+                  "refined_fire_crystals": 26
+                },
+                {
+                  "building": "Marksman Camp",
+                  "fire_crystals": 405,
+                  "refined_fire_crystals": 26
+                },
+                {
+                  "building": "Lancer Camp",
+                  "fire_crystals": 405,
+                  "refined_fire_crystals": 26
+                }
+              ]
+            }
+          ]
+        },
+        "all_camps": {
+          "description": "Furnace, Embassy, and all three troop camps.",
+          "requirements": [
+            {
+              "building": "Furnace",
+              "fire_crystals": 900,
+              "refined_fire_crystals": 60
+            },
+            {
+              "building": "Embassy",
+              "fire_crystals": 225,
+              "refined_fire_crystals": 13
+            },
+            {
+              "building": "Infantry Camp",
+              "fire_crystals": 405,
+              "refined_fire_crystals": 26
+            },
+            {
+              "building": "Marksman Camp",
+              "fire_crystals": 405,
+              "refined_fire_crystals": 26
+            },
+            {
+              "building": "Lancer Camp",
+              "fire_crystals": 405,
+              "refined_fire_crystals": 26
+            }
+          ]
+        },
+        "full_furnace": {
+          "description": "Furnace, Embassy, all troop camps, Command Center, Infirmary, and War Academy.",
+          "requirements": [
+            {
+              "building": "Furnace",
+              "fire_crystals": 900,
+              "refined_fire_crystals": 60
+            },
+            {
+              "building": "Embassy",
+              "fire_crystals": 225,
+              "refined_fire_crystals": 13
+            },
+            {
+              "building": "Infantry Camp",
+              "fire_crystals": 405,
+              "refined_fire_crystals": 26
+            },
+            {
+              "building": "Marksman Camp",
+              "fire_crystals": 405,
+              "refined_fire_crystals": 26
+            },
+            {
+              "building": "Lancer Camp",
+              "fire_crystals": 405,
+              "refined_fire_crystals": 26
+            },
+            {
+              "building": "Command Center",
+              "fire_crystals": 180,
+              "refined_fire_crystals": 13
+            },
+            {
+              "building": "Infirmary",
+              "fire_crystals": 180,
+              "refined_fire_crystals": 13
+            },
+            {
+              "building": "War Academy",
+              "fire_crystals": 405,
+              "refined_fire_crystals": 26
+            }
+          ]
+        }
+      }
+    },
+    {
+      "level": "FC6",
+      "next_level": "FC7",
+      "packages": {
+        "minimum": {
+          "description": "Furnace, Embassy, and choose 1 troop camp.",
+          "requirements": [
+            {
+              "building": "Furnace",
+              "fire_crystals": 1080,
+              "refined_fire_crystals": 90
+            },
+            {
+              "building": "Embassy",
+              "fire_crystals": 270,
+              "refined_fire_crystals": 19
+            },
+            {
+              "choice_group": "one_troop_camp",
+              "choose": 1,
+              "options": [
+                {
+                  "building": "Infantry Camp",
+                  "fire_crystals": 486,
+                  "refined_fire_crystals": 37
+                },
+                {
+                  "building": "Marksman Camp",
+                  "fire_crystals": 486,
+                  "refined_fire_crystals": 37
+                },
+                {
+                  "building": "Lancer Camp",
+                  "fire_crystals": 486,
+                  "refined_fire_crystals": 37
+                }
+              ]
+            }
+          ]
+        },
+        "all_camps": {
+          "description": "Furnace, Embassy, and all three troop camps.",
+          "requirements": [
+            {
+              "building": "Furnace",
+              "fire_crystals": 1080,
+              "refined_fire_crystals": 90
+            },
+            {
+              "building": "Embassy",
+              "fire_crystals": 270,
+              "refined_fire_crystals": 19
+            },
+            {
+              "building": "Infantry Camp",
+              "fire_crystals": 486,
+              "refined_fire_crystals": 37
+            },
+            {
+              "building": "Marksman Camp",
+              "fire_crystals": 486,
+              "refined_fire_crystals": 37
+            },
+            {
+              "building": "Lancer Camp",
+              "fire_crystals": 486,
+              "refined_fire_crystals": 37
+            }
+          ]
+        },
+        "full_furnace": {
+          "description": "Furnace, Embassy, all troop camps, Command Center, Infirmary, and War Academy.",
+          "requirements": [
+            {
+              "building": "Furnace",
+              "fire_crystals": 1080,
+              "refined_fire_crystals": 90
+            },
+            {
+              "building": "Embassy",
+              "fire_crystals": 270,
+              "refined_fire_crystals": 19
+            },
+            {
+              "building": "Infantry Camp",
+              "fire_crystals": 486,
+              "refined_fire_crystals": 37
+            },
+            {
+              "building": "Marksman Camp",
+              "fire_crystals": 486,
+              "refined_fire_crystals": 37
+            },
+            {
+              "building": "Lancer Camp",
+              "fire_crystals": 486,
+              "refined_fire_crystals": 37
+            },
+            {
+              "building": "Command Center",
+              "fire_crystals": 216,
+              "refined_fire_crystals": 19
+            },
+            {
+              "building": "Infirmary",
+              "fire_crystals": 216,
+              "refined_fire_crystals": 19
+            },
+            {
+              "building": "War Academy",
+              "fire_crystals": 486,
+              "refined_fire_crystals": 37
+            }
+          ]
+        }
+      }
+    },
+    {
+      "level": "FC7",
+      "next_level": "FC8",
+      "packages": {
+        "minimum": {
+          "description": "Furnace, Embassy, and choose 1 troop camp.",
+          "requirements": [
+            {
+              "building": "Furnace",
+              "fire_crystals": 1080,
+              "refined_fire_crystals": 120
+            },
+            {
+              "building": "Embassy",
+              "fire_crystals": 270,
+              "refined_fire_crystals": 30
+            },
+            {
+              "choice_group": "one_troop_camp",
+              "choose": 1,
+              "options": [
+                {
+                  "building": "Infantry Camp",
+                  "fire_crystals": 486,
+                  "refined_fire_crystals": 53
+                },
+                {
+                  "building": "Marksman Camp",
+                  "fire_crystals": 486,
+                  "refined_fire_crystals": 53
+                },
+                {
+                  "building": "Lancer Camp",
+                  "fire_crystals": 486,
+                  "refined_fire_crystals": 53
+                }
+              ]
+            }
+          ]
+        },
+        "all_camps": {
+          "description": "Furnace, Embassy, and all three troop camps.",
+          "requirements": [
+            {
+              "building": "Furnace",
+              "fire_crystals": 1080,
+              "refined_fire_crystals": 120
+            },
+            {
+              "building": "Embassy",
+              "fire_crystals": 270,
+              "refined_fire_crystals": 30
+            },
+            {
+              "building": "Infantry Camp",
+              "fire_crystals": 486,
+              "refined_fire_crystals": 53
+            },
+            {
+              "building": "Marksman Camp",
+              "fire_crystals": 486,
+              "refined_fire_crystals": 53
+            },
+            {
+              "building": "Lancer Camp",
+              "fire_crystals": 486,
+              "refined_fire_crystals": 53
+            }
+          ]
+        },
+        "full_furnace": {
+          "description": "Furnace, Embassy, all troop camps, Command Center, Infirmary, and War Academy.",
+          "requirements": [
+            {
+              "building": "Furnace",
+              "fire_crystals": 1080,
+              "refined_fire_crystals": 120
+            },
+            {
+              "building": "Embassy",
+              "fire_crystals": 270,
+              "refined_fire_crystals": 30
+            },
+            {
+              "building": "Infantry Camp",
+              "fire_crystals": 486,
+              "refined_fire_crystals": 53
+            },
+            {
+              "building": "Marksman Camp",
+              "fire_crystals": 486,
+              "refined_fire_crystals": 53
+            },
+            {
+              "building": "Lancer Camp",
+              "fire_crystals": 486,
+              "refined_fire_crystals": 53
+            },
+            {
+              "building": "Command Center",
+              "fire_crystals": 216,
+              "refined_fire_crystals": 29
+            },
+            {
+              "building": "Infirmary",
+              "fire_crystals": 216,
+              "refined_fire_crystals": 30
+            },
+            {
+              "building": "War Academy",
+              "fire_crystals": 486,
+              "refined_fire_crystals": 53
+            }
+          ]
+        }
+      }
+    },
+    {
+      "level": "FC8",
+      "next_level": "FC9",
+      "packages": {
+        "minimum": {
+          "description": "Furnace, Embassy, and choose 1 troop camp.",
+          "requirements": [
+            {
+              "building": "Furnace",
+              "fire_crystals": 1260,
+              "refined_fire_crystals": 180
+            },
+            {
+              "building": "Embassy",
+              "fire_crystals": 315,
+              "refined_fire_crystals": 43
+            },
+            {
+              "choice_group": "one_troop_camp",
+              "choose": 1,
+              "options": [
+                {
+                  "building": "Infantry Camp",
+                  "fire_crystals": 567,
+                  "refined_fire_crystals": 79
+                },
+                {
+                  "building": "Marksman Camp",
+                  "fire_crystals": 567,
+                  "refined_fire_crystals": 79
+                },
+                {
+                  "building": "Lancer Camp",
+                  "fire_crystals": 567,
+                  "refined_fire_crystals": 79
+                }
+              ]
+            }
+          ]
+        },
+        "all_camps": {
+          "description": "Furnace, Embassy, and all three troop camps.",
+          "requirements": [
+            {
+              "building": "Furnace",
+              "fire_crystals": 1260,
+              "refined_fire_crystals": 180
+            },
+            {
+              "building": "Embassy",
+              "fire_crystals": 315,
+              "refined_fire_crystals": 43
+            },
+            {
+              "building": "Infantry Camp",
+              "fire_crystals": 567,
+              "refined_fire_crystals": 79
+            },
+            {
+              "building": "Marksman Camp",
+              "fire_crystals": 567,
+              "refined_fire_crystals": 79
+            },
+            {
+              "building": "Lancer Camp",
+              "fire_crystals": 567,
+              "refined_fire_crystals": 79
+            }
+          ]
+        },
+        "full_furnace": {
+          "description": "Furnace, Embassy, all troop camps, Command Center, Infirmary, and War Academy.",
+          "requirements": [
+            {
+              "building": "Furnace",
+              "fire_crystals": 1260,
+              "refined_fire_crystals": 180
+            },
+            {
+              "building": "Embassy",
+              "fire_crystals": 315,
+              "refined_fire_crystals": 43
+            },
+            {
+              "building": "Infantry Camp",
+              "fire_crystals": 567,
+              "refined_fire_crystals": 79
+            },
+            {
+              "building": "Marksman Camp",
+              "fire_crystals": 567,
+              "refined_fire_crystals": 79
+            },
+            {
+              "building": "Lancer Camp",
+              "fire_crystals": 567,
+              "refined_fire_crystals": 79
+            },
+            {
+              "building": "Command Center",
+              "fire_crystals": 252,
+              "refined_fire_crystals": 36
+            },
+            {
+              "building": "Infirmary",
+              "fire_crystals": 252,
+              "refined_fire_crystals": 36
+            },
+            {
+              "building": "War Academy",
+              "fire_crystals": 567,
+              "refined_fire_crystals": 79
+            }
+          ]
+        }
+      }
+    },
+    {
+      "level": "FC9",
+      "next_level": "FC10",
+      "packages": {
+        "minimum": {
+          "description": "Furnace, Embassy, and choose 1 troop camp.",
+          "requirements": [
+            {
+              "building": "Furnace",
+              "fire_crystals": 1575,
+              "refined_fire_crystals": 420
+            },
+            {
+              "building": "Embassy",
+              "fire_crystals": 391,
+              "refined_fire_crystals": 103
+            },
+            {
+              "choice_group": "one_troop_camp",
+              "choose": 1,
+              "options": [
+                {
+                  "building": "Infantry Camp",
+                  "fire_crystals": 706,
+                  "refined_fire_crystals": 187
+                },
+                {
+                  "building": "Marksman Camp",
+                  "fire_crystals": 706,
+                  "refined_fire_crystals": 187
+                },
+                {
+                  "building": "Lancer Camp",
+                  "fire_crystals": 706,
+                  "refined_fire_crystals": 187
+                }
+              ]
+            }
+          ]
+        },
+        "all_camps": {
+          "description": "Furnace, Embassy, and all three troop camps.",
+          "requirements": [
+            {
+              "building": "Furnace",
+              "fire_crystals": 1575,
+              "refined_fire_crystals": 420
+            },
+            {
+              "building": "Embassy",
+              "fire_crystals": 391,
+              "refined_fire_crystals": 103
+            },
+            {
+              "building": "Infantry Camp",
+              "fire_crystals": 706,
+              "refined_fire_crystals": 187
+            },
+            {
+              "building": "Marksman Camp",
+              "fire_crystals": 706,
+              "refined_fire_crystals": 187
+            },
+            {
+              "building": "Lancer Camp",
+              "fire_crystals": 706,
+              "refined_fire_crystals": 187
+            }
+          ]
+        },
+        "full_furnace": {
+          "description": "Furnace, Embassy, all troop camps, Command Center, Infirmary, and War Academy.",
+          "requirements": [
+            {
+              "building": "Furnace",
+              "fire_crystals": 1575,
+              "refined_fire_crystals": 420
+            },
+            {
+              "building": "Embassy",
+              "fire_crystals": 391,
+              "refined_fire_crystals": 103
+            },
+            {
+              "building": "Infantry Camp",
+              "fire_crystals": 706,
+              "refined_fire_crystals": 187
+            },
+            {
+              "building": "Marksman Camp",
+              "fire_crystals": 706,
+              "refined_fire_crystals": 187
+            },
+            {
+              "building": "Lancer Camp",
+              "fire_crystals": 706,
+              "refined_fire_crystals": 187
+            },
+            {
+              "building": "Command Center",
+              "fire_crystals": 315,
+              "refined_fire_crystals": 84
+            },
+            {
+              "building": "Infirmary",
+              "fire_crystals": 315,
+              "refined_fire_crystals": 84
+            },
+            {
+              "building": "War Academy",
+              "fire_crystals": 706,
+              "refined_fire_crystals": 187
+            }
+          ]
+        }
+      }
+    },
+    {
+      "level": "FC10",
+      "next_level": null,
+      "packages": {}
+    }
+  ]
+}
