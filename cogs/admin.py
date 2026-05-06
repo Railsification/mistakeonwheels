@@ -15,6 +15,43 @@ class AdminCog(commands.Cog):
         self.bot = bot
         self.settings: SettingsManager = bot.settings
 
+    # ==== helpers ====
+
+    def _all_feature_keys(self, guild_id: int | None = None) -> list[str]:
+        keys: list[str] = []
+
+        # Prefer dynamic methods if the settings manager has them
+        for attr in ("all_feature_keys", "feature_keys", "get_feature_keys", "list_feature_keys"):
+            fn = getattr(self.settings, attr, None)
+            if callable(fn):
+                try:
+                    result = fn(guild_id) if guild_id is not None else fn()
+                except TypeError:
+                    result = fn()
+                if result:
+                    keys.extend(str(x).strip() for x in result if str(x).strip())
+
+        # Fall back to whatever is currently stored on the guild
+        if guild_id is not None:
+            try:
+                gs = self.settings._ensure_guild(guild_id)  # noqa: SLF001
+                fc = getattr(gs, "feature_channels", {}) or {}
+                keys.extend(str(x).strip() for x in fc.keys() if str(x).strip())
+            except Exception:
+                pass
+
+        # Always include static defaults too
+        keys.extend(str(x).strip() for x in FEATURE_KEYS if str(x).strip())
+
+        # Deduplicate, preserve order
+        seen = set()
+        out: list[str] = []
+        for k in keys:
+            if k not in seen:
+                seen.add(k)
+                out.append(k)
+        return out
+
     # ==== Feature channel control ====
 
     @app_commands.command(
@@ -28,13 +65,17 @@ class AdminCog(commands.Cog):
     async def feature_channel_add(
         self,
         interaction: discord.Interaction,
-        feature: str,                      # ✅ plain str (no Choice)
+        feature: str,
         channel: discord.TextChannel,
     ):
         log_cmd("feature_channel_add", interaction)
         await ensure_deferred(interaction, ephemeral=True)
 
         feature_key = feature.strip()
+        if not feature_key:
+            await interaction.followup.send("❌ Feature name cannot be blank.", ephemeral=True)
+            return
+
         self.settings.add_feature_channel(
             interaction.guild_id,
             feature_key,
@@ -51,12 +92,11 @@ class AdminCog(commands.Cog):
         interaction: discord.Interaction,
         current: str,
     ):
-        # Use the central feature list so it's always in sync
         current_lower = (current or "").lower()
         matches = [
-            f for f in FEATURE_KEYS
+            f for f in self._all_feature_keys(interaction.guild_id)
             if current_lower in f.lower()
-        ][:25]  # Discord max 25
+        ][:25]
 
         return [
             app_commands.Choice(name=f, value=f)
@@ -74,13 +114,17 @@ class AdminCog(commands.Cog):
     async def feature_channel_remove(
         self,
         interaction: discord.Interaction,
-        feature: str,                      # ✅ plain str (no Choice)
+        feature: str,
         channel: discord.TextChannel,
     ):
         log_cmd("feature_channel_remove", interaction)
         await ensure_deferred(interaction, ephemeral=True)
 
         feature_key = feature.strip()
+        if not feature_key:
+            await interaction.followup.send("❌ Feature name cannot be blank.", ephemeral=True)
+            return
+
         self.settings.remove_feature_channel(
             interaction.guild_id,
             feature_key,
@@ -99,7 +143,7 @@ class AdminCog(commands.Cog):
     ):
         current_lower = (current or "").lower()
         matches = [
-            f for f in FEATURE_KEYS
+            f for f in self._all_feature_keys(interaction.guild_id)
             if current_lower in f.lower()
         ][:25]
 
@@ -119,7 +163,7 @@ class AdminCog(commands.Cog):
         guild = interaction.guild
         gid = guild.id
         lines = ["__**Feature channels for this server**__"]
-        for f in FEATURE_KEYS:
+        for f in self._all_feature_keys(gid):
             ids = self.settings.feature_channels(gid, f)
             if not ids:
                 lines.append(f"- **{f}**: _(none)_")
