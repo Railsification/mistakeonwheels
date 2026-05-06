@@ -12,12 +12,546 @@ import discord
 from discord import app_commands
 from discord.ext import commands
 
+from core.logger import log_cmd
+from core.settings import SettingsManager
+from core.utils import DATA_DIR, ensure_deferred, save_json
 
-BASE_DIR = Path(__file__).resolve().parents[1]
-DATA_DIR = BASE_DIR / "data"
+
 UPGRADES_PATH = DATA_DIR / "wos_furnace_upgrades.json"
 REFINES_PATH = DATA_DIR / "wos_refine_rates.json"
 PROFILES_PATH = DATA_DIR / "wos_furnace_profiles.json"
+FEATURE_KEY = "wos_furnace"
+
+
+DEFAULT_UPGRADES: Dict[str, Any] = {
+    "timezone": "Australia/Brisbane",
+    "levels": [
+        {
+            "level": "FC0",
+            "next_level": "FC1",
+            "packages": {
+                "minimum": {
+                    "description": "Furnace + Embassy + choose 1 troop camp.",
+                    "requirements": [
+                        {"building": "Furnace", "fire_crystals": 132, "refined_fire_crystals": 0},
+                        {"building": "Embassy", "fire_crystals": 33, "refined_fire_crystals": 0},
+                        {
+                            "choice_group": "Troop Camp",
+                            "choose": 1,
+                            "options": [
+                                {"building": "Infantry Camp", "fire_crystals": 59, "refined_fire_crystals": 0},
+                                {"building": "Marksman Camp", "fire_crystals": 59, "refined_fire_crystals": 0},
+                                {"building": "Lancer Camp", "fire_crystals": 59, "refined_fire_crystals": 0},
+                            ],
+                        },
+                    ],
+                },
+                "all_camps": {
+                    "description": "Furnace + Embassy + all 3 troop camps.",
+                    "requirements": [
+                        {"building": "Furnace", "fire_crystals": 132, "refined_fire_crystals": 0},
+                        {"building": "Embassy", "fire_crystals": 33, "refined_fire_crystals": 0},
+                        {"building": "Infantry Camp", "fire_crystals": 59, "refined_fire_crystals": 0},
+                        {"building": "Marksman Camp", "fire_crystals": 59, "refined_fire_crystals": 0},
+                        {"building": "Lancer Camp", "fire_crystals": 59, "refined_fire_crystals": 0},
+                    ],
+                },
+                "full_furnace": {
+                    "description": "Furnace + Embassy + all camps + Command Center + Infirmary.",
+                    "requirements": [
+                        {"building": "Furnace", "fire_crystals": 132, "refined_fire_crystals": 0},
+                        {"building": "Embassy", "fire_crystals": 33, "refined_fire_crystals": 0},
+                        {"building": "Infantry Camp", "fire_crystals": 59, "refined_fire_crystals": 0},
+                        {"building": "Marksman Camp", "fire_crystals": 59, "refined_fire_crystals": 0},
+                        {"building": "Lancer Camp", "fire_crystals": 59, "refined_fire_crystals": 0},
+                        {"building": "Command Center", "fire_crystals": 26, "refined_fire_crystals": 0},
+                        {"building": "Infirmary", "fire_crystals": 26, "refined_fire_crystals": 0},
+                    ],
+                },
+            },
+        },
+        {
+            "level": "FC1",
+            "next_level": "FC2",
+            "packages": {
+                "minimum": {
+                    "description": "Furnace + Embassy + choose 1 troop camp.",
+                    "requirements": [
+                        {"building": "Furnace", "fire_crystals": 158, "refined_fire_crystals": 0},
+                        {"building": "Embassy", "fire_crystals": 39, "refined_fire_crystals": 0},
+                        {
+                            "choice_group": "Troop Camp",
+                            "choose": 1,
+                            "options": [
+                                {"building": "Infantry Camp", "fire_crystals": 71, "refined_fire_crystals": 0},
+                                {"building": "Marksman Camp", "fire_crystals": 71, "refined_fire_crystals": 0},
+                                {"building": "Lancer Camp", "fire_crystals": 71, "refined_fire_crystals": 0},
+                            ],
+                        },
+                    ],
+                },
+                "all_camps": {
+                    "description": "Furnace + Embassy + all 3 troop camps.",
+                    "requirements": [
+                        {"building": "Furnace", "fire_crystals": 158, "refined_fire_crystals": 0},
+                        {"building": "Embassy", "fire_crystals": 39, "refined_fire_crystals": 0},
+                        {"building": "Infantry Camp", "fire_crystals": 71, "refined_fire_crystals": 0},
+                        {"building": "Marksman Camp", "fire_crystals": 71, "refined_fire_crystals": 0},
+                        {"building": "Lancer Camp", "fire_crystals": 71, "refined_fire_crystals": 0},
+                    ],
+                },
+                "full_furnace": {
+                    "description": "Furnace + Embassy + all camps + Command Center + Infirmary.",
+                    "requirements": [
+                        {"building": "Furnace", "fire_crystals": 158, "refined_fire_crystals": 0},
+                        {"building": "Embassy", "fire_crystals": 39, "refined_fire_crystals": 0},
+                        {"building": "Infantry Camp", "fire_crystals": 71, "refined_fire_crystals": 0},
+                        {"building": "Marksman Camp", "fire_crystals": 71, "refined_fire_crystals": 0},
+                        {"building": "Lancer Camp", "fire_crystals": 71, "refined_fire_crystals": 0},
+                        {"building": "Command Center", "fire_crystals": 31, "refined_fire_crystals": 0},
+                        {"building": "Infirmary", "fire_crystals": 31, "refined_fire_crystals": 0},
+                    ],
+                },
+            },
+        },
+        {
+            "level": "FC2",
+            "next_level": "FC3",
+            "packages": {
+                "minimum": {
+                    "description": "Furnace + Embassy + choose 1 troop camp.",
+                    "requirements": [
+                        {"building": "Furnace", "fire_crystals": 238, "refined_fire_crystals": 0},
+                        {"building": "Embassy", "fire_crystals": 59, "refined_fire_crystals": 0},
+                        {
+                            "choice_group": "Troop Camp",
+                            "choose": 1,
+                            "options": [
+                                {"building": "Infantry Camp", "fire_crystals": 107, "refined_fire_crystals": 0},
+                                {"building": "Marksman Camp", "fire_crystals": 107, "refined_fire_crystals": 0},
+                                {"building": "Lancer Camp", "fire_crystals": 107, "refined_fire_crystals": 0},
+                            ],
+                        },
+                    ],
+                },
+                "all_camps": {
+                    "description": "Furnace + Embassy + all 3 troop camps.",
+                    "requirements": [
+                        {"building": "Furnace", "fire_crystals": 238, "refined_fire_crystals": 0},
+                        {"building": "Embassy", "fire_crystals": 59, "refined_fire_crystals": 0},
+                        {"building": "Infantry Camp", "fire_crystals": 107, "refined_fire_crystals": 0},
+                        {"building": "Marksman Camp", "fire_crystals": 107, "refined_fire_crystals": 0},
+                        {"building": "Lancer Camp", "fire_crystals": 107, "refined_fire_crystals": 0},
+                    ],
+                },
+                "full_furnace": {
+                    "description": "Furnace + Embassy + all camps + Command Center + Infirmary.",
+                    "requirements": [
+                        {"building": "Furnace", "fire_crystals": 238, "refined_fire_crystals": 0},
+                        {"building": "Embassy", "fire_crystals": 59, "refined_fire_crystals": 0},
+                        {"building": "Infantry Camp", "fire_crystals": 107, "refined_fire_crystals": 0},
+                        {"building": "Marksman Camp", "fire_crystals": 107, "refined_fire_crystals": 0},
+                        {"building": "Lancer Camp", "fire_crystals": 107, "refined_fire_crystals": 0},
+                        {"building": "Command Center", "fire_crystals": 47, "refined_fire_crystals": 0},
+                        {"building": "Infirmary", "fire_crystals": 47, "refined_fire_crystals": 0},
+                    ],
+                },
+            },
+        },
+        {
+            "level": "FC3",
+            "next_level": "FC4",
+            "packages": {
+                "minimum": {
+                    "description": "Furnace + Embassy + choose 1 troop camp.",
+                    "requirements": [
+                        {"building": "Furnace", "fire_crystals": 280, "refined_fire_crystals": 0},
+                        {"building": "Embassy", "fire_crystals": 70, "refined_fire_crystals": 0},
+                        {
+                            "choice_group": "Troop Camp",
+                            "choose": 1,
+                            "options": [
+                                {"building": "Infantry Camp", "fire_crystals": 126, "refined_fire_crystals": 0},
+                                {"building": "Marksman Camp", "fire_crystals": 126, "refined_fire_crystals": 0},
+                                {"building": "Lancer Camp", "fire_crystals": 126, "refined_fire_crystals": 0},
+                            ],
+                        },
+                    ],
+                },
+                "all_camps": {
+                    "description": "Furnace + Embassy + all 3 troop camps.",
+                    "requirements": [
+                        {"building": "Furnace", "fire_crystals": 280, "refined_fire_crystals": 0},
+                        {"building": "Embassy", "fire_crystals": 70, "refined_fire_crystals": 0},
+                        {"building": "Infantry Camp", "fire_crystals": 126, "refined_fire_crystals": 0},
+                        {"building": "Marksman Camp", "fire_crystals": 126, "refined_fire_crystals": 0},
+                        {"building": "Lancer Camp", "fire_crystals": 126, "refined_fire_crystals": 0},
+                    ],
+                },
+                "full_furnace": {
+                    "description": "Furnace + Embassy + all camps + Command Center + Infirmary.",
+                    "requirements": [
+                        {"building": "Furnace", "fire_crystals": 280, "refined_fire_crystals": 0},
+                        {"building": "Embassy", "fire_crystals": 70, "refined_fire_crystals": 0},
+                        {"building": "Infantry Camp", "fire_crystals": 126, "refined_fire_crystals": 0},
+                        {"building": "Marksman Camp", "fire_crystals": 126, "refined_fire_crystals": 0},
+                        {"building": "Lancer Camp", "fire_crystals": 126, "refined_fire_crystals": 0},
+                        {"building": "Command Center", "fire_crystals": 56, "refined_fire_crystals": 0},
+                        {"building": "Infirmary", "fire_crystals": 56, "refined_fire_crystals": 0},
+                    ],
+                },
+            },
+        },
+        {
+            "level": "FC4",
+            "next_level": "FC5",
+            "packages": {
+                "minimum": {
+                    "description": "Furnace + Embassy + choose 1 troop camp.",
+                    "requirements": [
+                        {"building": "Furnace", "fire_crystals": 335, "refined_fire_crystals": 0},
+                        {"building": "Embassy", "fire_crystals": 83, "refined_fire_crystals": 0},
+                        {
+                            "choice_group": "Troop Camp",
+                            "choose": 1,
+                            "options": [
+                                {"building": "Infantry Camp", "fire_crystals": 150, "refined_fire_crystals": 0},
+                                {"building": "Marksman Camp", "fire_crystals": 150, "refined_fire_crystals": 0},
+                                {"building": "Lancer Camp", "fire_crystals": 150, "refined_fire_crystals": 0},
+                            ],
+                        },
+                    ],
+                },
+                "all_camps": {
+                    "description": "Furnace + Embassy + all 3 troop camps.",
+                    "requirements": [
+                        {"building": "Furnace", "fire_crystals": 335, "refined_fire_crystals": 0},
+                        {"building": "Embassy", "fire_crystals": 83, "refined_fire_crystals": 0},
+                        {"building": "Infantry Camp", "fire_crystals": 150, "refined_fire_crystals": 0},
+                        {"building": "Marksman Camp", "fire_crystals": 150, "refined_fire_crystals": 0},
+                        {"building": "Lancer Camp", "fire_crystals": 150, "refined_fire_crystals": 0},
+                    ],
+                },
+                "full_furnace": {
+                    "description": "Furnace + Embassy + all camps + Command Center + Infirmary.",
+                    "requirements": [
+                        {"building": "Furnace", "fire_crystals": 335, "refined_fire_crystals": 0},
+                        {"building": "Embassy", "fire_crystals": 83, "refined_fire_crystals": 0},
+                        {"building": "Infantry Camp", "fire_crystals": 150, "refined_fire_crystals": 0},
+                        {"building": "Marksman Camp", "fire_crystals": 150, "refined_fire_crystals": 0},
+                        {"building": "Lancer Camp", "fire_crystals": 150, "refined_fire_crystals": 0},
+                        {"building": "Command Center", "fire_crystals": 67, "refined_fire_crystals": 0},
+                        {"building": "Infirmary", "fire_crystals": 67, "refined_fire_crystals": 0},
+                    ],
+                },
+            },
+        },
+        {
+            "level": "FC5",
+            "next_level": "FC6",
+            "packages": {
+                "minimum": {
+                    "description": "Furnace + Embassy + choose 1 troop camp.",
+                    "requirements": [
+                        {"building": "Furnace", "fire_crystals": 900, "refined_fire_crystals": 60},
+                        {"building": "Embassy", "fire_crystals": 225, "refined_fire_crystals": 13},
+                        {
+                            "choice_group": "Troop Camp",
+                            "choose": 1,
+                            "options": [
+                                {"building": "Infantry Camp", "fire_crystals": 405, "refined_fire_crystals": 26},
+                                {"building": "Marksman Camp", "fire_crystals": 405, "refined_fire_crystals": 26},
+                                {"building": "Lancer Camp", "fire_crystals": 405, "refined_fire_crystals": 26},
+                            ],
+                        },
+                    ],
+                },
+                "all_camps": {
+                    "description": "Furnace + Embassy + all 3 troop camps.",
+                    "requirements": [
+                        {"building": "Furnace", "fire_crystals": 900, "refined_fire_crystals": 60},
+                        {"building": "Embassy", "fire_crystals": 225, "refined_fire_crystals": 13},
+                        {"building": "Infantry Camp", "fire_crystals": 405, "refined_fire_crystals": 26},
+                        {"building": "Marksman Camp", "fire_crystals": 405, "refined_fire_crystals": 26},
+                        {"building": "Lancer Camp", "fire_crystals": 405, "refined_fire_crystals": 26},
+                    ],
+                },
+                "full_furnace": {
+                    "description": "Furnace + Embassy + all camps + Command Center + Infirmary + War Academy.",
+                    "requirements": [
+                        {"building": "Furnace", "fire_crystals": 900, "refined_fire_crystals": 60},
+                        {"building": "Embassy", "fire_crystals": 225, "refined_fire_crystals": 13},
+                        {"building": "Infantry Camp", "fire_crystals": 405, "refined_fire_crystals": 26},
+                        {"building": "Marksman Camp", "fire_crystals": 405, "refined_fire_crystals": 26},
+                        {"building": "Lancer Camp", "fire_crystals": 405, "refined_fire_crystals": 26},
+                        {"building": "Command Center", "fire_crystals": 180, "refined_fire_crystals": 13},
+                        {"building": "Infirmary", "fire_crystals": 180, "refined_fire_crystals": 13},
+                        {"building": "War Academy", "fire_crystals": 405, "refined_fire_crystals": 26},
+                    ],
+                },
+            },
+        },
+        {
+            "level": "FC6",
+            "next_level": "FC7",
+            "packages": {
+                "minimum": {
+                    "description": "Furnace + Embassy + choose 1 troop camp.",
+                    "requirements": [
+                        {"building": "Furnace", "fire_crystals": 1080, "refined_fire_crystals": 90},
+                        {"building": "Embassy", "fire_crystals": 270, "refined_fire_crystals": 19},
+                        {
+                            "choice_group": "Troop Camp",
+                            "choose": 1,
+                            "options": [
+                                {"building": "Infantry Camp", "fire_crystals": 486, "refined_fire_crystals": 37},
+                                {"building": "Marksman Camp", "fire_crystals": 486, "refined_fire_crystals": 37},
+                                {"building": "Lancer Camp", "fire_crystals": 486, "refined_fire_crystals": 37},
+                            ],
+                        },
+                    ],
+                },
+                "all_camps": {
+                    "description": "Furnace + Embassy + all 3 troop camps.",
+                    "requirements": [
+                        {"building": "Furnace", "fire_crystals": 1080, "refined_fire_crystals": 90},
+                        {"building": "Embassy", "fire_crystals": 270, "refined_fire_crystals": 19},
+                        {"building": "Infantry Camp", "fire_crystals": 486, "refined_fire_crystals": 37},
+                        {"building": "Marksman Camp", "fire_crystals": 486, "refined_fire_crystals": 37},
+                        {"building": "Lancer Camp", "fire_crystals": 486, "refined_fire_crystals": 37},
+                    ],
+                },
+                "full_furnace": {
+                    "description": "Furnace + Embassy + all camps + Command Center + Infirmary + War Academy.",
+                    "requirements": [
+                        {"building": "Furnace", "fire_crystals": 1080, "refined_fire_crystals": 90},
+                        {"building": "Embassy", "fire_crystals": 270, "refined_fire_crystals": 19},
+                        {"building": "Infantry Camp", "fire_crystals": 486, "refined_fire_crystals": 37},
+                        {"building": "Marksman Camp", "fire_crystals": 486, "refined_fire_crystals": 37},
+                        {"building": "Lancer Camp", "fire_crystals": 486, "refined_fire_crystals": 37},
+                        {"building": "Command Center", "fire_crystals": 216, "refined_fire_crystals": 19},
+                        {"building": "Infirmary", "fire_crystals": 216, "refined_fire_crystals": 19},
+                        {"building": "War Academy", "fire_crystals": 486, "refined_fire_crystals": 37},
+                    ],
+                },
+            },
+        },
+        {
+            "level": "FC7",
+            "next_level": "FC8",
+            "packages": {
+                "minimum": {
+                    "description": "Furnace + Embassy + choose 1 troop camp.",
+                    "requirements": [
+                        {"building": "Furnace", "fire_crystals": 1080, "refined_fire_crystals": 120},
+                        {"building": "Embassy", "fire_crystals": 270, "refined_fire_crystals": 30},
+                        {
+                            "choice_group": "Troop Camp",
+                            "choose": 1,
+                            "options": [
+                                {"building": "Infantry Camp", "fire_crystals": 486, "refined_fire_crystals": 53},
+                                {"building": "Marksman Camp", "fire_crystals": 486, "refined_fire_crystals": 53},
+                                {"building": "Lancer Camp", "fire_crystals": 486, "refined_fire_crystals": 53},
+                            ],
+                        },
+                    ],
+                },
+                "all_camps": {
+                    "description": "Furnace + Embassy + all 3 troop camps.",
+                    "requirements": [
+                        {"building": "Furnace", "fire_crystals": 1080, "refined_fire_crystals": 120},
+                        {"building": "Embassy", "fire_crystals": 270, "refined_fire_crystals": 30},
+                        {"building": "Infantry Camp", "fire_crystals": 486, "refined_fire_crystals": 53},
+                        {"building": "Marksman Camp", "fire_crystals": 486, "refined_fire_crystals": 53},
+                        {"building": "Lancer Camp", "fire_crystals": 486, "refined_fire_crystals": 53},
+                    ],
+                },
+                "full_furnace": {
+                    "description": "Furnace + Embassy + all camps + Command Center + Infirmary + War Academy.",
+                    "requirements": [
+                        {"building": "Furnace", "fire_crystals": 1080, "refined_fire_crystals": 120},
+                        {"building": "Embassy", "fire_crystals": 270, "refined_fire_crystals": 30},
+                        {"building": "Infantry Camp", "fire_crystals": 486, "refined_fire_crystals": 53},
+                        {"building": "Marksman Camp", "fire_crystals": 486, "refined_fire_crystals": 53},
+                        {"building": "Lancer Camp", "fire_crystals": 486, "refined_fire_crystals": 53},
+                        {"building": "Command Center", "fire_crystals": 216, "refined_fire_crystals": 29},
+                        {"building": "Infirmary", "fire_crystals": 216, "refined_fire_crystals": 30},
+                        {"building": "War Academy", "fire_crystals": 486, "refined_fire_crystals": 53},
+                    ],
+                },
+            },
+        },
+        {
+            "level": "FC8",
+            "next_level": "FC9",
+            "packages": {
+                "minimum": {
+                    "description": "Furnace + Embassy + choose 1 troop camp.",
+                    "requirements": [
+                        {"building": "Furnace", "fire_crystals": 1260, "refined_fire_crystals": 180},
+                        {"building": "Embassy", "fire_crystals": 315, "refined_fire_crystals": 43},
+                        {
+                            "choice_group": "Troop Camp",
+                            "choose": 1,
+                            "options": [
+                                {"building": "Infantry Camp", "fire_crystals": 567, "refined_fire_crystals": 79},
+                                {"building": "Marksman Camp", "fire_crystals": 567, "refined_fire_crystals": 79},
+                                {"building": "Lancer Camp", "fire_crystals": 567, "refined_fire_crystals": 79},
+                            ],
+                        },
+                    ],
+                },
+                "all_camps": {
+                    "description": "Furnace + Embassy + all 3 troop camps.",
+                    "requirements": [
+                        {"building": "Furnace", "fire_crystals": 1260, "refined_fire_crystals": 180},
+                        {"building": "Embassy", "fire_crystals": 315, "refined_fire_crystals": 43},
+                        {"building": "Infantry Camp", "fire_crystals": 567, "refined_fire_crystals": 79},
+                        {"building": "Marksman Camp", "fire_crystals": 567, "refined_fire_crystals": 79},
+                        {"building": "Lancer Camp", "fire_crystals": 567, "refined_fire_crystals": 79},
+                    ],
+                },
+                "full_furnace": {
+                    "description": "Furnace + Embassy + all camps + Command Center + Infirmary + War Academy.",
+                    "requirements": [
+                        {"building": "Furnace", "fire_crystals": 1260, "refined_fire_crystals": 180},
+                        {"building": "Embassy", "fire_crystals": 315, "refined_fire_crystals": 43},
+                        {"building": "Infantry Camp", "fire_crystals": 567, "refined_fire_crystals": 79},
+                        {"building": "Marksman Camp", "fire_crystals": 567, "refined_fire_crystals": 79},
+                        {"building": "Lancer Camp", "fire_crystals": 567, "refined_fire_crystals": 79},
+                        {"building": "Command Center", "fire_crystals": 252, "refined_fire_crystals": 36},
+                        {"building": "Infirmary", "fire_crystals": 252, "refined_fire_crystals": 36},
+                        {"building": "War Academy", "fire_crystals": 567, "refined_fire_crystals": 79},
+                    ],
+                },
+            },
+        },
+        {
+            "level": "FC9",
+            "next_level": "FC10",
+            "packages": {
+                "minimum": {
+                    "description": "Furnace + Embassy + choose 1 troop camp.",
+                    "requirements": [
+                        {"building": "Furnace", "fire_crystals": 1575, "refined_fire_crystals": 420},
+                        {"building": "Embassy", "fire_crystals": 391, "refined_fire_crystals": 103},
+                        {
+                            "choice_group": "Troop Camp",
+                            "choose": 1,
+                            "options": [
+                                {"building": "Infantry Camp", "fire_crystals": 706, "refined_fire_crystals": 187},
+                                {"building": "Marksman Camp", "fire_crystals": 706, "refined_fire_crystals": 187},
+                                {"building": "Lancer Camp", "fire_crystals": 706, "refined_fire_crystals": 187},
+                            ],
+                        },
+                    ],
+                },
+                "all_camps": {
+                    "description": "Furnace + Embassy + all 3 troop camps.",
+                    "requirements": [
+                        {"building": "Furnace", "fire_crystals": 1575, "refined_fire_crystals": 420},
+                        {"building": "Embassy", "fire_crystals": 391, "refined_fire_crystals": 103},
+                        {"building": "Infantry Camp", "fire_crystals": 706, "refined_fire_crystals": 187},
+                        {"building": "Marksman Camp", "fire_crystals": 706, "refined_fire_crystals": 187},
+                        {"building": "Lancer Camp", "fire_crystals": 706, "refined_fire_crystals": 187},
+                    ],
+                },
+                "full_furnace": {
+                    "description": "Furnace + Embassy + all camps + Command Center + Infirmary + War Academy.",
+                    "requirements": [
+                        {"building": "Furnace", "fire_crystals": 1575, "refined_fire_crystals": 420},
+                        {"building": "Embassy", "fire_crystals": 391, "refined_fire_crystals": 103},
+                        {"building": "Infantry Camp", "fire_crystals": 706, "refined_fire_crystals": 187},
+                        {"building": "Marksman Camp", "fire_crystals": 706, "refined_fire_crystals": 187},
+                        {"building": "Lancer Camp", "fire_crystals": 706, "refined_fire_crystals": 187},
+                        {"building": "Command Center", "fire_crystals": 315, "refined_fire_crystals": 84},
+                        {"building": "Infirmary", "fire_crystals": 315, "refined_fire_crystals": 84},
+                        {"building": "War Academy", "fire_crystals": 706, "refined_fire_crystals": 187},
+                    ],
+                },
+            },
+        },
+        {
+            "level": "FC10",
+            "next_level": None,
+            "packages": {},
+        },
+    ],
+}
+
+DEFAULT_REFINES: Dict[str, Any] = {
+    "attempts_above_max_use_last_tier": True,
+    "first_refine_discount": 0.5,
+    "max_search_attempts": 250000,
+    "tiers": [
+        {
+            "name": "Tier 1",
+            "min_attempt": 1,
+            "max_attempt": 20,
+            "fire_crystal_cost": 20,
+            "outcomes": [
+                {"refined_fire_crystals": 1, "probability": 65.0},
+                {"refined_fire_crystals": 2, "probability": 25.0},
+                {"refined_fire_crystals": 3, "probability": 10.0},
+            ],
+        },
+        {
+            "name": "Tier 2",
+            "min_attempt": 21,
+            "max_attempt": 40,
+            "fire_crystal_cost": 50,
+            "outcomes": [
+                {"refined_fire_crystals": 2, "probability": 85.0},
+                {"refined_fire_crystals": 3, "probability": 15.0},
+            ],
+        },
+        {
+            "name": "Tier 3",
+            "min_attempt": 41,
+            "max_attempt": 60,
+            "fire_crystal_cost": 100,
+            "outcomes": [
+                {"refined_fire_crystals": 3, "probability": 85.0},
+                {"refined_fire_crystals": 4, "probability": 12.5},
+                {"refined_fire_crystals": 5, "probability": 2.0},
+                {"refined_fire_crystals": 6, "probability": 0.5},
+            ],
+        },
+        {
+            "name": "Tier 4",
+            "min_attempt": 61,
+            "max_attempt": 80,
+            "fire_crystal_cost": 130,
+            "outcomes": [
+                {"refined_fire_crystals": 3, "probability": 75.0},
+                {"refined_fire_crystals": 4, "probability": 15.0},
+                {"refined_fire_crystals": 5, "probability": 5.0},
+                {"refined_fire_crystals": 6, "probability": 3.0},
+                {"refined_fire_crystals": 7, "probability": 1.0},
+                {"refined_fire_crystals": 8, "probability": 0.5},
+                {"refined_fire_crystals": 9, "probability": 0.5},
+            ],
+        },
+        {
+            "name": "Tier 5",
+            "min_attempt": 81,
+            "max_attempt": 100,
+            "fire_crystal_cost": 160,
+            "outcomes": [
+                {"refined_fire_crystals": 3, "probability": 70.0},
+                {"refined_fire_crystals": 4, "probability": 12.0},
+                {"refined_fire_crystals": 5, "probability": 9.0},
+                {"refined_fire_crystals": 6, "probability": 4.0},
+                {"refined_fire_crystals": 7, "probability": 1.5},
+                {"refined_fire_crystals": 8, "probability": 1.0},
+                {"refined_fire_crystals": 9, "probability": 1.0},
+                {"refined_fire_crystals": 10, "probability": 0.5},
+                {"refined_fire_crystals": 11, "probability": 0.5},
+                {"refined_fire_crystals": 12, "probability": 0.5},
+            ],
+        },
+    ],
+}
 
 
 class ReferenceError(ValueError):
@@ -40,21 +574,61 @@ class WOSFurnaceCalculator(commands.Cog):
 
     def __init__(self, bot: commands.Bot):
         self.bot = bot
+        self.settings: SettingsManager = bot.settings
         self.upgrades: Dict[str, Any] = {}
         self.refines: Dict[str, Any] = {}
         self.profiles: Dict[str, Any] = {}
         self.level_map: Dict[str, Dict[str, Any]] = {}
         self.level_names: List[str] = []
         self.timezone_name: str = "Australia/Brisbane"
+        self._ensure_default_files()
         self.load_reference_files()
         self.load_profiles()
 
     # ------------------------------------------------------------------
+    # Access control
+    # ------------------------------------------------------------------
+    def _is_allowed_channel(self, interaction: discord.Interaction) -> bool:
+        if interaction.guild_id is None or interaction.channel_id is None:
+            return False
+        allowed_channels = self.settings.feature_channels(interaction.guild_id, FEATURE_KEY)
+        return interaction.channel_id in allowed_channels
+
+    async def _require_allowed_channel(self, interaction: discord.Interaction) -> bool:
+        if self._is_allowed_channel(interaction):
+            return True
+
+        allowed_channels = []
+        if interaction.guild is not None and interaction.guild_id is not None:
+            for cid in self.settings.feature_channels(interaction.guild_id, FEATURE_KEY):
+                channel = interaction.guild.get_channel(cid)
+                allowed_channels.append(channel.mention if channel else f"`#{cid}`")
+
+        message = (
+            f"❌ This command is not allowed in this channel. "
+            f"Use `/feature_channel_add` with feature `{FEATURE_KEY}` to allow it in a channel."
+        )
+        if allowed_channels:
+            message += f"\nAllowed channels: {', '.join(allowed_channels)}"
+
+        await interaction.followup.send(message, ephemeral=True)
+        return False
+
+    # ------------------------------------------------------------------
     # Loading / saving
     # ------------------------------------------------------------------
+    def _ensure_default_files(self) -> None:
+        DATA_DIR.mkdir(parents=True, exist_ok=True)
+        if not UPGRADES_PATH.exists():
+            save_json(UPGRADES_PATH, DEFAULT_UPGRADES)
+        if not REFINES_PATH.exists():
+            save_json(REFINES_PATH, DEFAULT_REFINES)
+        if not PROFILES_PATH.exists():
+            save_json(PROFILES_PATH, {})
+
     def load_reference_files(self) -> None:
-        self.upgrades = self._load_json(UPGRADES_PATH)
-        self.refines = self._load_json(REFINES_PATH)
+        self.upgrades = self._load_json_or_raise(UPGRADES_PATH)
+        self.refines = self._load_json_or_raise(REFINES_PATH)
         self._validate_upgrades(self.upgrades)
         self._validate_refines(self.refines)
         self.timezone_name = self.upgrades.get("timezone", "Australia/Brisbane")
@@ -65,35 +639,30 @@ class WOSFurnaceCalculator(commands.Cog):
         self.level_names = [entry["level"] for entry in self.upgrades["levels"]]
 
     def load_profiles(self) -> None:
-        if not PROFILES_PATH.exists():
-            self.profiles = {}
-            self.save_profiles()
-            return
-
-        data = self._load_json(PROFILES_PATH)
+        data = self._load_json_or_raise(PROFILES_PATH)
         if not isinstance(data, dict):
             raise ReferenceError("wos_furnace_profiles.json must be a JSON object.")
         self.profiles = {str(k): v for k, v in data.items() if isinstance(v, dict)}
 
     def save_profiles(self) -> None:
         DATA_DIR.mkdir(parents=True, exist_ok=True)
-        with PROFILES_PATH.open("w", encoding="utf-8") as f:
-            json.dump(self.profiles, f, ensure_ascii=False, indent=2)
+        save_json(PROFILES_PATH, self.profiles)
 
     @staticmethod
-    def _load_json(path: Path) -> Dict[str, Any]:
+    def _load_json_or_raise(path: Path) -> Dict[str, Any]:
         if not path.exists():
             raise ReferenceError(f"Missing reference file: {path}")
         try:
             with path.open("r", encoding="utf-8") as f:
-                return json.load(f)
+                data = json.load(f)
         except json.JSONDecodeError as exc:
             raise ReferenceError(f"Invalid JSON in {path.name}: {exc}") from exc
+        if not isinstance(data, dict):
+            raise ReferenceError(f"{path.name} must be a JSON object.")
+        return data
 
     @staticmethod
     def _validate_upgrades(data: Dict[str, Any]) -> None:
-        if not isinstance(data, dict):
-            raise ReferenceError("wos_furnace_upgrades.json must be a JSON object.")
         levels = data.get("levels")
         if not isinstance(levels, list) or not levels:
             raise ReferenceError("wos_furnace_upgrades.json must contain a non-empty 'levels' list.")
@@ -176,8 +745,6 @@ class WOSFurnaceCalculator(commands.Cog):
 
     @staticmethod
     def _validate_refines(data: Dict[str, Any]) -> None:
-        if not isinstance(data, dict):
-            raise ReferenceError("wos_refine_rates.json must be a JSON object.")
         tiers = data.get("tiers")
         if not isinstance(tiers, list) or not tiers:
             raise ReferenceError("wos_refine_rates.json must contain a non-empty 'tiers' list.")
@@ -263,12 +830,6 @@ class WOSFurnaceCalculator(commands.Cog):
 
     def _get_profile(self, user_id: int) -> Dict[str, Any]:
         return self.profiles.get(str(user_id), {})
-
-    def _set_profile_value(self, user_id: int, key: str, value: Any) -> None:
-        profile = self.profiles.setdefault(str(user_id), {})
-        profile[key] = value
-        profile["updated_at"] = datetime.now(ZoneInfo(self.timezone_name)).isoformat(timespec="seconds")
-        self.save_profiles()
 
     def _merge_profile_defaults(
         self,
@@ -376,10 +937,10 @@ class WOSFurnaceCalculator(commands.Cog):
 
         triangle = days * (days - 1) // 2
         if total_attempts >= triangle:
-            monday_base = (total_attempts - triangle) // days
+            monday_base = max(0, (total_attempts - triangle) // days)
             counts = [monday_base + i for i in range(days)]
             remainder = total_attempts - sum(counts)
-            for idx in range(days - remainder, days):
+            for idx in range(days - 1, days - remainder - 1, -1):
                 if 0 <= idx < days:
                     counts[idx] += 1
             return counts
@@ -405,8 +966,7 @@ class WOSFurnaceCalculator(commands.Cog):
     def _format_weekly_schedule(self, weekly_refines: int) -> str:
         counts = self._weekly_day_counts(weekly_refines, 7)
         labels = self._weekday_labels()
-        lines = [f"{labels[i]} **{counts[i]}**" for i in range(7)]
-        return " | ".join(lines)
+        return " | ".join(f"{labels[i]} **{counts[i]}**" for i in range(7))
 
     def _window_segments(self, start_date: date, target_date: date) -> List[int]:
         if target_date < start_date:
@@ -712,7 +1272,10 @@ class WOSFurnaceCalculator(commands.Cog):
         weekly_fire_crystals_income: int = 0,
         weekly_refined_fire_crystals_income: int = 0,
     ) -> None:
-        await interaction.response.defer(ephemeral=True)
+        log_cmd("furnace_profile_set", interaction)
+        await ensure_deferred(interaction, ephemeral=True)
+        if not await self._require_allowed_channel(interaction):
+            return
         try:
             self._get_level_entry(current_level)
             self._require_non_negative("current_fire_crystals", current_fire_crystals)
@@ -739,7 +1302,10 @@ class WOSFurnaceCalculator(commands.Cog):
 
     @app_commands.command(name="furnace_profile_view", description="View your saved furnace profile.")
     async def furnace_profile_view(self, interaction: discord.Interaction) -> None:
-        await interaction.response.defer(ephemeral=True)
+        log_cmd("furnace_profile_view", interaction)
+        await ensure_deferred(interaction, ephemeral=True)
+        if not await self._require_allowed_channel(interaction):
+            return
         profile = self._get_profile(interaction.user.id)
         if not profile:
             await interaction.followup.send("No saved furnace profile found.", ephemeral=True)
@@ -777,7 +1343,10 @@ class WOSFurnaceCalculator(commands.Cog):
         weekly_fire_crystals_income: Optional[int] = None,
         weekly_refined_fire_crystals_income: Optional[int] = None,
     ) -> None:
-        await interaction.response.defer(ephemeral=True)
+        log_cmd("furnace_profile_update", interaction)
+        await ensure_deferred(interaction, ephemeral=True)
+        if not await self._require_allowed_channel(interaction):
+            return
         try:
             profile = self._get_profile(interaction.user.id)
             if not profile:
@@ -812,7 +1381,10 @@ class WOSFurnaceCalculator(commands.Cog):
 
     @app_commands.command(name="furnace_profile_clear", description="Delete your saved furnace profile.")
     async def furnace_profile_clear(self, interaction: discord.Interaction) -> None:
-        await interaction.response.defer(ephemeral=True)
+        log_cmd("furnace_profile_clear", interaction)
+        await ensure_deferred(interaction, ephemeral=True)
+        if not await self._require_allowed_channel(interaction):
+            return
         if str(interaction.user.id) in self.profiles:
             self.profiles.pop(str(interaction.user.id), None)
             self.save_profiles()
@@ -851,7 +1423,10 @@ class WOSFurnaceCalculator(commands.Cog):
         weekly_fire_crystals_income: Optional[int] = None,
         weekly_refined_fire_crystals_income: Optional[int] = None,
     ) -> None:
-        await interaction.response.defer(ephemeral=True)
+        log_cmd("furnace_refines_needed", interaction)
+        await ensure_deferred(interaction, ephemeral=True)
+        if not await self._require_allowed_channel(interaction):
+            return
         try:
             parsed_date = self._parse_target_date(target_date)
             start_date = self._now_local_date()
@@ -935,7 +1510,7 @@ class WOSFurnaceCalculator(commands.Cog):
                 inline=True,
             )
 
-            def build_mode_block(label: str, projection: RefineWindowProjection, viable: bool, theoretical: bool) -> str:
+            def build_mode_block(projection: RefineWindowProjection, viable: bool, theoretical: bool) -> str:
                 produced = projection.expected_rfc if theoretical else projection.minimum_rfc
                 remaining_fc_after_refines = fc_budget_for_refines - projection.fire_crystal_spent
                 status = "✅ Works" if viable else "❌ Not enough FC budget"
@@ -946,17 +1521,17 @@ class WOSFurnaceCalculator(commands.Cog):
                     f"FC spent on refines: **{self._fmt_int(projection.fire_crystal_spent)}**\n"
                     f"RFC from refines: **{self._fmt_float(produced) if theoretical else self._fmt_int(int(produced))}**\n"
                     f"FC left after refines: **{self._fmt_int(remaining_fc_after_refines)}**\n"
-                    f"Weekly template: {self._format_weekly_schedule(projection.weekly_refines)}"
+                    f"Do this weekly: {self._format_weekly_schedule(projection.weekly_refines)}"
                 )
 
             embed.add_field(
                 name="Guaranteed / Minimum RFC Plan",
-                value=build_mode_block("minimum", min_projection, min_viable, theoretical=False),
+                value=build_mode_block(min_projection, min_viable, theoretical=False),
                 inline=False,
             )
             embed.add_field(
                 name="Expected / Theoretical RFC Plan",
-                value=build_mode_block("expected", exp_projection, exp_viable, theoretical=True),
+                value=build_mode_block(exp_projection, exp_viable, theoretical=True),
                 inline=False,
             )
 
@@ -1008,7 +1583,10 @@ class WOSFurnaceCalculator(commands.Cog):
         weekly_fire_crystals_income: Optional[int] = None,
         weekly_refined_fire_crystals_income: Optional[int] = None,
     ) -> None:
-        await interaction.response.defer(ephemeral=True)
+        log_cmd("furnace_upgrade_forecast", interaction)
+        await ensure_deferred(interaction, ephemeral=True)
+        if not await self._require_allowed_channel(interaction):
+            return
         try:
             parsed_date = self._parse_target_date(target_date)
             start_date = self._now_local_date()
@@ -1077,7 +1655,7 @@ class WOSFurnaceCalculator(commands.Cog):
                 name="Weekly Refine Plan",
                 value=(
                     f"Weekly refines: **{self._fmt_int(weekly_refines)}**\n"
-                    f"Template: {self._format_weekly_schedule(weekly_refines)}\n"
+                    f"Do this weekly: {self._format_weekly_schedule(weekly_refines)}\n"
                     f"Attempts in window: **{self._fmt_int(refine_projection.total_attempts)}**"
                 ),
                 inline=False,
@@ -1160,7 +1738,10 @@ class WOSFurnaceCalculator(commands.Cog):
 
     @app_commands.command(name="furnace_reference_check", description="Show loaded furnace/reference metadata.")
     async def furnace_reference_check(self, interaction: discord.Interaction) -> None:
-        await interaction.response.defer(ephemeral=True)
+        log_cmd("furnace_reference_check", interaction)
+        await ensure_deferred(interaction, ephemeral=True)
+        if not await self._require_allowed_channel(interaction):
+            return
         try:
             package_names: List[str] = []
             for entry in self.upgrades["levels"]:
@@ -1190,8 +1771,12 @@ class WOSFurnaceCalculator(commands.Cog):
         description="Reload the furnace JSON reference files without restarting the bot.",
     )
     async def furnace_reference_reload(self, interaction: discord.Interaction) -> None:
-        await interaction.response.defer(ephemeral=True)
+        log_cmd("furnace_reference_reload", interaction)
+        await ensure_deferred(interaction, ephemeral=True)
+        if not await self._require_allowed_channel(interaction):
+            return
         try:
+            self._ensure_default_files()
             self.load_reference_files()
             self.load_profiles()
             await interaction.followup.send(
@@ -1229,4 +1814,11 @@ class WOSFurnaceCalculator(commands.Cog):
 
 
 async def setup(bot: commands.Bot) -> None:
-    await bot.add_cog(WOSFurnaceCalculator(bot))
+    cog = WOSFurnaceCalculator(bot)
+
+    guild_obj = discord.Object(id=bot.hot_config["guild_id"])
+    for cmd in cog.get_app_commands():
+        cmd._guild_ids = {bot.hot_config["guild_id"]}
+        cmd.guilds = (guild_obj,)
+
+    await bot.add_cog(cog)
