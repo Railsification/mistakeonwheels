@@ -1,21 +1,12 @@
 {
-  "version": "1.0.0",
-  "timezone": "Australia/Brisbane",
-  "notes": [
-    "This file holds furnace/building upgrade requirements only.",
-    "Each entry describes the cost to go FROM 'level' TO 'next_level'.",
-    "Packages included: minimum, all_camps, full_furnace.",
-    "Minimum = Furnace + Embassy + choose 1 troop camp.",
-    "All camps = Furnace + Embassy + Infantry/Marksman/Lancer Camp.",
-    "Full furnace = Furnace + Embassy + all camps + Command Center + Infirmary + War Academy."
-  ],
+  "timezone": "UTC",
   "levels": [
     {
       "level": "FC0",
       "next_level": "FC1",
       "packages": {
         "minimum": {
-          "description": "Furnace, Embassy, and choose 1 troop camp.",
+          "description": "Furnace + Embassy + choose 1 troop camp.",
           "requirements": [
             {
               "building": "Furnace",
@@ -28,7 +19,7 @@
               "refined_fire_crystals": 0
             },
             {
-              "choice_group": "one_troop_camp",
+              "choice_group": "Troop Camp",
               "choose": 1,
               "options": [
                 {
@@ -51,7 +42,7 @@
           ]
         },
         "all_camps": {
-          "description": "Furnace, Embassy, and all three troop camps.",
+          "description": "Furnace + Embassy + all 3 troop camps.",
           "requirements": [
             {
               "building": "Furnace",
@@ -81,7 +72,7 @@
           ]
         },
         "full_furnace": {
-          "description": "Furnace, Embassy, all troop camps, Command Center, Infirmary, and War Academy.",
+          "description": "Furnace + Embassy + all camps + Command Center + Infirmary.",
           "requirements": [
             {
               "building": "Furnace",
@@ -116,11 +107,6 @@
             {
               "building": "Infirmary",
               "fire_crystals": 26,
-              "refined_fire_crystals": 0
-            },
-            {
-              "building": "War Academy",
-              "fire_crystals": 0,
               "refined_fire_crystals": 0
             }
           ]
@@ -132,7 +118,7 @@
       "next_level": "FC2",
       "packages": {
         "minimum": {
-          "description": "Furnace, Embassy, and choose 1 troop camp.",
+          "description": "Furnace + Embassy + choose 1 troop camp.",
           "requirements": [
             {
               "building": "Furnace",
@@ -145,7 +131,7 @@
               "refined_fire_crystals": 0
             },
             {
-              "choice_group": "one_troop_camp",
+              "choice_group": "Troop Camp",
               "choose": 1,
               "options": [
                 {
@@ -168,7 +154,7 @@
           ]
         },
         "all_camps": {
-          "description": "Furnace, Embassy, and all three troop camps.",
+          "description": "Furnace + Embassy + all 3 troop camps.",
           "requirements": [
             {
               "building": "Furnace",
@@ -198,7 +184,7 @@
           ]
         },
         "full_furnace": {
-          "description": "Furnace, Embassy, all troop camps, Command Center, Infirmary, and War Academy.",
+          "description": "Furnace + Embassy + all camps + Command Center + Infirmary.",
           "requirements": [
             {
               "building": "Furnace",
@@ -233,11 +219,6 @@
             {
               "building": "Infirmary",
               "fire_crystals": 31,
-              "refined_fire_crystals": 0
-            },
-            {
-              "building": "War Academy",
-              "fire_crystals": 0,
               "refined_fire_crystals": 0
             }
           ]
@@ -249,7 +230,7 @@
       "next_level": "FC3",
       "packages": {
         "minimum": {
-          "description": "Furnace, Embassy, and choose 1 troop camp.",
+          "description": "Furnace + Embassy + choose 1 troop camp.",
           "requirements": [
             {
               "building": "Furnace",
@@ -262,7 +243,7 @@
               "refined_fire_crystals": 0
             },
             {
-              "choice_group": "one_troop_camp",
+              "choice_group": "Troop Camp",
               "choose": 1,
               "options": [
                 {
@@ -285,7 +266,7 @@
           ]
         },
         "all_camps": {
-          "description": "Furnace, Embassy, and all three troop camps.",
+          "description": "Furnace + Embassy + all 3 troop camps.",
           "requirements": [
             {
               "building": "Furnace",
@@ -315,7 +296,7 @@
           ]
         },
         "full_furnace": {
-          "description": "Furnace, Embassy, all troop camps, Command Center, Infirmary, and War Academy.",
+          "description": "Furnace + Embassy + all camps + Command Center + Infirmary.",
           "requirements": [
             {
               "building": "Furnace",
@@ -350,11 +331,6 @@
             {
               "building": "Infirmary",
               "fire_crystals": 47,
-              "refined_fire_crystals": 0
-            },
-            {
-              "building": "War Academy",
-              "fire_crystals": 0,
               "refined_fire_crystals": 0
             }
           ]
@@ -366,7 +342,7 @@
       "next_level": "FC4",
       "packages": {
         "minimum": {
-          "description": "Furnace, Embassy, and choose 1 troop camp.",
+          "description": "Furnace + Embassy + choose 1 troop camp.",
           "requirements": [
             {
               "building": "Furnace",
@@ -379,7 +355,7 @@
               "refined_fire_crystals": 0
             },
             {
-              "choice_group": "one_troop_camp",
+              "choice_group": "Troop Camp",
               "choose": 1,
               "options": [
                 {
@@ -402,7 +378,7 @@
           ]
         },
         "all_camps": {
-          "description": "Furnace, Embassy, and all three troop camps.",
+          "description": "Furnace + Embassy + all 3 troop camps.",
           "requirements": [
             {
               "building": "Furnace",
@@ -432,7 +408,7 @@
           ]
         },
         "full_furnace": {
-          "description": "Furnace, Embassy, all troop camps, Command Center, Infirmary, and War Academy.",
+          "description": "Furnace + Embassy + all camps + Command Center + Infirmary.",
           "requirements": [
             {
               "building": "Furnace",
@@ -467,11 +443,6 @@
             {
               "building": "Infirmary",
               "fire_crystals": 56,
-              "refined_fire_crystals": 0
-            },
-            {
-              "building": "War Academy",
-              "fire_crystals": 0,
               "refined_fire_crystals": 0
             }
           ]
@@ -483,7 +454,7 @@
       "next_level": "FC5",
       "packages": {
         "minimum": {
-          "description": "Furnace, Embassy, and choose 1 troop camp.",
+          "description": "Furnace + Embassy + choose 1 troop camp.",
           "requirements": [
             {
               "building": "Furnace",
@@ -496,7 +467,7 @@
               "refined_fire_crystals": 0
             },
             {
-              "choice_group": "one_troop_camp",
+              "choice_group": "Troop Camp",
               "choose": 1,
               "options": [
                 {
@@ -519,7 +490,7 @@
           ]
         },
         "all_camps": {
-          "description": "Furnace, Embassy, and all three troop camps.",
+          "description": "Furnace + Embassy + all 3 troop camps.",
           "requirements": [
             {
               "building": "Furnace",
@@ -549,7 +520,7 @@
           ]
         },
         "full_furnace": {
-          "description": "Furnace, Embassy, all troop camps, Command Center, Infirmary, and War Academy.",
+          "description": "Furnace + Embassy + all camps + Command Center + Infirmary.",
           "requirements": [
             {
               "building": "Furnace",
@@ -585,11 +556,6 @@
               "building": "Infirmary",
               "fire_crystals": 67,
               "refined_fire_crystals": 0
-            },
-            {
-              "building": "War Academy",
-              "fire_crystals": 0,
-              "refined_fire_crystals": 0
             }
           ]
         }
@@ -600,7 +566,7 @@
       "next_level": "FC6",
       "packages": {
         "minimum": {
-          "description": "Furnace, Embassy, and choose 1 troop camp.",
+          "description": "Furnace + Embassy + choose 1 troop camp.",
           "requirements": [
             {
               "building": "Furnace",
@@ -613,7 +579,7 @@
               "refined_fire_crystals": 13
             },
             {
-              "choice_group": "one_troop_camp",
+              "choice_group": "Troop Camp",
               "choose": 1,
               "options": [
                 {
@@ -636,7 +602,7 @@
           ]
         },
         "all_camps": {
-          "description": "Furnace, Embassy, and all three troop camps.",
+          "description": "Furnace + Embassy + all 3 troop camps.",
           "requirements": [
             {
               "building": "Furnace",
@@ -666,7 +632,7 @@
           ]
         },
         "full_furnace": {
-          "description": "Furnace, Embassy, all troop camps, Command Center, Infirmary, and War Academy.",
+          "description": "Furnace + Embassy + all camps + Command Center + Infirmary + War Academy.",
           "requirements": [
             {
               "building": "Furnace",
@@ -717,7 +683,7 @@
       "next_level": "FC7",
       "packages": {
         "minimum": {
-          "description": "Furnace, Embassy, and choose 1 troop camp.",
+          "description": "Furnace + Embassy + choose 1 troop camp.",
           "requirements": [
             {
               "building": "Furnace",
@@ -730,7 +696,7 @@
               "refined_fire_crystals": 19
             },
             {
-              "choice_group": "one_troop_camp",
+              "choice_group": "Troop Camp",
               "choose": 1,
               "options": [
                 {
@@ -753,7 +719,7 @@
           ]
         },
         "all_camps": {
-          "description": "Furnace, Embassy, and all three troop camps.",
+          "description": "Furnace + Embassy + all 3 troop camps.",
           "requirements": [
             {
               "building": "Furnace",
@@ -783,7 +749,7 @@
           ]
         },
         "full_furnace": {
-          "description": "Furnace, Embassy, all troop camps, Command Center, Infirmary, and War Academy.",
+          "description": "Furnace + Embassy + all camps + Command Center + Infirmary + War Academy.",
           "requirements": [
             {
               "building": "Furnace",
@@ -834,7 +800,7 @@
       "next_level": "FC8",
       "packages": {
         "minimum": {
-          "description": "Furnace, Embassy, and choose 1 troop camp.",
+          "description": "Furnace + Embassy + choose 1 troop camp.",
           "requirements": [
             {
               "building": "Furnace",
@@ -847,7 +813,7 @@
               "refined_fire_crystals": 30
             },
             {
-              "choice_group": "one_troop_camp",
+              "choice_group": "Troop Camp",
               "choose": 1,
               "options": [
                 {
@@ -870,7 +836,7 @@
           ]
         },
         "all_camps": {
-          "description": "Furnace, Embassy, and all three troop camps.",
+          "description": "Furnace + Embassy + all 3 troop camps.",
           "requirements": [
             {
               "building": "Furnace",
@@ -900,7 +866,7 @@
           ]
         },
         "full_furnace": {
-          "description": "Furnace, Embassy, all troop camps, Command Center, Infirmary, and War Academy.",
+          "description": "Furnace + Embassy + all camps + Command Center + Infirmary + War Academy.",
           "requirements": [
             {
               "building": "Furnace",
@@ -951,7 +917,7 @@
       "next_level": "FC9",
       "packages": {
         "minimum": {
-          "description": "Furnace, Embassy, and choose 1 troop camp.",
+          "description": "Furnace + Embassy + choose 1 troop camp.",
           "requirements": [
             {
               "building": "Furnace",
@@ -964,7 +930,7 @@
               "refined_fire_crystals": 43
             },
             {
-              "choice_group": "one_troop_camp",
+              "choice_group": "Troop Camp",
               "choose": 1,
               "options": [
                 {
@@ -987,7 +953,7 @@
           ]
         },
         "all_camps": {
-          "description": "Furnace, Embassy, and all three troop camps.",
+          "description": "Furnace + Embassy + all 3 troop camps.",
           "requirements": [
             {
               "building": "Furnace",
@@ -1017,7 +983,7 @@
           ]
         },
         "full_furnace": {
-          "description": "Furnace, Embassy, all troop camps, Command Center, Infirmary, and War Academy.",
+          "description": "Furnace + Embassy + all camps + Command Center + Infirmary + War Academy.",
           "requirements": [
             {
               "building": "Furnace",
@@ -1068,7 +1034,7 @@
       "next_level": "FC10",
       "packages": {
         "minimum": {
-          "description": "Furnace, Embassy, and choose 1 troop camp.",
+          "description": "Furnace + Embassy + choose 1 troop camp.",
           "requirements": [
             {
               "building": "Furnace",
@@ -1081,7 +1047,7 @@
               "refined_fire_crystals": 103
             },
             {
-              "choice_group": "one_troop_camp",
+              "choice_group": "Troop Camp",
               "choose": 1,
               "options": [
                 {
@@ -1104,7 +1070,7 @@
           ]
         },
         "all_camps": {
-          "description": "Furnace, Embassy, and all three troop camps.",
+          "description": "Furnace + Embassy + all 3 troop camps.",
           "requirements": [
             {
               "building": "Furnace",
@@ -1134,7 +1100,7 @@
           ]
         },
         "full_furnace": {
-          "description": "Furnace, Embassy, all troop camps, Command Center, Infirmary, and War Academy.",
+          "description": "Furnace + Embassy + all camps + Command Center + Infirmary + War Academy.",
           "requirements": [
             {
               "building": "Furnace",
