@@ -24,7 +24,7 @@ FEATURE_KEY = "wos_furnace"
 
 
 DEFAULT_UPGRADES: Dict[str, Any] = {
-    "timezone": "Australia/Brisbane",
+    "timezone": "UTC",
     "levels": [
         {
             "level": "FC0",
@@ -1259,7 +1259,7 @@ class WOSFurnaceCalculator(commands.Cog):
         weekly_refines="Your usual planned refines per week",
         preferred_package="Default upgrade package name",
         weekly_fire_crystals_income="Optional weekly Fire Crystal gain",
-        weekly_refined_fire_crystals_income="Optional weekly Refined Fire Crystal gain",
+        weekly_rfc_income="Optional weekly Refined Fire Crystal gain",
     )
     async def furnace_profile_set(
         self,
@@ -1270,7 +1270,7 @@ class WOSFurnaceCalculator(commands.Cog):
         weekly_refines: int = 0,
         preferred_package: str = "minimum",
         weekly_fire_crystals_income: int = 0,
-        weekly_refined_fire_crystals_income: int = 0,
+        weekly_rfc_income: int = 0,
     ) -> None:
         log_cmd("furnace_profile_set", interaction)
         await ensure_deferred(interaction, ephemeral=True)
@@ -1283,7 +1283,7 @@ class WOSFurnaceCalculator(commands.Cog):
             self._require_non_negative("weekly_refines", weekly_refines)
             self._require_non_negative("weekly_fire_crystals_income", weekly_fire_crystals_income)
             self._require_non_negative(
-                "weekly_refined_fire_crystals_income", weekly_refined_fire_crystals_income
+                "weekly_refined_fire_crystals_income", weekly_rfc_income
             )
             self.profiles[str(interaction.user.id)] = {
                 "current_level": current_level,
@@ -1292,7 +1292,7 @@ class WOSFurnaceCalculator(commands.Cog):
                 "weekly_refines": weekly_refines,
                 "preferred_package": preferred_package,
                 "weekly_fire_crystals_income": weekly_fire_crystals_income,
-                "weekly_refined_fire_crystals_income": weekly_refined_fire_crystals_income,
+                "weekly_refined_fire_crystals_income": weekly_rfc_income,
                 "updated_at": datetime.now(ZoneInfo(self.timezone_name)).isoformat(timespec="seconds"),
             }
             self.save_profiles()
@@ -1341,7 +1341,7 @@ class WOSFurnaceCalculator(commands.Cog):
         weekly_refines: Optional[int] = None,
         preferred_package: Optional[str] = None,
         weekly_fire_crystals_income: Optional[int] = None,
-        weekly_refined_fire_crystals_income: Optional[int] = None,
+        weekly_rfc_income: Optional[int] = None,
     ) -> None:
         log_cmd("furnace_profile_update", interaction)
         await ensure_deferred(interaction, ephemeral=True)
@@ -1368,11 +1368,11 @@ class WOSFurnaceCalculator(commands.Cog):
             if weekly_fire_crystals_income is not None:
                 self._require_non_negative("weekly_fire_crystals_income", weekly_fire_crystals_income)
                 profile["weekly_fire_crystals_income"] = weekly_fire_crystals_income
-            if weekly_refined_fire_crystals_income is not None:
+            if weekly_rfc_income is not None:
                 self._require_non_negative(
-                    "weekly_refined_fire_crystals_income", weekly_refined_fire_crystals_income
+                    "weekly_refined_fire_crystals_income", weekly_rfc_income
                 )
-                profile["weekly_refined_fire_crystals_income"] = weekly_refined_fire_crystals_income
+                profile["weekly_refined_fire_crystals_income"] = weekly_rfc_income
             profile["updated_at"] = datetime.now(ZoneInfo(self.timezone_name)).isoformat(timespec="seconds")
             self.save_profiles()
             await interaction.followup.send("✅ Furnace profile updated.", ephemeral=True)
@@ -1408,7 +1408,7 @@ class WOSFurnaceCalculator(commands.Cog):
         package="Upgrade package name. Leave blank to use saved profile/default",
         use_saved="Use saved profile defaults for any blank fields",
         weekly_fire_crystals_income="Optional Fire Crystal income per week before the target date",
-        weekly_refined_fire_crystals_income="Optional Refined Fire Crystal income per week before the target date",
+        weekly_rfc_income="Optional Refined Fire Crystal income per week before the target date",
     )
     async def furnace_refines_needed(
         self,
@@ -1421,7 +1421,7 @@ class WOSFurnaceCalculator(commands.Cog):
         package: Optional[str] = None,
         use_saved: bool = True,
         weekly_fire_crystals_income: Optional[int] = None,
-        weekly_refined_fire_crystals_income: Optional[int] = None,
+        weekly_rfc_income: Optional[int] = None,
     ) -> None:
         log_cmd("furnace_refines_needed", interaction)
         await ensure_deferred(interaction, ephemeral=True)
@@ -1441,7 +1441,7 @@ class WOSFurnaceCalculator(commands.Cog):
                 current_refined_fire_crystals=current_refined_fire_crystals,
                 package=package,
                 weekly_fire_crystals_income=weekly_fire_crystals_income,
-                weekly_refined_fire_crystals_income=weekly_refined_fire_crystals_income,
+                weekly_refined_fire_crystals_income=weekly_rfc_income,
             )
             package_name = merged["package"]
             current_level_name = str(merged["current_level"])
@@ -1557,7 +1557,7 @@ class WOSFurnaceCalculator(commands.Cog):
 
     @app_commands.command(
         name="furnace_upgrade_forecast",
-        description="Given a weekly refine plan, show the highest guaranteed and expected level reachable by the target date.",
+        description="Forecast the highest guaranteed and expected furnace level by a target date.",
     )
     @app_commands.describe(
         target_date="Target date: YYYY-MM-DD, DD/MM/YYYY, or DD-MM-YYYY",
@@ -1568,7 +1568,7 @@ class WOSFurnaceCalculator(commands.Cog):
         package="Upgrade package name. Leave blank to use saved profile/default",
         use_saved="Use saved profile defaults for any blank fields",
         weekly_fire_crystals_income="Optional Fire Crystal income per week before the target date",
-        weekly_refined_fire_crystals_income="Optional Refined Fire Crystal income per week before the target date",
+        weekly_rfc_income="Optional Refined Fire Crystal income per week before the target date",
     )
     async def furnace_upgrade_forecast(
         self,
@@ -1581,7 +1581,7 @@ class WOSFurnaceCalculator(commands.Cog):
         package: Optional[str] = None,
         use_saved: bool = True,
         weekly_fire_crystals_income: Optional[int] = None,
-        weekly_refined_fire_crystals_income: Optional[int] = None,
+        weekly_rfc_income: Optional[int] = None,
     ) -> None:
         log_cmd("furnace_upgrade_forecast", interaction)
         await ensure_deferred(interaction, ephemeral=True)
@@ -1601,7 +1601,7 @@ class WOSFurnaceCalculator(commands.Cog):
                 current_refined_fire_crystals=current_refined_fire_crystals,
                 package=package,
                 weekly_fire_crystals_income=weekly_fire_crystals_income,
-                weekly_refined_fire_crystals_income=weekly_refined_fire_crystals_income,
+                weekly_refined_fire_crystals_income=weekly_rfc_income,
             )
             profile = self._get_profile(interaction.user.id) if use_saved else {}
             if weekly_refines is None:
