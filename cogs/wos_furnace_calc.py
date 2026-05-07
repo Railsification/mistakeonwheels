@@ -544,6 +544,7 @@ class WOSFurnaceCalculator(commands.Cog):
             total_rfc += int(costs[building_key]["rfc"])
         return {"fc": total_fc, "rfc": total_rfc}
 
+    @staticmethod
     def _require_non_negative(name: str, value: Optional[int]) -> int:
         if value is None:
             return 0
@@ -969,7 +970,7 @@ class WOSFurnaceCalculator(commands.Cog):
             name="Setup once",
             value=(
                 "1. `/furnace_profile_set ...`\n"
-                "2. `/furnace_profile_buildings_update ...` if your building levels are uneven\n"
+                "2. Put your actual building levels straight into that command if they are uneven\n"
                 "3. Edit `wos_furnace_upgrades.json` / `wos_refine_rates.json` if needed\n"
                 "4. `/furnace_reference_reload` after JSON changes"
             ),
@@ -1016,8 +1017,7 @@ class WOSFurnaceCalculator(commands.Cog):
         details.add_field(
             name="Example",
             value=(
-                "`/furnace_profile_set current_level:FC9 ...`\n"
-                "`/furnace_profile_buildings_update furnace:FC9 embassy:FC9 infantry_camp:FC9 lancer_camp:FC9 marksman_camp:FC5`\n"
+                "`/furnace_profile_set current_level:FC9 furnace:FC9 embassy:FC9 infantry_camp:FC9 lancer_camp:FC9 marksman_camp:FC5 ...`\n"
                 "`/furnace_refines_needed target_level:FC10 target_date:2026-06-16 use_saved:true`"
             ),
             inline=False,
@@ -1094,13 +1094,21 @@ class WOSFurnaceCalculator(commands.Cog):
     @app_commands.command(name="furnace_profile_set", description="Create or replace your saved furnace profile.")
     @app_commands.choices(current_level=LEVEL_CHOICES, preferred_package=PACKAGE_CHOICES)
     @app_commands.describe(
-        current_level="Your current furnace level",
+        current_level="Your main current furnace level",
         current_fire_crystals="Current Fire Crystals",
         current_refined_fire_crystals="Current Refined Fire Crystals",
         weekly_refines="Planned refines per week",
         preferred_package="Default package name",
         weekly_fire_crystals_income="Optional Fire Crystal gain per week",
         weekly_rfc_income="Optional Refined Fire Crystal gain per week",
+        furnace="Optional actual Furnace level",
+        embassy="Optional actual Embassy level",
+        command_center="Optional actual Command Center level",
+        infirmary="Optional actual Infirmary level",
+        infantry_camp="Optional actual Infantry Camp level",
+        marksman_camp="Optional actual Marksman Camp level",
+        lancer_camp="Optional actual Lancer Camp level",
+        war_academy="Optional actual War Academy level",
     )
     async def furnace_profile_set(
         self,
@@ -1112,6 +1120,14 @@ class WOSFurnaceCalculator(commands.Cog):
         preferred_package: str = "minimum",
         weekly_fire_crystals_income: int = 0,
         weekly_rfc_income: int = 0,
+        furnace: Optional[str] = None,
+        embassy: Optional[str] = None,
+        command_center: Optional[str] = None,
+        infirmary: Optional[str] = None,
+        infantry_camp: Optional[str] = None,
+        marksman_camp: Optional[str] = None,
+        lancer_camp: Optional[str] = None,
+        war_academy: Optional[str] = None,
     ) -> None:
         log_cmd("furnace_profile_set", interaction)
         if not await self._ensure_allowed(interaction):
@@ -1124,9 +1140,25 @@ class WOSFurnaceCalculator(commands.Cog):
             self._require_non_negative("weekly_refines", weekly_refines)
             self._require_non_negative("weekly_fire_crystals_income", weekly_fire_crystals_income)
             self._require_non_negative("weekly_rfc_income", weekly_rfc_income)
+
+            buildings = self._default_buildings_for_level(current_level)
+            for key, value in {
+                "furnace": furnace,
+                "embassy": embassy,
+                "command_center": command_center,
+                "infirmary": infirmary,
+                "infantry_camp": infantry_camp,
+                "marksman_camp": marksman_camp,
+                "lancer_camp": lancer_camp,
+                "war_academy": war_academy,
+            }.items():
+                if value is not None:
+                    self._get_level_entry(value)
+                    buildings[key] = value
+
             self.profiles[str(interaction.user.id)] = {
                 "current_level": current_level,
-                "current_buildings": self._default_buildings_for_level(current_level),
+                "current_buildings": buildings,
                 "fire_crystals": current_fire_crystals,
                 "refined_fire_crystals": current_refined_fire_crystals,
                 "weekly_refines": weekly_refines,
@@ -1176,8 +1208,25 @@ class WOSFurnaceCalculator(commands.Cog):
         embed.add_field(name="Updated", value=str(profile.get("updated_at", "-")), inline=False)
         await interaction.followup.send(embed=embed, ephemeral=True)
 
-    @app_commands.command(name="furnace_profile_update", description="Update one or more profile values.")
+    @app_commands.command(name="furnace_profile_update", description="Update one or more saved furnace values.")
     @app_commands.choices(current_level=LEVEL_CHOICES, preferred_package=PACKAGE_CHOICES)
+    @app_commands.describe(
+        current_level="Optional new main furnace level",
+        current_fire_crystals="Optional new Fire Crystal amount",
+        current_refined_fire_crystals="Optional new Refined Fire Crystal amount",
+        weekly_refines="Optional new weekly refine amount",
+        preferred_package="Optional new default package",
+        weekly_fire_crystals_income="Optional new weekly Fire Crystal income",
+        weekly_rfc_income="Optional new weekly Refined Fire Crystal income",
+        furnace="Optional actual Furnace level",
+        embassy="Optional actual Embassy level",
+        command_center="Optional actual Command Center level",
+        infirmary="Optional actual Infirmary level",
+        infantry_camp="Optional actual Infantry Camp level",
+        marksman_camp="Optional actual Marksman Camp level",
+        lancer_camp="Optional actual Lancer Camp level",
+        war_academy="Optional actual War Academy level",
+    )
     async def furnace_profile_update(
         self,
         interaction: discord.Interaction,
@@ -1188,6 +1237,14 @@ class WOSFurnaceCalculator(commands.Cog):
         preferred_package: Optional[str] = None,
         weekly_fire_crystals_income: Optional[int] = None,
         weekly_rfc_income: Optional[int] = None,
+        furnace: Optional[str] = None,
+        embassy: Optional[str] = None,
+        command_center: Optional[str] = None,
+        infirmary: Optional[str] = None,
+        infantry_camp: Optional[str] = None,
+        marksman_camp: Optional[str] = None,
+        lancer_camp: Optional[str] = None,
+        war_academy: Optional[str] = None,
     ) -> None:
         log_cmd("furnace_profile_update", interaction)
         if not await self._ensure_allowed(interaction):
@@ -1217,49 +1274,13 @@ class WOSFurnaceCalculator(commands.Cog):
             if weekly_rfc_income is not None:
                 self._require_non_negative("weekly_rfc_income", weekly_rfc_income)
                 profile["weekly_refined_fire_crystals_income"] = weekly_rfc_income
-            profile["updated_at"] = datetime.now(self._tz()).isoformat(timespec="seconds")
-            self.save_profiles()
-            await interaction.followup.send("✅ Furnace profile updated.", ephemeral=True)
-        except Exception as exc:
-            await interaction.followup.send(f"❌ {exc}", ephemeral=True)
 
-
-    @app_commands.command(name="furnace_profile_buildings_update", description="Update the saved level of your actual furnace buildings.")
-    @app_commands.choices(
-        furnace=LEVEL_CHOICES,
-        embassy=LEVEL_CHOICES,
-        command_center=LEVEL_CHOICES,
-        infirmary=LEVEL_CHOICES,
-        infantry_camp=LEVEL_CHOICES,
-        marksman_camp=LEVEL_CHOICES,
-        lancer_camp=LEVEL_CHOICES,
-        war_academy=LEVEL_CHOICES,
-    )
-    async def furnace_profile_buildings_update(
-        self,
-        interaction: discord.Interaction,
-        furnace: Optional[str] = None,
-        embassy: Optional[str] = None,
-        command_center: Optional[str] = None,
-        infirmary: Optional[str] = None,
-        infantry_camp: Optional[str] = None,
-        marksman_camp: Optional[str] = None,
-        lancer_camp: Optional[str] = None,
-        war_academy: Optional[str] = None,
-    ) -> None:
-        log_cmd("furnace_profile_buildings_update", interaction)
-        if not await self._ensure_allowed(interaction):
-            return
-        await ensure_deferred(interaction, ephemeral=True)
-        try:
-            profile = self._get_profile(interaction.user.id)
-            if not profile:
-                raise ReferenceError("No saved profile found. Use /furnace_profile_set first.")
-            current_level = str(profile.get("current_level") or "")
-            if not current_level:
+            base_level = str(profile.get("current_level") or current_level or "")
+            if not base_level:
                 raise ReferenceError("Saved profile has no current_level. Re-save the profile first.")
-            buildings = dict(profile.get("current_buildings") or self._default_buildings_for_level(current_level))
-            updates = {
+            buildings = dict(profile.get("current_buildings") or self._default_buildings_for_level(base_level))
+            changed = []
+            for key, value in {
                 "furnace": furnace,
                 "embassy": embassy,
                 "command_center": command_center,
@@ -1268,20 +1289,18 @@ class WOSFurnaceCalculator(commands.Cog):
                 "marksman_camp": marksman_camp,
                 "lancer_camp": lancer_camp,
                 "war_academy": war_academy,
-            }
-            changed = []
-            for key, value in updates.items():
+            }.items():
                 if value is None:
                     continue
                 self._get_level_entry(value)
                 buildings[key] = value
                 changed.append(f"{BUILDING_DISPLAY_NAMES[key]}={value}")
-            if not changed:
-                raise ReferenceError("No building levels were provided.")
-            profile["current_buildings"] = buildings
+            if changed:
+                profile["current_buildings"] = buildings
+
             profile["updated_at"] = datetime.now(self._tz()).isoformat(timespec="seconds")
             self.save_profiles()
-            await interaction.followup.send("✅ Updated building levels: " + ", ".join(changed), ephemeral=True)
+            await interaction.followup.send("✅ Furnace profile updated.", ephemeral=True)
         except Exception as exc:
             await interaction.followup.send(f"❌ {exc}", ephemeral=True)
 
@@ -1309,7 +1328,8 @@ class WOSFurnaceCalculator(commands.Cog):
         await ensure_deferred(interaction, ephemeral=True)
         await interaction.followup.send(embeds=self._build_help_embeds(), ephemeral=True)
 
-    @app_commands.command(name="furnace_post_help", description="Post the furnace help sheet into a channel.")
+    @app_commands.command(name="furnace_post_help", description="Admin: post the furnace help sheet into a channel.")
+    @app_commands.default_permissions(administrator=True)
     @app_commands.describe(channel="Channel to post the help sheet into")
     async def furnace_post_help(self, interaction: discord.Interaction, channel: discord.TextChannel) -> None:
         log_cmd("furnace_post_help", interaction)
