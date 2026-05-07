@@ -17,6 +17,9 @@ except ImportError:  # pragma: no cover
 
 load_dotenv()
 
+BASE_DIR = Path(__file__).resolve().parent
+COGS_DIR = BASE_DIR / "cogs"
+
 TOKEN = os.getenv("BOT_TOKEN")
 GUILD_ID_STR = os.getenv("GUILD_ID", "0")
 GUILD_ID = int(GUILD_ID_STR) if GUILD_ID_STR.isdigit() else 0
@@ -103,23 +106,46 @@ class HotBot(commands.Bot):
             "openai_image_model": OPENAI_IMAGE_MODEL,
         }
 
-    async def setup_hook(self):
-        await self.load_extension("cogs.joins")
-        await self.load_extension("cogs.polls")
-        await self.load_extension("cogs.images")
-        await self.load_extension("cogs.speech")
-        await self.load_extension("cogs.pfp")
-        await self.load_extension("cogs.admin")
-        await self.load_extension("cogs.misc")
-        await self.load_extension("cogs.games")
-        await self.load_extension("cogs.tictactoe")
-        await self.load_extension("cogs.connect4")
-        await self.load_extension("cogs.canyon")
-        await self.load_extension("cogs.wos_furnace_calc")
-        await self.load_extension("chest_pattern")
+    def _discover_cogs(self) -> list[str]:
+        if not COGS_DIR.exists():
+            raise RuntimeError(f"Cog directory not found: {COGS_DIR}")
 
-        loaded = len(list(self.extensions.keys()))
-        ok(f"Loaded {loaded} cog(s)")
+        preferred_first = ["admin"]
+        discovered = [
+            path.stem
+            for path in sorted(COGS_DIR.glob("*.py"))
+            if path.name != "__init__.py" and not path.name.startswith("_")
+        ]
+
+        ordered: list[str] = []
+        for name in preferred_first:
+            if name in discovered:
+                ordered.append(name)
+
+        for name in discovered:
+            if name not in ordered:
+                ordered.append(name)
+
+        return ordered
+
+    async def setup_hook(self):
+        loaded_names: list[str] = []
+        failed_names: list[str] = []
+
+        for cog_name in self._discover_cogs():
+            extension_name = f"cogs.{cog_name}"
+            try:
+                await self.load_extension(extension_name)
+                loaded_names.append(cog_name)
+            except Exception as e:
+                failed_names.append(cog_name)
+                err(f"Failed to load {extension_name}: {e!r}")
+
+        ok(f"Loaded {len(loaded_names)} cog(s)")
+        if loaded_names:
+            info(f"Cogs: {', '.join(loaded_names)}")
+        if failed_names:
+            err(f"Failed cog(s): {', '.join(failed_names)}")
 
         if not GUILD_ID:
             err("GUILD_ID missing or invalid in .env")
