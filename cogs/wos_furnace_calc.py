@@ -21,12 +21,6 @@ REFINES_PATH = DATA_DIR / "wos_refine_rates.json"
 PROFILES_PATH = DATA_DIR / "wos_furnace_profiles.json"
 
 
-LEVEL_CHOICE_VALUES = [f"FC{i}" for i in range(1, 11)]
-LEVEL_CHOICES = [app_commands.Choice(name=value, value=value) for value in LEVEL_CHOICE_VALUES]
-PACKAGE_CHOICE_VALUES = ["minimum", "all_camps", "full_furnace"]
-PACKAGE_CHOICES = [app_commands.Choice(name=value, value=value) for value in PACKAGE_CHOICE_VALUES]
-
-
 DEFAULT_BUILDING_COSTS_BY_TARGET: Dict[str, Dict[str, Dict[str, int]]] = {
     "FC1": {
         "furnace": {"fc": 132, "rfc": 0},
@@ -869,12 +863,43 @@ class WOSFurnaceCalculator(commands.Cog):
         return [overview, details]
 
     # -----------------------------
+    # autocomplete
+    # -----------------------------
+    async def _level_choices(self, current: str) -> List[app_commands.Choice[str]]:
+        current_cf = current.casefold().strip()
+        matches = [level for level in self.level_names if current_cf in level.casefold()]
+        return [app_commands.Choice(name=level, value=level) for level in matches[:25]]
+
+    async def _package_choices(self, interaction: discord.Interaction, current: str) -> List[app_commands.Choice[str]]:
+        level_name = None
+        namespace = getattr(interaction, "namespace", None)
+        if namespace is not None:
+            level_name = getattr(namespace, "current_level", None)
+        if not level_name:
+            profile = self._get_profile(interaction.user.id)
+            level_name = profile.get("current_level")
+        package_names: List[str] = []
+        if level_name:
+            try:
+                package_names = list(self._get_level_entry(level_name).get("packages", {}).keys())
+            except Exception:
+                package_names = []
+        if not package_names:
+            seen: set[str] = set()
+            for entry in self.upgrades["levels"]:
+                for package_name in entry.get("packages", {}).keys():
+                    key = package_name.casefold()
+                    if key not in seen:
+                        seen.add(key)
+                        package_names.append(package_name)
+        current_cf = current.casefold().strip()
+        matches = [name for name in package_names if current_cf in name.casefold()]
+        return [app_commands.Choice(name=name, value=name) for name in matches[:25]]
 
     # -----------------------------
     # profile commands
     # -----------------------------
     @app_commands.command(name="furnace_profile_set", description="Create or replace your saved furnace profile.")
-    @app_commands.choices(current_level=LEVEL_CHOICES, preferred_package=PACKAGE_CHOICES)
     @app_commands.describe(
         current_level="Your current furnace level",
         current_fire_crystals="Current Fire Crystals",
@@ -949,7 +974,6 @@ class WOSFurnaceCalculator(commands.Cog):
         await interaction.followup.send(embed=embed, ephemeral=True)
 
     @app_commands.command(name="furnace_profile_update", description="Update one or more profile values.")
-    @app_commands.choices(current_level=LEVEL_CHOICES, preferred_package=PACKAGE_CHOICES)
     async def furnace_profile_update(
         self,
         interaction: discord.Interaction,
@@ -1039,7 +1063,6 @@ class WOSFurnaceCalculator(commands.Cog):
     # main commands
     # -----------------------------
     @app_commands.command(name="furnace_refines_needed", description="Work out the weekly refines needed by a target date.")
-    @app_commands.choices(target_level=LEVEL_CHOICES, current_level=LEVEL_CHOICES, package=PACKAGE_CHOICES)
     @app_commands.describe(
         target_level="Target furnace level",
         target_date="YYYY-MM-DD, DD/MM/YYYY, or DD-MM-YYYY",
@@ -1213,7 +1236,6 @@ class WOSFurnaceCalculator(commands.Cog):
             await interaction.followup.send(f"❌ {exc}", ephemeral=True)
 
     @app_commands.command(name="furnace_upgrade_forecast", description="Given weekly refines, show the highest level reachable by date.")
-    @app_commands.choices(current_level=LEVEL_CHOICES, package=PACKAGE_CHOICES)
     @app_commands.describe(
         target_date="YYYY-MM-DD, DD/MM/YYYY, or DD-MM-YYYY",
         weekly_refines="Refines you plan to do each week",
@@ -1424,6 +1446,23 @@ class WOSFurnaceCalculator(commands.Cog):
             await interaction.followup.send(f"❌ Reload failed: {exc}", ephemeral=True)
 
     # -----------------------------
+    # autocomplete bindings
+    # -----------------------------
+    @furnace_profile_set.autocomplete("current_level")
+    @furnace_profile_update.autocomplete("current_level")
+    @furnace_refines_needed.autocomplete("current_level")
+    @furnace_refines_needed.autocomplete("target_level")
+    @furnace_upgrade_forecast.autocomplete("current_level")
+    async def furnace_level_autocomplete(self, interaction: discord.Interaction, current: str) -> List[app_commands.Choice[str]]:
+        return await self._level_choices(current)
+
+    @furnace_profile_set.autocomplete("preferred_package")
+    @furnace_profile_update.autocomplete("preferred_package")
+    @furnace_refines_needed.autocomplete("package")
+    @furnace_upgrade_forecast.autocomplete("package")
+    async def furnace_package_autocomplete(self, interaction: discord.Interaction, current: str) -> List[app_commands.Choice[str]]:
+        return await self._package_choices(interaction, current)
+
 
 async def setup(bot: commands.Bot) -> None:
     if not hasattr(bot, "settings"):
