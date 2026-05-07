@@ -1204,6 +1204,7 @@ class WOSFurnaceCalculator(commands.Cog):
         await interaction.followup.send(embeds=self._build_help_embeds(), ephemeral=True)
 
     @app_commands.command(name="furnace_post_help", description="Tech-only: post the furnace help sheet into a channel.")
+    @app_commands.default_permissions(manage_guild=True)
     @app_commands.describe(channel="Channel to post the help sheet into")
     async def furnace_post_help(self, interaction: discord.Interaction, channel: discord.TextChannel) -> None:
         log_cmd("furnace_post_help", interaction)
@@ -1568,6 +1569,7 @@ class WOSFurnaceCalculator(commands.Cog):
             await interaction.followup.send(f"❌ {exc}", ephemeral=True)
 
     @app_commands.command(name="furnace_reference_check", description="Tech-only: show loaded furnace reference metadata.")
+    @app_commands.default_permissions(manage_guild=True)
     async def furnace_reference_check(self, interaction: discord.Interaction) -> None:
         log_cmd("furnace_reference_check", interaction)
         if not await self._ensure_allowed(interaction):
@@ -1600,6 +1602,7 @@ class WOSFurnaceCalculator(commands.Cog):
             await interaction.followup.send(f"❌ {exc}", ephemeral=True)
 
     @app_commands.command(name="furnace_reference_reload", description="Tech-only: reload the furnace JSON references.")
+    @app_commands.default_permissions(manage_guild=True)
     async def furnace_reference_reload(self, interaction: discord.Interaction) -> None:
         log_cmd("furnace_reference_reload", interaction)
         if not await self._ensure_allowed(interaction):
