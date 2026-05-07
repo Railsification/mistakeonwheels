@@ -116,6 +116,7 @@ class HotBot(commands.Bot):
         await self.load_extension("cogs.connect4")
         await self.load_extension("cogs.canyon")
         await self.load_extension("cogs.wos_furnace_calc")
+        await self.load_extension("chest_pattern")
 
         loaded = len(list(self.extensions.keys()))
         ok(f"Loaded {loaded} cog(s)")
