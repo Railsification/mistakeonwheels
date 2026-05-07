@@ -3,6 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from datetime import date, datetime, timedelta
 import math
+import re
 from typing import Any, Dict, List, Optional
 from zoneinfo import ZoneInfo
 
@@ -19,6 +20,28 @@ FEATURE_KEY = "wos_furnace"
 UPGRADES_PATH = DATA_DIR / "wos_furnace_upgrades.json"
 REFINES_PATH = DATA_DIR / "wos_refine_rates.json"
 PROFILES_PATH = DATA_DIR / "wos_furnace_profiles.json"
+
+
+LEVEL_CHOICE_VALUES = [f"FC{i}" for i in range(1, 11)]
+LEVEL_CHOICES = [app_commands.Choice(name=value, value=value) for value in LEVEL_CHOICE_VALUES]
+PACKAGE_CHOICE_VALUES = ["minimum", "all_camps", "full_furnace"]
+PACKAGE_CHOICES = [app_commands.Choice(name=value, value=value) for value in PACKAGE_CHOICE_VALUES]
+
+BUILDING_CHOICES = LEVEL_CHOICES
+BUILDING_KEY_TO_LABEL: Dict[str, str] = {
+    "furnace": "Furnace",
+    "embassy": "Embassy",
+    "infantry_camp": "Infantry Camp",
+    "marksman_camp": "Marksman Camp",
+    "lancer_camp": "Lancer Camp",
+    "command_center": "Command Center",
+    "infirmary": "Infirmary",
+    "war_academy": "War Academy",
+}
+BUILDING_LABEL_TO_KEY: Dict[str, str] = {
+    label.casefold(): key for key, label in BUILDING_KEY_TO_LABEL.items()
+}
+BUILDING_KEYS: List[str] = list(BUILDING_KEY_TO_LABEL.keys())
 
 
 DEFAULT_BUILDING_COSTS_BY_TARGET: Dict[str, Dict[str, Dict[str, int]]] = {
@@ -212,9 +235,11 @@ DEFAULT_REFINES: Dict[str, Any] = {
 }
 
 
-def _building_req(label: str, fc: int, rfc: int) -> Dict[str, Any]:
+def _building_req(label: str, fc: int, rfc: int, key: Optional[str] = None) -> Dict[str, Any]:
+    building_key = key or BUILDING_LABEL_TO_KEY.get(label.casefold(), label.strip().lower().replace(" ", "_"))
     return {
         "building": label,
+        "key": building_key,
         "fire_crystals": fc,
         "refined_fire_crystals": rfc,
     }
@@ -238,8 +263,8 @@ def build_default_upgrades() -> Dict[str, Any]:
         required_camp_key = REQUIRED_CAMP_BY_CURRENT_LEVEL[current_level]
 
         minimum_requirements = [
-            _building_req("Furnace", costs["furnace"]["fc"], costs["furnace"]["rfc"]),
-            _building_req("Embassy", costs["embassy"]["fc"], costs["embassy"]["rfc"]),
+            _building_req("Furnace", costs["furnace"]["fc"], costs["furnace"]["rfc"], "furnace"),
+            _building_req("Embassy", costs["embassy"]["fc"], costs["embassy"]["rfc"], "embassy"),
         ]
         camp_labels = {
             "infantry_camp": "Infantry Camp",
@@ -251,27 +276,28 @@ def build_default_upgrades() -> Dict[str, Any]:
                 camp_labels[required_camp_key],
                 costs[required_camp_key]["fc"],
                 costs[required_camp_key]["rfc"],
+                required_camp_key,
             )
         )
 
         all_camps_requirements = [
-            _building_req("Furnace", costs["furnace"]["fc"], costs["furnace"]["rfc"]),
-            _building_req("Embassy", costs["embassy"]["fc"], costs["embassy"]["rfc"]),
-            _building_req("Infantry Camp", costs["infantry_camp"]["fc"], costs["infantry_camp"]["rfc"]),
-            _building_req("Marksman Camp", costs["marksman_camp"]["fc"], costs["marksman_camp"]["rfc"]),
-            _building_req("Lancer Camp", costs["lancer_camp"]["fc"], costs["lancer_camp"]["rfc"]),
+            _building_req("Furnace", costs["furnace"]["fc"], costs["furnace"]["rfc"], "furnace"),
+            _building_req("Embassy", costs["embassy"]["fc"], costs["embassy"]["rfc"], "embassy"),
+            _building_req("Infantry Camp", costs["infantry_camp"]["fc"], costs["infantry_camp"]["rfc"], "infantry_camp"),
+            _building_req("Marksman Camp", costs["marksman_camp"]["fc"], costs["marksman_camp"]["rfc"], "marksman_camp"),
+            _building_req("Lancer Camp", costs["lancer_camp"]["fc"], costs["lancer_camp"]["rfc"], "lancer_camp"),
         ]
 
         full_furnace_requirements = list(all_camps_requirements)
         full_furnace_requirements.extend(
             [
-                _building_req("Command Center", costs["command_center"]["fc"], costs["command_center"]["rfc"]),
-                _building_req("Infirmary", costs["infirmary"]["fc"], costs["infirmary"]["rfc"]),
+                _building_req("Command Center", costs["command_center"]["fc"], costs["command_center"]["rfc"], "command_center"),
+                _building_req("Infirmary", costs["infirmary"]["fc"], costs["infirmary"]["rfc"], "infirmary"),
             ]
         )
         if costs["war_academy"]["fc"] > 0 or costs["war_academy"]["rfc"] > 0:
             full_furnace_requirements.append(
-                _building_req("War Academy", costs["war_academy"]["fc"], costs["war_academy"]["rfc"])
+                _building_req("War Academy", costs["war_academy"]["fc"], costs["war_academy"]["rfc"], "war_academy")
             )
 
         levels.append(
@@ -301,6 +327,10 @@ def build_default_upgrades() -> Dict[str, Any]:
         "levels": levels,
     }
 
+
+
+def default_building_levels(base_level: str) -> Dict[str, str]:
+    return {key: base_level for key in BUILDING_KEYS}
 
 class ReferenceError(ValueError):
     pass
@@ -480,6 +510,44 @@ class WOSFurnaceCalculator(commands.Cog):
     def _fmt_float(value: float) -> str:
         return f"{value:,.2f}"
 
+
+    def _level_value(self, level_name: str) -> int:
+        entry = self._get_level_entry(level_name)
+        match = re.search(r"(\d+)", entry["level"])
+        if not match:
+            raise ReferenceError(f"Invalid level name '{level_name}'.")
+        return int(match.group(1))
+
+    def _canonical_building_key(self, raw_key: str) -> str:
+        key = raw_key.strip().casefold()
+        if key in BUILDING_KEY_TO_LABEL:
+            return key
+        mapped = BUILDING_LABEL_TO_KEY.get(key)
+        if mapped:
+            return mapped
+        raise ReferenceError(f"Unknown building '{raw_key}'.")
+
+    def _normalize_building_levels(self, base_level: str, raw_levels: Optional[Dict[str, Any]] = None) -> Dict[str, str]:
+        self._get_level_entry(base_level)
+        levels = default_building_levels(base_level)
+        if isinstance(raw_levels, dict):
+            for raw_key, raw_value in raw_levels.items():
+                if raw_value is None:
+                    continue
+                key = self._canonical_building_key(str(raw_key))
+                level_name = str(raw_value).strip()
+                if not level_name:
+                    continue
+                self._get_level_entry(level_name)
+                levels[key] = level_name
+        return levels
+
+    def _serialize_building_levels(self, levels: Dict[str, str]) -> Dict[str, str]:
+        return {key: levels[key] for key in BUILDING_KEYS}
+
+    def _buildings_field_text(self, levels: Dict[str, str]) -> str:
+        return "\n".join(f"{BUILDING_KEY_TO_LABEL[key]}: **{levels[key]}**" for key in BUILDING_KEYS)
+
     def _base_embed(self, title: str, description: str = "") -> discord.Embed:
         embed = discord.Embed(title=title, description=description, colour=discord.Colour.orange())
         embed.set_footer(text=f"TZ: {self.timezone_name}")
@@ -493,6 +561,7 @@ class WOSFurnaceCalculator(commands.Cog):
         partial_days = total_days % 7
         return (full_weeks * amount_per_week) + math.floor((amount_per_week * partial_days) / 7)
 
+
     def _merge_profile_defaults(
         self,
         user_id: int,
@@ -505,8 +574,26 @@ class WOSFurnaceCalculator(commands.Cog):
         weekly_rfc_income: Optional[int],
     ) -> Dict[str, Any]:
         profile = self._get_profile(user_id) if use_saved else {}
+        profile_buildings = profile.get("current_buildings") if isinstance(profile.get("current_buildings"), dict) else {}
+
+        derived_level = current_level if current_level is not None else profile.get("current_level")
+        if current_level is None and profile_buildings.get("furnace"):
+            derived_level = str(profile_buildings["furnace"])
+
+        if not derived_level:
+            raise ReferenceError("current_level is required. Set a profile or pass it in the command.")
+
+        if current_level is not None:
+            self._get_level_entry(current_level)
+            if profile_buildings:
+                profile_buildings = dict(profile_buildings)
+                profile_buildings["furnace"] = current_level
+
+        current_buildings = self._normalize_building_levels(str(derived_level), profile_buildings)
+
         merged = {
-            "current_level": current_level if current_level is not None else profile.get("current_level"),
+            "current_level": current_buildings["furnace"],
+            "current_buildings": current_buildings,
             "current_fire_crystals": (
                 current_fire_crystals if current_fire_crystals is not None else profile.get("fire_crystals", 0)
             ),
@@ -527,8 +614,6 @@ class WOSFurnaceCalculator(commands.Cog):
                 else profile.get("weekly_refined_fire_crystals_income", 0)
             ),
         }
-        if not merged["current_level"]:
-            raise ReferenceError("current_level is required. Set a profile or pass it in the command.")
         return merged
 
     # -----------------------------
@@ -570,22 +655,74 @@ class WOSFurnaceCalculator(commands.Cog):
         counts[0] += total_attempts - days
         return counts
 
-    def _format_weekly_schedule(self, weekly_refines: int) -> str:
-        counts = self._weekly_day_counts(weekly_refines, 7)
-        labels = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"]
-        return " | ".join(f"{labels[i]} {counts[i]}" for i in range(7))
+    def _format_schedule_counts(self, start_day: date, counts: List[int]) -> str:
+        return " | ".join(
+            f"{(start_day + timedelta(days=i)).strftime('%a')} {counts[i]}"
+            for i in range(len(counts))
+        )
 
-    def _window_segments(self, start_date: date, target_date: date) -> List[int]:
+    def _full_week_schedule(self, weekly_refines: int) -> str:
+        return self._format_schedule_counts(date(2024, 1, 1), self._weekly_day_counts(weekly_refines, 7))
+
+    def _window_segments(self, start_date: date, target_date: date) -> List[tuple[date, date, int]]:
         if target_date < start_date:
             return []
-        segments: List[int] = []
+        segments: List[tuple[date, date, int]] = []
         cursor = start_date
         while cursor <= target_date:
             days_until_sunday = 6 - cursor.weekday()
             segment_end = min(target_date, cursor + timedelta(days=days_until_sunday))
-            segments.append((segment_end - cursor).days + 1)
+            segment_days = (segment_end - cursor).days + 1
+            segments.append((cursor, segment_end, segment_days))
             cursor = segment_end + timedelta(days=1)
         return segments
+
+    def _window_schedule_segments(self, weekly_refines: int, start_date: date, target_date: date) -> List[Dict[str, Any]]:
+        segments: List[Dict[str, Any]] = []
+        for segment_start, segment_end, segment_days in self._window_segments(start_date, target_date):
+            segment_attempts = math.floor((weekly_refines * segment_days) / 7)
+            counts = self._weekly_day_counts(segment_attempts, segment_days)
+            segments.append(
+                {
+                    "start": segment_start,
+                    "end": segment_end,
+                    "days": segment_days,
+                    "attempts": segment_attempts,
+                    "counts": counts,
+                    "text": self._format_schedule_counts(segment_start, counts),
+                }
+            )
+        return segments
+
+    def _schedule_text_for_window(self, weekly_refines: int, start_date: date, target_date: date) -> str:
+        segments = self._window_schedule_segments(weekly_refines, start_date, target_date)
+        if not segments:
+            return "No refines in window."
+        if len(segments) == 1:
+            segment = segments[0]
+            if segment["days"] == 7 and segment["start"].weekday() == 0:
+                return f"This week: {segment['text']}"
+            return f"Current window ({segment['start'].strftime('%a')}-{segment['end'].strftime('%a')}): {segment['text']}"
+
+        lines: List[str] = []
+        first = segments[0]
+        lines.append(
+            f"Current week ({first['start'].strftime('%a')}-{first['end'].strftime('%a')}): {first['text']}"
+        )
+
+        middle_full = [segment for segment in segments[1:-1] if segment["days"] == 7]
+        if middle_full:
+            lines.append(f"Each full week after Monday reset: {middle_full[0]['text']}")
+        elif len(segments) >= 2 and segments[1]["days"] == 7:
+            lines.append(f"Next full week from Monday reset: {segments[1]['text']}")
+
+        last = segments[-1]
+        if last is not first and last["days"] < 7:
+            lines.append(
+                f"Final partial week ({last['start'].strftime('%a')}-{last['end'].strftime('%a')}): {last['text']}"
+            )
+
+        return "\n".join(lines)
 
     def simulate_window_refines(self, weekly_refines: int, start_date: date, target_date: date) -> RefineWindowProjection:
         if weekly_refines < 0:
@@ -690,6 +827,9 @@ class WOSFurnaceCalculator(commands.Cog):
         available = ", ".join(level_entry.get("packages", {}).keys())
         raise ReferenceError(f"Unknown package '{package_name}' for level {level_entry['level']}. Available: {available}")
 
+    def _building_level_at_or_above(self, current_level: str, required_level: str) -> bool:
+        return self._level_value(current_level) >= self._level_value(required_level)
+
     def resolve_package(self, level_entry: Dict[str, Any], package_name: str) -> Dict[str, Any]:
         if level_entry.get("next_level") is None:
             return {
@@ -705,15 +845,18 @@ class WOSFurnaceCalculator(commands.Cog):
         total_rfc = 0
         selected_buildings: List[Dict[str, Any]] = []
         for req in package.get("requirements", []):
-            total_fc += int(req.get("fire_crystals", 0))
-            total_rfc += int(req.get("refined_fire_crystals", 0))
+            building_name = req.get("building", "Unknown")
+            building_key = req.get("key") or BUILDING_LABEL_TO_KEY.get(str(building_name).casefold(), str(building_name))
             selected_buildings.append(
                 {
-                    "building": req.get("building", "Unknown"),
+                    "key": building_key,
+                    "building": building_name,
                     "fire_crystals": int(req.get("fire_crystals", 0)),
                     "refined_fire_crystals": int(req.get("refined_fire_crystals", 0)),
                 }
             )
+            total_fc += int(req.get("fire_crystals", 0))
+            total_rfc += int(req.get("refined_fire_crystals", 0))
         return {
             "package_name": actual_package_name,
             "description": package.get("description", ""),
@@ -722,9 +865,66 @@ class WOSFurnaceCalculator(commands.Cog):
             "selected_buildings": selected_buildings,
         }
 
-    def build_upgrade_steps(self, current_level: str, target_level: str, package_name: str) -> List[Dict[str, Any]]:
+    def _costed_step_from_buildings(
+        self,
+        level_entry: Dict[str, Any],
+        package_name: str,
+        building_levels: Dict[str, str],
+    ) -> Dict[str, Any]:
+        resolved = self.resolve_package(level_entry, package_name)
+        next_level = level_entry.get("next_level")
+        if not next_level:
+            return {
+                **resolved,
+                "fire_crystals": 0,
+                "refined_fire_crystals": 0,
+                "selected_buildings": [],
+            }
+
+        selected_buildings: List[Dict[str, Any]] = []
+        total_fc = 0
+        total_rfc = 0
+        for building in resolved["selected_buildings"]:
+            key = self._canonical_building_key(building["key"])
+            current_building_level = building_levels.get(key, level_entry["level"])
+            if self._building_level_at_or_above(current_building_level, next_level):
+                continue
+            selected_buildings.append(building)
+            total_fc += building["fire_crystals"]
+            total_rfc += building["refined_fire_crystals"]
+
+        return {
+            **resolved,
+            "fire_crystals": total_fc,
+            "refined_fire_crystals": total_rfc,
+            "selected_buildings": selected_buildings,
+        }
+
+    def _apply_step_to_buildings(
+        self,
+        building_levels: Dict[str, str],
+        level_entry: Dict[str, Any],
+        costed_step: Dict[str, Any],
+    ) -> Dict[str, str]:
+        updated = dict(building_levels)
+        next_level = level_entry.get("next_level")
+        if not next_level:
+            return updated
+        updated["furnace"] = next_level
+        for building in costed_step.get("selected_buildings", []):
+            updated[self._canonical_building_key(building["key"])] = next_level
+        return updated
+
+    def build_upgrade_steps(
+        self,
+        current_level: str,
+        target_level: str,
+        package_name: str,
+        current_buildings: Optional[Dict[str, str]] = None,
+    ) -> List[Dict[str, Any]]:
         current_entry = self._get_level_entry(current_level)
         target_key = self._normalize_level_name(target_level)
+        building_levels = self._normalize_building_levels(current_entry["level"], current_buildings)
         if self._normalize_level_name(current_entry["level"]) == target_key:
             return []
         steps: List[Dict[str, Any]] = []
@@ -739,12 +939,13 @@ class WOSFurnaceCalculator(commands.Cog):
             next_level = level_entry.get("next_level")
             if not next_level:
                 raise ReferenceError(f"Cannot continue from level {level_entry['level']}.")
-            resolved = self.resolve_package(level_entry, package_name)
+            costed_step = self._costed_step_from_buildings(level_entry, package_name, building_levels)
             steps.append({
                 "from_level": level_entry["level"],
                 "to_level": next_level,
-                **resolved,
+                **costed_step,
             })
+            building_levels = self._apply_step_to_buildings(building_levels, level_entry, costed_step)
             level_name = next_level
         return steps
 
@@ -755,17 +956,25 @@ class WOSFurnaceCalculator(commands.Cog):
             "steps": steps,
         }
 
-    def forecast_reachable_level(self, current_level: str, available_fc: int, available_rfc: int, package_name: str) -> Dict[str, Any]:
+    def forecast_reachable_level(
+        self,
+        current_level: str,
+        available_fc: int,
+        available_rfc: int,
+        package_name: str,
+        current_buildings: Optional[Dict[str, str]] = None,
+    ) -> Dict[str, Any]:
         steps_taken: List[Dict[str, Any]] = []
         cursor_level = current_level
         remaining_fc = available_fc
         remaining_rfc = available_rfc
+        building_levels = self._normalize_building_levels(current_level, current_buildings)
         while True:
             level_entry = self._get_level_entry(cursor_level)
             next_level = level_entry.get("next_level")
             if not next_level:
                 break
-            resolved = self.resolve_package(level_entry, package_name)
+            resolved = self._costed_step_from_buildings(level_entry, package_name, building_levels)
             if remaining_fc < resolved["fire_crystals"] or remaining_rfc < resolved["refined_fire_crystals"]:
                 break
             remaining_fc -= resolved["fire_crystals"]
@@ -775,6 +984,7 @@ class WOSFurnaceCalculator(commands.Cog):
                 "to_level": next_level,
                 **resolved,
             })
+            building_levels = self._apply_step_to_buildings(building_levels, level_entry, resolved)
             cursor_level = next_level
         next_step = None
         level_entry = self._get_level_entry(cursor_level)
@@ -782,7 +992,7 @@ class WOSFurnaceCalculator(commands.Cog):
             next_step = {
                 "from_level": level_entry["level"],
                 "to_level": level_entry["next_level"],
-                **self.resolve_package(level_entry, package_name),
+                **self._costed_step_from_buildings(level_entry, package_name, building_levels),
             }
         return {
             "reached_level": cursor_level,
@@ -790,6 +1000,7 @@ class WOSFurnaceCalculator(commands.Cog):
             "remaining_rfc": remaining_rfc,
             "steps_taken": steps_taken,
             "next_step": next_step,
+            "building_levels": building_levels,
         }
 
     def _step_building_summary(self, step: Dict[str, Any]) -> str:
@@ -803,13 +1014,13 @@ class WOSFurnaceCalculator(commands.Cog):
     def _build_help_embeds(self) -> List[discord.Embed]:
         overview = self._base_embed(
             "WoS Furnace Calculator Help",
-            "Use saved profiles for your current resources, then run the target-date calculators.",
+            "Still in development — use with care and double-check important numbers before spending resources.",
         )
         overview.add_field(
             name="Setup once",
             value=(
-                "1. `/feature_channel_add feature:wos_furnace channel:#channel`\n"
-                "2. `/furnace_profile_set ...`\n"
+                "1. `/furnace_profile_set ...`\n"
+                "2. If some buildings are not all the same level, use `/furnace_profile_buildings_update`\n"
                 "3. Edit `wos_furnace_upgrades.json` / `wos_refine_rates.json` if needed\n"
                 "4. `/furnace_reference_reload` after JSON changes"
             ),
@@ -818,9 +1029,9 @@ class WOSFurnaceCalculator(commands.Cog):
         overview.add_field(
             name="Main commands",
             value=(
-                "`/furnace_refines_needed` = bot works out the weekly refines needed by a date\n"
+                "`/furnace_refines_needed` = bot works out the refines needed by a date\n"
                 "`/furnace_upgrade_forecast` = you enter weekly refines and it tells you what level you can reach\n"
-                "`/furnace_profile_view` = check saved profile"
+                "`/furnace_profile_view` = check saved profile and building levels"
             ),
             inline=False,
         )
@@ -840,7 +1051,7 @@ class WOSFurnaceCalculator(commands.Cog):
             value=(
                 "- Tiers reset each Monday in UTC\n"
                 "- First refine of each day is 50% off\n"
-                "- Weekly template is shown as Monday bulk + 1 each day after that where possible\n"
+                "- Output now shows the current partial week first, then the Monday-reset template\n"
                 "- Output shows both guaranteed/minimum RFC and expected/theoretical RFC"
             ),
             inline=False,
@@ -848,7 +1059,7 @@ class WOSFurnaceCalculator(commands.Cog):
         details.add_field(
             name="When budget is short",
             value=(
-                "If you do not have enough FC budget for the full target, the bot also shows the biggest refine plan you can afford and what that budget-limited plan can still reach by the date."
+                "If you do not have enough FC budget for the full target, the bot also shows the biggest refine plan you can afford, what that budget-limited plan can still reach, and the extra FC still needed."
             ),
             inline=False,
         )
@@ -863,43 +1074,12 @@ class WOSFurnaceCalculator(commands.Cog):
         return [overview, details]
 
     # -----------------------------
-    # autocomplete
-    # -----------------------------
-    async def _level_choices(self, current: str) -> List[app_commands.Choice[str]]:
-        current_cf = current.casefold().strip()
-        matches = [level for level in self.level_names if current_cf in level.casefold()]
-        return [app_commands.Choice(name=level, value=level) for level in matches[:25]]
-
-    async def _package_choices(self, interaction: discord.Interaction, current: str) -> List[app_commands.Choice[str]]:
-        level_name = None
-        namespace = getattr(interaction, "namespace", None)
-        if namespace is not None:
-            level_name = getattr(namespace, "current_level", None)
-        if not level_name:
-            profile = self._get_profile(interaction.user.id)
-            level_name = profile.get("current_level")
-        package_names: List[str] = []
-        if level_name:
-            try:
-                package_names = list(self._get_level_entry(level_name).get("packages", {}).keys())
-            except Exception:
-                package_names = []
-        if not package_names:
-            seen: set[str] = set()
-            for entry in self.upgrades["levels"]:
-                for package_name in entry.get("packages", {}).keys():
-                    key = package_name.casefold()
-                    if key not in seen:
-                        seen.add(key)
-                        package_names.append(package_name)
-        current_cf = current.casefold().strip()
-        matches = [name for name in package_names if current_cf in name.casefold()]
-        return [app_commands.Choice(name=name, value=name) for name in matches[:25]]
 
     # -----------------------------
     # profile commands
     # -----------------------------
     @app_commands.command(name="furnace_profile_set", description="Create or replace your saved furnace profile.")
+    @app_commands.choices(current_level=LEVEL_CHOICES, preferred_package=PACKAGE_CHOICES)
     @app_commands.describe(
         current_level="Your current furnace level",
         current_fire_crystals="Current Fire Crystals",
@@ -933,6 +1113,7 @@ class WOSFurnaceCalculator(commands.Cog):
             self._require_non_negative("weekly_rfc_income", weekly_rfc_income)
             self.profiles[str(interaction.user.id)] = {
                 "current_level": current_level,
+                "current_buildings": self._serialize_building_levels(default_building_levels(current_level)),
                 "fire_crystals": current_fire_crystals,
                 "refined_fire_crystals": current_refined_fire_crystals,
                 "weekly_refines": weekly_refines,
@@ -970,10 +1151,16 @@ class WOSFurnaceCalculator(commands.Cog):
             ),
             inline=False,
         )
+        building_levels = self._normalize_building_levels(
+            str(profile.get("current_level", "FC1")),
+            profile.get("current_buildings") if isinstance(profile.get("current_buildings"), dict) else None,
+        )
+        embed.add_field(name="Current building levels", value=self._buildings_field_text(building_levels), inline=False)
         embed.add_field(name="Updated", value=str(profile.get("updated_at", "-")), inline=False)
         await interaction.followup.send(embed=embed, ephemeral=True)
 
     @app_commands.command(name="furnace_profile_update", description="Update one or more profile values.")
+    @app_commands.choices(current_level=LEVEL_CHOICES, preferred_package=PACKAGE_CHOICES)
     async def furnace_profile_update(
         self,
         interaction: discord.Interaction,
@@ -993,9 +1180,14 @@ class WOSFurnaceCalculator(commands.Cog):
             profile = self._get_profile(interaction.user.id)
             if not profile:
                 raise ReferenceError("No saved profile found. Use /furnace_profile_set first.")
+            current_buildings = self._normalize_building_levels(
+                str(profile.get("current_level", "FC1")),
+                profile.get("current_buildings") if isinstance(profile.get("current_buildings"), dict) else None,
+            )
             if current_level is not None:
                 self._get_level_entry(current_level)
                 profile["current_level"] = current_level
+                current_buildings["furnace"] = current_level
             if current_fire_crystals is not None:
                 self._require_non_negative("current_fire_crystals", current_fire_crystals)
                 profile["fire_crystals"] = current_fire_crystals
@@ -1013,9 +1205,77 @@ class WOSFurnaceCalculator(commands.Cog):
             if weekly_rfc_income is not None:
                 self._require_non_negative("weekly_rfc_income", weekly_rfc_income)
                 profile["weekly_refined_fire_crystals_income"] = weekly_rfc_income
+            profile["current_buildings"] = self._serialize_building_levels(current_buildings)
             profile["updated_at"] = datetime.now(self._tz()).isoformat(timespec="seconds")
             self.save_profiles()
             await interaction.followup.send("✅ Furnace profile updated.", ephemeral=True)
+        except Exception as exc:
+            await interaction.followup.send(f"❌ {exc}", ephemeral=True)
+
+
+    @app_commands.command(name="furnace_profile_buildings_update", description="Update your saved building levels.")
+    @app_commands.choices(
+        furnace=BUILDING_CHOICES,
+        embassy=BUILDING_CHOICES,
+        infantry_camp=BUILDING_CHOICES,
+        marksman_camp=BUILDING_CHOICES,
+        lancer_camp=BUILDING_CHOICES,
+        command_center=BUILDING_CHOICES,
+        infirmary=BUILDING_CHOICES,
+        war_academy=BUILDING_CHOICES,
+    )
+    async def furnace_profile_buildings_update(
+        self,
+        interaction: discord.Interaction,
+        furnace: Optional[str] = None,
+        embassy: Optional[str] = None,
+        infantry_camp: Optional[str] = None,
+        marksman_camp: Optional[str] = None,
+        lancer_camp: Optional[str] = None,
+        command_center: Optional[str] = None,
+        infirmary: Optional[str] = None,
+        war_academy: Optional[str] = None,
+    ) -> None:
+        log_cmd("furnace_profile_buildings_update", interaction)
+        if not await self._ensure_allowed(interaction):
+            return
+        await ensure_deferred(interaction, ephemeral=True)
+        try:
+            profile = self._get_profile(interaction.user.id)
+            if not profile:
+                raise ReferenceError("No saved profile found. Use /furnace_profile_set first.")
+            base_level = str(profile.get("current_level", "FC1"))
+            building_levels = self._normalize_building_levels(
+                base_level,
+                profile.get("current_buildings") if isinstance(profile.get("current_buildings"), dict) else None,
+            )
+            updates = {
+                "furnace": furnace,
+                "embassy": embassy,
+                "infantry_camp": infantry_camp,
+                "marksman_camp": marksman_camp,
+                "lancer_camp": lancer_camp,
+                "command_center": command_center,
+                "infirmary": infirmary,
+                "war_academy": war_academy,
+            }
+            changed = False
+            for key, value in updates.items():
+                if value is None:
+                    continue
+                self._get_level_entry(value)
+                building_levels[key] = value
+                changed = True
+
+            if not changed:
+                raise ReferenceError("Pass at least one building level to update.")
+
+            profile["current_level"] = building_levels["furnace"]
+            profile["current_buildings"] = self._serialize_building_levels(building_levels)
+            profile["updated_at"] = datetime.now(self._tz()).isoformat(timespec="seconds")
+            self.save_profiles()
+
+            await interaction.followup.send("✅ Furnace building levels updated.", ephemeral=True)
         except Exception as exc:
             await interaction.followup.send(f"❌ {exc}", ephemeral=True)
 
@@ -1063,6 +1323,7 @@ class WOSFurnaceCalculator(commands.Cog):
     # main commands
     # -----------------------------
     @app_commands.command(name="furnace_refines_needed", description="Work out the weekly refines needed by a target date.")
+    @app_commands.choices(target_level=LEVEL_CHOICES, current_level=LEVEL_CHOICES, package=PACKAGE_CHOICES)
     @app_commands.describe(
         target_level="Target furnace level",
         target_date="YYYY-MM-DD, DD/MM/YYYY, or DD-MM-YYYY",
@@ -1109,6 +1370,7 @@ class WOSFurnaceCalculator(commands.Cog):
             )
             package_name = merged["package"]
             current_level_name = str(merged["current_level"])
+            current_buildings = merged["current_buildings"]
             current_fc = self._require_non_negative("current_fire_crystals", int(merged["current_fire_crystals"]))
             current_rfc = self._require_non_negative(
                 "current_refined_fire_crystals", int(merged["current_refined_fire_crystals"])
@@ -1118,7 +1380,7 @@ class WOSFurnaceCalculator(commands.Cog):
             )
             weekly_rfc_income_val = self._require_non_negative("weekly_rfc_income", int(merged["weekly_rfc_income"]))
 
-            steps = self.build_upgrade_steps(current_level_name, target_level, package_name)
+            steps = self.build_upgrade_steps(current_level_name, target_level, package_name, current_buildings)
             summary = self.summarize_steps(steps)
             projected_fc_income = self._project_weekly_amount(weekly_fc_income, start_date, parsed_date)
             projected_rfc_income = self._project_weekly_amount(weekly_rfc_income_val, start_date, parsed_date)
@@ -1172,23 +1434,32 @@ class WOSFurnaceCalculator(commands.Cog):
                 ),
                 inline=True,
             )
+            differing_buildings = [
+                f"{BUILDING_KEY_TO_LABEL[key]} {current_buildings[key]}"
+                for key in BUILDING_KEYS
+                if current_buildings[key] != current_level_name
+            ]
+            if differing_buildings:
+                embed.add_field(
+                    name="Current building overrides",
+                    value="\n".join(differing_buildings),
+                    inline=False,
+                )
 
             def build_mode_block(projection: RefineWindowProjection, viable: bool, theoretical: bool) -> str:
                 produced = projection.expected_rfc if theoretical else float(projection.minimum_rfc)
                 remaining_fc_after_refines = fc_budget_for_refines - projection.fire_crystal_spent
                 status = "✅ Works" if viable else "❌ Not enough FC budget"
-                monday_refines = projection.weekly_refines - 6 if projection.weekly_refines >= 7 else min(projection.weekly_refines, 1)
                 delta_rfc = produced - rfc_shortfall_before_refines
                 return (
                     f"{status}\n"
                     f"Weekly refines needed: **{self._fmt_int(projection.weekly_refines)}**\n"
-                    f"Monday refines: **{self._fmt_int(max(monday_refines, 0))}**\n"
                     f"Attempts in window: **{self._fmt_int(projection.total_attempts)}**\n"
                     f"FC spent on refines: **{self._fmt_int(projection.fire_crystal_spent)}**\n"
                     f"RFC from refines: **{self._fmt_float(produced) if theoretical else self._fmt_int(int(produced))}**\n"
                     f"RFC delta vs target: **{self._fmt_float(delta_rfc) if theoretical else self._fmt_int(int(delta_rfc))}**\n"
                     f"FC left after refines: **{self._fmt_int(remaining_fc_after_refines)}**\n"
-                    f"Do this weekly: {self._format_weekly_schedule(projection.weekly_refines)}"
+                    f"Plan:\n{self._schedule_text_for_window(projection.weekly_refines, start_date, parsed_date)}"
                 )
 
             embed.add_field(name="Guaranteed / Minimum RFC Plan", value=build_mode_block(min_projection, min_viable, theoretical=False), inline=False)
@@ -1201,23 +1472,27 @@ class WOSFurnaceCalculator(commands.Cog):
                     available_fc=current_fc + projected_fc_income - affordable_projection.fire_crystal_spent,
                     available_rfc=current_plus_accrued_rfc + affordable_projection.minimum_rfc,
                     package_name=package_name,
+                    current_buildings=current_buildings,
                 )
                 expected_budget_result = self.forecast_reachable_level(
                     current_level=current_level_name,
                     available_fc=current_fc + projected_fc_income - affordable_projection.fire_crystal_spent,
                     available_rfc=current_plus_accrued_rfc + math.floor(affordable_projection.expected_rfc),
                     package_name=package_name,
+                    current_buildings=current_buildings,
                 )
                 embed.add_field(
                     name="Budget-Limited Best You Can Do",
                     value=(
                         f"Max weekly refines affordable: **{self._fmt_int(affordable_projection.weekly_refines)}**\n"
-                        f"Weekly pattern: {self._format_weekly_schedule(affordable_projection.weekly_refines)}\n"
+                        f"Plan:\n{self._schedule_text_for_window(affordable_projection.weekly_refines, start_date, parsed_date)}\n"
                         f"FC spent on refines: **{self._fmt_int(affordable_projection.fire_crystal_spent)}**\n"
                         f"Guaranteed RFC from refines: **{self._fmt_int(affordable_projection.minimum_rfc)}**\n"
                         f"Expected RFC from refines: **{self._fmt_float(affordable_projection.expected_rfc)}**\n"
                         f"Guaranteed reachable level: **{guaranteed_budget_result['reached_level']}**\n"
-                        f"Expected reachable level: **{expected_budget_result['reached_level']}**"
+                        f"Expected reachable level: **{expected_budget_result['reached_level']}**\n"
+                        f"Extra FC still needed for guaranteed target: **{self._fmt_int(max(0, min_projection.fire_crystal_spent - max(0, fc_budget_for_refines)))}** total / **{self._fmt_int(math.ceil(max(0, min_projection.fire_crystal_spent - max(0, fc_budget_for_refines)) / weeks_left) if weeks_left > 0 else 0)}** per week\n"
+                        f"Extra FC still needed for expected target: **{self._fmt_int(max(0, exp_projection.fire_crystal_spent - max(0, fc_budget_for_refines)))}** total / **{self._fmt_int(math.ceil(max(0, exp_projection.fire_crystal_spent - max(0, fc_budget_for_refines)) / weeks_left) if weeks_left > 0 else 0)}** per week"
                     ),
                     inline=False,
                 )
@@ -1236,6 +1511,7 @@ class WOSFurnaceCalculator(commands.Cog):
             await interaction.followup.send(f"❌ {exc}", ephemeral=True)
 
     @app_commands.command(name="furnace_upgrade_forecast", description="Given weekly refines, show the highest level reachable by date.")
+    @app_commands.choices(current_level=LEVEL_CHOICES, package=PACKAGE_CHOICES)
     @app_commands.describe(
         target_date="YYYY-MM-DD, DD/MM/YYYY, or DD-MM-YYYY",
         weekly_refines="Refines you plan to do each week",
@@ -1287,6 +1563,7 @@ class WOSFurnaceCalculator(commands.Cog):
 
             package_name = merged["package"]
             current_level_name = str(merged["current_level"])
+            current_buildings = merged["current_buildings"]
             current_fc = self._require_non_negative("current_fire_crystals", int(merged["current_fire_crystals"]))
             current_rfc = self._require_non_negative(
                 "current_refined_fire_crystals", int(merged["current_refined_fire_crystals"])
@@ -1304,8 +1581,20 @@ class WOSFurnaceCalculator(commands.Cog):
             guaranteed_rfc_pool = current_rfc + projected_rfc_income + refine_projection.minimum_rfc
             expected_rfc_pool = current_rfc + projected_rfc_income + math.floor(refine_projection.expected_rfc)
 
-            guaranteed_result = self.forecast_reachable_level(current_level_name, total_fc_pool, guaranteed_rfc_pool, package_name)
-            expected_result = self.forecast_reachable_level(current_level_name, total_fc_pool, expected_rfc_pool, package_name)
+            guaranteed_result = self.forecast_reachable_level(
+                current_level_name,
+                total_fc_pool,
+                guaranteed_rfc_pool,
+                package_name,
+                current_buildings=current_buildings,
+            )
+            expected_result = self.forecast_reachable_level(
+                current_level_name,
+                total_fc_pool,
+                expected_rfc_pool,
+                package_name,
+                current_buildings=current_buildings,
+            )
 
             days_available = (parsed_date - start_date).days + 1
             embed = self._base_embed(
@@ -1316,14 +1605,12 @@ class WOSFurnaceCalculator(commands.Cog):
                     f"**Window:** {start_date.isoformat()} → {parsed_date.isoformat()} ({days_available} days, inclusive)"
                 ),
             )
-            monday_refines = weekly_refines - 6 if weekly_refines >= 7 else min(weekly_refines, 1)
             embed.add_field(
                 name="Weekly Refine Plan",
                 value=(
                     f"Weekly refines: **{self._fmt_int(weekly_refines)}**\n"
-                    f"Monday refines: **{self._fmt_int(max(monday_refines, 0))}**\n"
-                    f"Do this weekly: {self._format_weekly_schedule(weekly_refines)}\n"
-                    f"Attempts in window: **{self._fmt_int(refine_projection.total_attempts)}**"
+                    f"Attempts in window: **{self._fmt_int(refine_projection.total_attempts)}**\n"
+                    f"Plan:\n{self._schedule_text_for_window(weekly_refines, start_date, parsed_date)}"
                 ),
                 inline=False,
             )
@@ -1347,6 +1634,13 @@ class WOSFurnaceCalculator(commands.Cog):
                 ),
                 inline=False,
             )
+            differing_buildings = [
+                f"{BUILDING_KEY_TO_LABEL[key]} {current_buildings[key]}"
+                for key in BUILDING_KEYS
+                if current_buildings[key] != current_level_name
+            ]
+            if differing_buildings:
+                embed.add_field(name="Current building overrides", value="\n".join(differing_buildings), inline=False)
             embed.add_field(
                 name="Guaranteed / Minimum Result",
                 value=(
@@ -1446,23 +1740,6 @@ class WOSFurnaceCalculator(commands.Cog):
             await interaction.followup.send(f"❌ Reload failed: {exc}", ephemeral=True)
 
     # -----------------------------
-    # autocomplete bindings
-    # -----------------------------
-    @furnace_profile_set.autocomplete("current_level")
-    @furnace_profile_update.autocomplete("current_level")
-    @furnace_refines_needed.autocomplete("current_level")
-    @furnace_refines_needed.autocomplete("target_level")
-    @furnace_upgrade_forecast.autocomplete("current_level")
-    async def furnace_level_autocomplete(self, interaction: discord.Interaction, current: str) -> List[app_commands.Choice[str]]:
-        return await self._level_choices(current)
-
-    @furnace_profile_set.autocomplete("preferred_package")
-    @furnace_profile_update.autocomplete("preferred_package")
-    @furnace_refines_needed.autocomplete("package")
-    @furnace_upgrade_forecast.autocomplete("package")
-    async def furnace_package_autocomplete(self, interaction: discord.Interaction, current: str) -> List[app_commands.Choice[str]]:
-        return await self._package_choices(interaction, current)
-
 
 async def setup(bot: commands.Bot) -> None:
     if not hasattr(bot, "settings"):
