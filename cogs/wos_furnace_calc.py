@@ -16,7 +16,6 @@ from core.utils import DATA_DIR, ensure_deferred, load_json, save_json
 
 
 FEATURE_KEY = "wos_furnace"
-TECH_ROLE_NAME = "Tech"
 UPGRADES_PATH = DATA_DIR / "wos_furnace_upgrades.json"
 REFINES_PATH = DATA_DIR / "wos_refine_rates.json"
 PROFILES_PATH = DATA_DIR / "wos_furnace_profiles.json"
@@ -465,7 +464,7 @@ class WOSFurnaceCalculator(commands.Cog):
             await interaction.response.send_message(msg, ephemeral=True)
         return False
 
-    async def _ensure_tech_only(self, interaction: discord.Interaction) -> bool:
+    async def _ensure_owner_only(self, interaction: discord.Interaction) -> bool:
         guild = interaction.guild
         if guild is None:
             msg = "❌ This command can only be used inside a server."
@@ -474,12 +473,9 @@ class WOSFurnaceCalculator(commands.Cog):
             else:
                 await interaction.response.send_message(msg, ephemeral=True)
             return False
-        member = interaction.user
-        roles = getattr(member, "roles", [])
-        for role in roles:
-            if str(getattr(role, "name", "")).strip().casefold() == TECH_ROLE_NAME.casefold():
-                return True
-        msg = f"❌ This command requires the `{TECH_ROLE_NAME}` role."
+        if interaction.user.id == guild.owner_id:
+            return True
+        msg = "❌ This command is owner-only."
         if interaction.response.is_done():
             await interaction.followup.send(msg, ephemeral=True)
         else:
@@ -882,12 +878,28 @@ class WOSFurnaceCalculator(commands.Cog):
     ) -> List[Dict[str, Any]]:
         current_entry = self._get_level_entry(current_level)
         target_key = self._normalize_level_name(target_level)
+        building_levels = dict(current_buildings or self._default_buildings_for_level(current_level))
+
+        # Catch-up case: furnace is already at the target level, but support buildings are not.
+        # Example: furnace FC10 with command_center FC9 / infirmary FC8 / war_academy FC4.
         if self._normalize_level_name(current_entry["level"]) == target_key:
-            return []
+            target_num = self._level_number(target_level)
+            if target_num <= 1:
+                return []
+            previous_level_name = self._level_name(target_num - 1)
+            previous_entry = self._get_level_entry(previous_level_name)
+            resolved = self.resolve_package(previous_entry, package_name, building_levels)
+            if resolved["fire_crystals"] <= 0 and resolved["refined_fire_crystals"] <= 0:
+                return []
+            return [{
+                "from_level": current_entry["level"],
+                "to_level": target_level,
+                **resolved,
+            }]
+
         steps: List[Dict[str, Any]] = []
         visited: set[str] = set()
         level_name = current_entry["level"]
-        building_levels = dict(current_buildings or self._default_buildings_for_level(current_level))
         while self._normalize_level_name(level_name) != target_key:
             level_entry = self._get_level_entry(level_name)
             key = self._normalize_level_name(level_entry["level"])
@@ -1051,18 +1063,7 @@ class WOSFurnaceCalculator(commands.Cog):
     # profile commands
     # -----------------------------
     @app_commands.command(name="furnace_set", description="Create or update your saved furnace profile.")
-    @app_commands.choices(
-        current_level=LEVEL_CHOICES,
-        preferred_package=PACKAGE_CHOICES,
-        furnace=LEVEL_CHOICES,
-        embassy=LEVEL_CHOICES,
-        command_center=LEVEL_CHOICES,
-        infirmary=LEVEL_CHOICES,
-        infantry_camp=LEVEL_CHOICES,
-        marksman_camp=LEVEL_CHOICES,
-        lancer_camp=LEVEL_CHOICES,
-        war_academy=LEVEL_CHOICES,
-    )
+    @app_commands.choices(current_level=LEVEL_CHOICES, preferred_package=PACKAGE_CHOICES, furnace=LEVEL_CHOICES, embassy=LEVEL_CHOICES, command_center=LEVEL_CHOICES, infirmary=LEVEL_CHOICES, infantry_camp=LEVEL_CHOICES, marksman_camp=LEVEL_CHOICES, lancer_camp=LEVEL_CHOICES, war_academy=LEVEL_CHOICES)
     @app_commands.describe(
         current_level="Your main current furnace level",
         current_fire_crystals="Current Fire Crystals",
@@ -1203,14 +1204,14 @@ class WOSFurnaceCalculator(commands.Cog):
         await ensure_deferred(interaction, ephemeral=True)
         await interaction.followup.send(embeds=self._build_help_embeds(), ephemeral=True)
 
-    @app_commands.command(name="furnace_post_help", description="Tech-only: post the furnace help sheet into a channel.")
-    @app_commands.default_permissions(manage_guild=True)
+    @app_commands.command(name="furnace_post_help", description="Owner-only: post the furnace help sheet into a channel.")
+    @app_commands.default_permissions(administrator=True)
     @app_commands.describe(channel="Channel to post the help sheet into")
     async def furnace_post_help(self, interaction: discord.Interaction, channel: discord.TextChannel) -> None:
         log_cmd("furnace_post_help", interaction)
         if not await self._ensure_allowed(interaction):
             return
-        if not await self._ensure_tech_only(interaction):
+        if not await self._ensure_owner_only(interaction):
             return
         await ensure_deferred(interaction, ephemeral=True)
         try:
@@ -1568,13 +1569,13 @@ class WOSFurnaceCalculator(commands.Cog):
         except Exception as exc:
             await interaction.followup.send(f"❌ {exc}", ephemeral=True)
 
-    @app_commands.command(name="furnace_reference_check", description="Tech-only: show loaded furnace reference metadata.")
-    @app_commands.default_permissions(manage_guild=True)
+    @app_commands.command(name="furnace_reference_check", description="Owner-only: show loaded furnace reference metadata.")
+    @app_commands.default_permissions(administrator=True)
     async def furnace_reference_check(self, interaction: discord.Interaction) -> None:
         log_cmd("furnace_reference_check", interaction)
         if not await self._ensure_allowed(interaction):
             return
-        if not await self._ensure_tech_only(interaction):
+        if not await self._ensure_owner_only(interaction):
             return
         await ensure_deferred(interaction, ephemeral=True)
         try:
@@ -1601,13 +1602,13 @@ class WOSFurnaceCalculator(commands.Cog):
         except Exception as exc:
             await interaction.followup.send(f"❌ {exc}", ephemeral=True)
 
-    @app_commands.command(name="furnace_reference_reload", description="Tech-only: reload the furnace JSON references.")
-    @app_commands.default_permissions(manage_guild=True)
+    @app_commands.command(name="furnace_reference_reload", description="Owner-only: reload the furnace JSON references.")
+    @app_commands.default_permissions(administrator=True)
     async def furnace_reference_reload(self, interaction: discord.Interaction) -> None:
         log_cmd("furnace_reference_reload", interaction)
         if not await self._ensure_allowed(interaction):
             return
-        if not await self._ensure_tech_only(interaction):
+        if not await self._ensure_owner_only(interaction):
             return
         await ensure_deferred(interaction, ephemeral=True)
         try:
