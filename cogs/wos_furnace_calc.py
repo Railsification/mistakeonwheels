@@ -348,8 +348,6 @@ class RefineWindowProjection:
 
 
 class WOSFurnaceCalculator(commands.Cog):
-    forge = app_commands.Group(name="forge", description="Furnace maintenance tools")
-
     def __init__(self, bot: commands.Bot):
         self.bot = bot
         self.settings: SettingsManager = bot.settings
@@ -466,22 +464,18 @@ class WOSFurnaceCalculator(commands.Cog):
             await interaction.response.send_message(msg, ephemeral=True)
         return False
 
-    async def _ensure_tech_role(self, interaction: discord.Interaction) -> bool:
+    async def _ensure_owner_only(self, interaction: discord.Interaction) -> bool:
         guild = interaction.guild
-        member = interaction.user
-        if guild is None or not isinstance(member, discord.Member):
+        if guild is None:
             msg = "❌ This command can only be used inside a server."
             if interaction.response.is_done():
                 await interaction.followup.send(msg, ephemeral=True)
             else:
                 await interaction.response.send_message(msg, ephemeral=True)
             return False
-
-        has_tech = any(role.name == "Tech" for role in member.roles)
-        if has_tech:
+        if interaction.user.id == guild.owner_id:
             return True
-
-        msg = "❌ This command is only available to the Tech role."
+        msg = "❌ This command is owner-only."
         if interaction.response.is_done():
             await interaction.followup.send(msg, ephemeral=True)
         else:
@@ -1210,13 +1204,14 @@ class WOSFurnaceCalculator(commands.Cog):
         await ensure_deferred(interaction, ephemeral=True)
         await interaction.followup.send(embeds=self._build_help_embeds(), ephemeral=True)
 
-    @forge.command(name="post_help", description="Post the furnace help sheet into a channel.")
+    @app_commands.command(name="furnace_post_help", description="Owner-only: post the furnace help sheet into a channel.")
+    @app_commands.default_permissions(administrator=True)
     @app_commands.describe(channel="Channel to post the help sheet into")
-    async def forge_post_help(self, interaction: discord.Interaction, channel: discord.TextChannel) -> None:
-        log_cmd("forge_post_help", interaction)
+    async def furnace_post_help(self, interaction: discord.Interaction, channel: discord.TextChannel) -> None:
+        log_cmd("furnace_post_help", interaction)
         if not await self._ensure_allowed(interaction):
             return
-        if not await self._ensure_tech_role(interaction):
+        if not await self._ensure_owner_only(interaction):
             return
         await ensure_deferred(interaction, ephemeral=True)
         try:
@@ -1574,12 +1569,13 @@ class WOSFurnaceCalculator(commands.Cog):
         except Exception as exc:
             await interaction.followup.send(f"❌ {exc}", ephemeral=True)
 
-    @forge.command(name="reference_check", description="Show loaded furnace reference metadata.")
-    async def forge_reference_check(self, interaction: discord.Interaction) -> None:
-        log_cmd("forge_reference_check", interaction)
+    @app_commands.command(name="furnace_reference_check", description="Owner-only: show loaded furnace reference metadata.")
+    @app_commands.default_permissions(administrator=True)
+    async def furnace_reference_check(self, interaction: discord.Interaction) -> None:
+        log_cmd("furnace_reference_check", interaction)
         if not await self._ensure_allowed(interaction):
             return
-        if not await self._ensure_tech_role(interaction):
+        if not await self._ensure_owner_only(interaction):
             return
         await ensure_deferred(interaction, ephemeral=True)
         try:
@@ -1606,12 +1602,13 @@ class WOSFurnaceCalculator(commands.Cog):
         except Exception as exc:
             await interaction.followup.send(f"❌ {exc}", ephemeral=True)
 
-    @forge.command(name="reference_reload", description="Reload the furnace JSON references.")
-    async def forge_reference_reload(self, interaction: discord.Interaction) -> None:
-        log_cmd("forge_reference_reload", interaction)
+    @app_commands.command(name="furnace_reference_reload", description="Owner-only: reload the furnace JSON references.")
+    @app_commands.default_permissions(administrator=True)
+    async def furnace_reference_reload(self, interaction: discord.Interaction) -> None:
+        log_cmd("furnace_reference_reload", interaction)
         if not await self._ensure_allowed(interaction):
             return
-        if not await self._ensure_tech_role(interaction):
+        if not await self._ensure_owner_only(interaction):
             return
         await ensure_deferred(interaction, ephemeral=True)
         try:
