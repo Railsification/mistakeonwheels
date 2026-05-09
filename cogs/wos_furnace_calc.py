@@ -348,6 +348,8 @@ class RefineWindowProjection:
 
 
 class WOSFurnaceCalculator(commands.Cog):
+    forge = app_commands.Group(name="forge", description="Furnace maintenance tools")
+
     def __init__(self, bot: commands.Bot):
         self.bot = bot
         self.settings: SettingsManager = bot.settings
@@ -464,18 +466,22 @@ class WOSFurnaceCalculator(commands.Cog):
             await interaction.response.send_message(msg, ephemeral=True)
         return False
 
-    async def _ensure_owner_only(self, interaction: discord.Interaction) -> bool:
+    async def _ensure_tech_role(self, interaction: discord.Interaction) -> bool:
         guild = interaction.guild
-        if guild is None:
+        member = interaction.user
+        if guild is None or not isinstance(member, discord.Member):
             msg = "❌ This command can only be used inside a server."
             if interaction.response.is_done():
                 await interaction.followup.send(msg, ephemeral=True)
             else:
                 await interaction.response.send_message(msg, ephemeral=True)
             return False
-        if interaction.user.id == guild.owner_id:
+
+        has_tech = any(role.name == "Tech" for role in member.roles)
+        if has_tech:
             return True
-        msg = "❌ This command is owner-only."
+
+        msg = "❌ This command is only available to the Tech role."
         if interaction.response.is_done():
             await interaction.followup.send(msg, ephemeral=True)
         else:
@@ -949,27 +955,7 @@ class WOSFurnaceCalculator(commands.Cog):
         remaining_fc = available_fc
         remaining_rfc = available_rfc
         building_levels = dict(current_buildings or self._default_buildings_for_level(current_level))
-
-        # Catch-up case: furnace is already at a level, but support buildings are still behind that same level.
-        catchup_step = None
-        target_num = self._level_number(cursor_level)
-        if target_num > 1:
-            previous_level_name = self._level_name(target_num - 1)
-            previous_entry = self._get_level_entry(previous_level_name)
-            resolved_same_level = self.resolve_package(previous_entry, package_name, building_levels)
-            if resolved_same_level["fire_crystals"] > 0 or resolved_same_level["refined_fire_crystals"] > 0:
-                catchup_step = {
-                    "from_level": cursor_level,
-                    "to_level": cursor_level,
-                    **resolved_same_level,
-                }
-                if remaining_fc >= resolved_same_level["fire_crystals"] and remaining_rfc >= resolved_same_level["refined_fire_crystals"]:
-                    remaining_fc -= resolved_same_level["fire_crystals"]
-                    remaining_rfc -= resolved_same_level["refined_fire_crystals"]
-                    steps_taken.append(catchup_step)
-                    for building in resolved_same_level["selected_buildings"]:
-                        building_levels[building["building_key"]] = cursor_level
-                    catchup_step = None
+        reached_label = cursor_level
 
         while True:
             level_entry = self._get_level_entry(cursor_level)
@@ -990,19 +976,46 @@ class WOSFurnaceCalculator(commands.Cog):
             for building in resolved["selected_buildings"]:
                 building_levels[building["building_key"]] = next_level
             cursor_level = next_level
+            reached_label = cursor_level
 
-        next_step = catchup_step
+        next_step = None
         level_entry = self._get_level_entry(cursor_level)
-        if next_step is None and level_entry.get("next_level"):
+
+        if level_entry.get("next_level"):
             next_step = {
                 "from_level": level_entry["level"],
                 "to_level": level_entry["next_level"],
                 **self.resolve_package(level_entry, package_name, building_levels),
             }
+        else:
+            # Terminal furnace level catch-up:
+            # furnace is already at FC10, but support buildings can still be behind.
+            current_num = self._level_number(cursor_level)
+            if current_num > 1:
+                previous_entry = self._get_level_entry(self._level_name(current_num - 1))
+                catchup = self.resolve_package(previous_entry, package_name, building_levels)
+                catchup_needed = (
+                    catchup["fire_crystals"] > 0 or catchup["refined_fire_crystals"] > 0
+                )
+                if catchup_needed:
+                    catchup_step = {
+                        "from_level": cursor_level,
+                        "to_level": cursor_level,
+                        **catchup,
+                    }
+                    if remaining_fc >= catchup["fire_crystals"] and remaining_rfc >= catchup["refined_fire_crystals"]:
+                        remaining_fc -= catchup["fire_crystals"]
+                        remaining_rfc -= catchup["refined_fire_crystals"]
+                        steps_taken.append(catchup_step)
+                        for building in catchup["selected_buildings"]:
+                            building_levels[building["building_key"]] = cursor_level
+                        reached_label = cursor_level
+                    else:
+                        next_step = catchup_step
+                        reached_label = f"{cursor_level} (support buildings pending)"
 
-        reached_level = cursor_level if next_step is None else f"{cursor_level} (partial)"
         return {
-            "reached_level": reached_level,
+            "reached_level": reached_label,
             "remaining_fc": remaining_fc,
             "remaining_rfc": remaining_rfc,
             "steps_taken": steps_taken,
@@ -1229,14 +1242,13 @@ class WOSFurnaceCalculator(commands.Cog):
         await ensure_deferred(interaction, ephemeral=True)
         await interaction.followup.send(embeds=self._build_help_embeds(), ephemeral=True)
 
-    @app_commands.command(name="furnace_post_help", description="Owner-only: post the furnace help sheet into a channel.")
-    @app_commands.default_permissions(administrator=True)
+    @forge.command(name="post_help", description="Post the furnace help sheet into a channel.")
     @app_commands.describe(channel="Channel to post the help sheet into")
-    async def furnace_post_help(self, interaction: discord.Interaction, channel: discord.TextChannel) -> None:
-        log_cmd("furnace_post_help", interaction)
+    async def forge_post_help(self, interaction: discord.Interaction, channel: discord.TextChannel) -> None:
+        log_cmd("forge_post_help", interaction)
         if not await self._ensure_allowed(interaction):
             return
-        if not await self._ensure_owner_only(interaction):
+        if not await self._ensure_tech_role(interaction):
             return
         await ensure_deferred(interaction, ephemeral=True)
         try:
@@ -1594,13 +1606,12 @@ class WOSFurnaceCalculator(commands.Cog):
         except Exception as exc:
             await interaction.followup.send(f"❌ {exc}", ephemeral=True)
 
-    @app_commands.command(name="furnace_reference_check", description="Owner-only: show loaded furnace reference metadata.")
-    @app_commands.default_permissions(administrator=True)
-    async def furnace_reference_check(self, interaction: discord.Interaction) -> None:
-        log_cmd("furnace_reference_check", interaction)
+    @forge.command(name="reference_check", description="Show loaded furnace reference metadata.")
+    async def forge_reference_check(self, interaction: discord.Interaction) -> None:
+        log_cmd("forge_reference_check", interaction)
         if not await self._ensure_allowed(interaction):
             return
-        if not await self._ensure_owner_only(interaction):
+        if not await self._ensure_tech_role(interaction):
             return
         await ensure_deferred(interaction, ephemeral=True)
         try:
@@ -1627,13 +1638,12 @@ class WOSFurnaceCalculator(commands.Cog):
         except Exception as exc:
             await interaction.followup.send(f"❌ {exc}", ephemeral=True)
 
-    @app_commands.command(name="furnace_reference_reload", description="Owner-only: reload the furnace JSON references.")
-    @app_commands.default_permissions(administrator=True)
-    async def furnace_reference_reload(self, interaction: discord.Interaction) -> None:
-        log_cmd("furnace_reference_reload", interaction)
+    @forge.command(name="reference_reload", description="Reload the furnace JSON references.")
+    async def forge_reference_reload(self, interaction: discord.Interaction) -> None:
+        log_cmd("forge_reference_reload", interaction)
         if not await self._ensure_allowed(interaction):
             return
-        if not await self._ensure_owner_only(interaction):
+        if not await self._ensure_tech_role(interaction):
             return
         await ensure_deferred(interaction, ephemeral=True)
         try:
