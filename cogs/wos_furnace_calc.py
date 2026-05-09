@@ -949,6 +949,28 @@ class WOSFurnaceCalculator(commands.Cog):
         remaining_fc = available_fc
         remaining_rfc = available_rfc
         building_levels = dict(current_buildings or self._default_buildings_for_level(current_level))
+
+        # Catch-up case: furnace is already at a level, but support buildings are still behind that same level.
+        catchup_step = None
+        target_num = self._level_number(cursor_level)
+        if target_num > 1:
+            previous_level_name = self._level_name(target_num - 1)
+            previous_entry = self._get_level_entry(previous_level_name)
+            resolved_same_level = self.resolve_package(previous_entry, package_name, building_levels)
+            if resolved_same_level["fire_crystals"] > 0 or resolved_same_level["refined_fire_crystals"] > 0:
+                catchup_step = {
+                    "from_level": cursor_level,
+                    "to_level": cursor_level,
+                    **resolved_same_level,
+                }
+                if remaining_fc >= resolved_same_level["fire_crystals"] and remaining_rfc >= resolved_same_level["refined_fire_crystals"]:
+                    remaining_fc -= resolved_same_level["fire_crystals"]
+                    remaining_rfc -= resolved_same_level["refined_fire_crystals"]
+                    steps_taken.append(catchup_step)
+                    for building in resolved_same_level["selected_buildings"]:
+                        building_levels[building["building_key"]] = cursor_level
+                    catchup_step = None
+
         while True:
             level_entry = self._get_level_entry(cursor_level)
             next_level = level_entry.get("next_level")
@@ -968,16 +990,19 @@ class WOSFurnaceCalculator(commands.Cog):
             for building in resolved["selected_buildings"]:
                 building_levels[building["building_key"]] = next_level
             cursor_level = next_level
-        next_step = None
+
+        next_step = catchup_step
         level_entry = self._get_level_entry(cursor_level)
-        if level_entry.get("next_level"):
+        if next_step is None and level_entry.get("next_level"):
             next_step = {
                 "from_level": level_entry["level"],
                 "to_level": level_entry["next_level"],
                 **self.resolve_package(level_entry, package_name, building_levels),
             }
+
+        reached_level = cursor_level if next_step is None else f"{cursor_level} (partial)"
         return {
-            "reached_level": cursor_level,
+            "reached_level": reached_level,
             "remaining_fc": remaining_fc,
             "remaining_rfc": remaining_rfc,
             "steps_taken": steps_taken,
