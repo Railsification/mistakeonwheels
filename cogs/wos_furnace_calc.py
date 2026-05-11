@@ -695,20 +695,27 @@ class WOSFurnaceCalculator(commands.Cog):
     def _current_and_weekly_plan_text(self, weekly_refines: int, start_date: date, target_date: date) -> str:
         if target_date < start_date:
             return "No refines needed."
+
         total_days = (target_date - start_date).days + 1
         current_segment_days = min(7 - start_date.weekday(), total_days)
         current_week = self._segment_plan(weekly_refines, start_date, current_segment_days)
+
         if current_segment_days >= total_days:
             return f"This week only: {current_week}"
 
-        lines = [f"This week: {current_week}", f"From next Monday: {self._format_weekly_schedule(weekly_refines)}"]
+        lines = [f"This week: {current_week}"]
 
-        # Final partial week, if the target ends mid-week after at least one Monday reset.
-        next_monday = start_date + timedelta(days=(7 - start_date.weekday()))
-        if target_date >= next_monday and target_date.weekday() != 6:
-            final_segment_days = target_date.weekday() + 1
-            final_segment_start = target_date - timedelta(days=final_segment_days - 1)
-            lines.append(f"Final week: {self._segment_plan(weekly_refines, final_segment_start, final_segment_days)}")
+        remaining_days = total_days - current_segment_days
+        full_weeks_after_current = remaining_days // 7
+        final_partial_days = remaining_days % 7
+
+        if full_weeks_after_current > 0:
+            lines.append(f"From next Monday: {self._format_weekly_schedule(weekly_refines)}")
+
+        if final_partial_days > 0:
+            final_segment_start = target_date - timedelta(days=final_partial_days - 1)
+            lines.append(f"Final week: {self._segment_plan(weekly_refines, final_segment_start, final_partial_days)}")
+
         return "\n".join(lines)
 
     def _window_segments(self, start_date: date, target_date: date) -> List[int]:
@@ -980,7 +987,6 @@ class WOSFurnaceCalculator(commands.Cog):
 
         next_step = None
         level_entry = self._get_level_entry(cursor_level)
-
         if level_entry.get("next_level"):
             next_step = {
                 "from_level": level_entry["level"],
@@ -988,15 +994,11 @@ class WOSFurnaceCalculator(commands.Cog):
                 **self.resolve_package(level_entry, package_name, building_levels),
             }
         else:
-            # Terminal furnace level catch-up:
-            # furnace is already at FC10, but support buildings can still be behind.
             current_num = self._level_number(cursor_level)
             if current_num > 1:
                 previous_entry = self._get_level_entry(self._level_name(current_num - 1))
                 catchup = self.resolve_package(previous_entry, package_name, building_levels)
-                catchup_needed = (
-                    catchup["fire_crystals"] > 0 or catchup["refined_fire_crystals"] > 0
-                )
+                catchup_needed = catchup["fire_crystals"] > 0 or catchup["refined_fire_crystals"] > 0
                 if catchup_needed:
                     catchup_step = {
                         "from_level": cursor_level,
