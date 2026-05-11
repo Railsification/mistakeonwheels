@@ -22,7 +22,19 @@ COGS_DIR = BASE_DIR / "cogs"
 
 TOKEN = os.getenv("BOT_TOKEN")
 GUILD_ID_STR = os.getenv("GUILD_ID", "0")
-GUILD_ID = int(GUILD_ID_STR) if GUILD_ID_STR.isdigit() else 0
+
+
+def get_guild_ids() -> list[int]:
+    return [
+        int(x.strip())
+        for x in GUILD_ID_STR.split(",")
+        if x.strip().isdigit()
+    ]
+
+
+GUILD_IDS = get_guild_ids()
+GUILD_ID = GUILD_IDS[0] if GUILD_IDS else 0
+
 MEDIA_CHANNEL_ID = int(os.getenv("MEDIA_CHANNEL_ID", "0") or 0)
 TOPIC_DEFAULT = (os.getenv("TOPIC") or "science").strip()
 PFP_THEME_DEFAULT = (os.getenv("PFP_THEME") or "").strip()
@@ -47,7 +59,7 @@ def _is_cloudflare_1015(exc: Exception) -> bool:
     return (
         "1015" in text
         or "Cloudflare" in text
-        or "discord.com used Cloudflare to restrict access" in text
+        or "discord.com used Cloudflare to restrict access"
         or "You are being rate limited" in text
     )
 
@@ -98,6 +110,7 @@ class HotBot(commands.Bot):
 
         self.hot_config = {
             "guild_id": GUILD_ID,
+            "guild_ids": GUILD_IDS,
             "media_channel_id": MEDIA_CHANNEL_ID,
             "topic_default": TOPIC_DEFAULT,
             "pfp_theme_default": PFP_THEME_DEFAULT,
@@ -147,7 +160,7 @@ class HotBot(commands.Bot):
         if failed_names:
             err(f"Failed cog(s): {', '.join(failed_names)}")
 
-        if not GUILD_ID:
+        if not GUILD_IDS:
             err("GUILD_ID missing or invalid in .env")
             return
 
@@ -155,16 +168,17 @@ class HotBot(commands.Bot):
             info("Startup auto-sync disabled. Use /sync manually.")
             return
 
-        guild = discord.Object(id=GUILD_ID)
-        try:
-            synced = await self.tree.sync(guild=guild)
-            names = ", ".join(sorted(c.name for c in synced))
-            ok(f"Synced {len(synced)} commands to guild {GUILD_ID}")
-            info(f"Commands: {names}")
-        except discord.HTTPException as e:
-            err(f"Command sync rate-limited/failed at startup: {e!r}")
-        except Exception as e:
-            err(f"Command sync failed: {e!r}")
+        for guild_id in GUILD_IDS:
+            guild = discord.Object(id=guild_id)
+            try:
+                synced = await self.tree.sync(guild=guild)
+                names = ", ".join(sorted(c.name for c in synced))
+                ok(f"Synced {len(synced)} commands to guild {guild_id}")
+                info(f"Commands for guild {guild_id}: {names}")
+            except discord.HTTPException as e:
+                err(f"Command sync rate-limited/failed at startup for guild {guild_id}: {e!r}")
+            except Exception as e:
+                err(f"Command sync failed for guild {guild_id}: {e!r}")
 
     async def on_ready(self):
         ok(f"HotBot v1.6 started as {self.user}")
@@ -173,7 +187,7 @@ class HotBot(commands.Bot):
 def run_bot_forever():
     if not TOKEN:
         raise SystemExit("BOT_TOKEN missing in .env")
-    if not GUILD_ID:
+    if not GUILD_IDS:
         raise SystemExit("GUILD_ID missing or invalid in .env")
 
     lock = SingleInstanceLock(LOCK_FILE)
