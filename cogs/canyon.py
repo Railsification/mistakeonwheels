@@ -27,7 +27,8 @@ from core.storage import load_guild_json, migrate_legacy_file_to_primary, save_g
 SESSIONS_FILE = DATA_DIR / "canyon_sessions.json"
 SESSIONS_FILENAME = "canyon_sessions.json"
 LANES = ["Left", "Left middle", "Right middle", "Right"]
-MAX_SCAN_IMAGES = 15
+MAX_SCAN_IMAGES = 10
+MAX_SCAN_BATCH_HISTORY = 25
 DEFAULT_HISTORY_MESSAGES = 40
 
 
@@ -107,6 +108,39 @@ def dedupe_players(players: list[Player]) -> list[Player]:
         if prev is None or p.power > prev.power:
             seen[key] = p
     return sorted(seen.values(), key=lambda p: (-p.power, p.name.lower()))
+
+
+def merge_players(
+    existing: list[Player],
+    incoming: list[Player],
+) -> tuple[list[Player], int, int, int]:
+    """Merge a new scan batch into the saved roster.
+
+    Returns: merged players, added count, updated count, ignored duplicate count.
+    If the same normalised name appears twice, the higher power record is kept.
+    """
+    seen: dict[str, Player] = {normalize_name(p.name): p for p in existing}
+    added = 0
+    updated = 0
+    ignored = 0
+
+    for p in incoming:
+        key = normalize_name(p.name)
+        prev = seen.get(key)
+
+        if prev is None:
+            seen[key] = p
+            added += 1
+            continue
+
+        if p.power > prev.power:
+            seen[key] = p
+            updated += 1
+        else:
+            ignored += 1
+
+    merged = sorted(seen.values(), key=lambda player: (-player.power, player.name.lower()))
+    return merged, added, updated, ignored
 
 
 def get_player_lookup(players: list[Player]) -> dict[str, Player]:
@@ -336,6 +370,8 @@ class CanyonCog(commands.Cog):
         "summary": "Private WoS Canyon screenshot scanning, roster review, lane balancing, and public posting only when ready.",
         "details": (
             "Attach Canyon screenshots directly to `/canyon_scan`. The scan result and row drafts are ephemeral/private. "
+            "Run `/canyon_scan` again with the next batch of screenshots and it appends to the saved roster. "
+            "Use `reset:true` or `/canyon_clear` to start a fresh roster. "
             "Use `/canyon_rows` to build a private draft, then `/canyon_post` only when it is ready for the channel."
         ),
     }
@@ -376,13 +412,55 @@ class CanyonCog(commands.Cog):
             raise RuntimeError("No text content returned from OpenAI response.")
         return text
 
-    def _store_roster(self, guild_id: int, players: list[Player]) -> None:
+    def _store_roster(
+        self,
+        guild_id: int,
+        players: list[Player],
+        *,
+        reset: bool = False,
+        image_count: int = 0,
+        user_id: Optional[int] = None,
+    ) -> dict[str, int]:
         sessions = load_sessions(self.bot, guild_id)
+
+        existing_players: list[Player] = [] if reset else self._load_roster(guild_id)
+        merged_players, added, updated, ignored = merge_players(existing_players, players)
+
+        previous_total = len(existing_players)
+        batch_record = {
+            "ts": int(time.time()),
+            "user_id": user_id,
+            "images": image_count,
+            "extracted": len(players),
+            "added": added,
+            "updated": updated,
+            "ignored_duplicates": ignored,
+            "saved_total": len(merged_players),
+            "reset": bool(reset),
+        }
+
+        batches = sessions.get("scan_batches")
+        if not isinstance(batches, list):
+            batches = []
+        batches.append(batch_record)
+        sessions["scan_batches"] = batches[-MAX_SCAN_BATCH_HISTORY:]
+
         sessions["roster"] = {
             "updated_at": int(time.time()),
-            "players": [{"name": p.name, "power": p.power} for p in players],
+            "previous_total": previous_total,
+            "last_batch": batch_record,
+            "players": [{"name": p.name, "power": p.power} for p in merged_players],
         }
         save_sessions(guild_id, sessions)
+
+        return {
+            "previous_total": previous_total,
+            "extracted": len(players),
+            "added": added,
+            "updated": updated,
+            "ignored_duplicates": ignored,
+            "saved_total": len(merged_players),
+        }
 
     def _load_roster(self, guild_id: int) -> list[Player]:
         sessions = load_sessions(self.bot, guild_id)
@@ -491,6 +569,7 @@ class CanyonCog(commands.Cog):
         image_8="Canyon screenshot 8",
         image_9="Canyon screenshot 9",
         image_10="Canyon screenshot 10",
+        reset="Set true to start a fresh roster instead of adding to the saved one",
     )
     async def canyon_scan(
         self,
@@ -505,6 +584,7 @@ class CanyonCog(commands.Cog):
         image_8: Optional[discord.Attachment] = None,
         image_9: Optional[discord.Attachment] = None,
         image_10: Optional[discord.Attachment] = None,
+        reset: bool = False,
     ) -> None:
         await interaction.response.defer(thinking=True, ephemeral=True)
 
@@ -536,14 +616,31 @@ class CanyonCog(commands.Cog):
                 return
 
             guild_id = interaction.guild_id or interaction.user.id
-            self._store_roster(guild_id, players)
-
-            body = (
-                f"Images scanned: {len(attachments)}\n"
-                "Source: command attachments only; no channel screenshots were scraped.\n\n"
-                + roster_text(players)
+            stats = self._store_roster(
+                guild_id,
+                players,
+                reset=reset,
+                image_count=len(attachments),
+                user_id=interaction.user.id,
             )
-            header = f"Scanned {len(players)} joined players"
+
+            saved_players = self._load_roster(guild_id)
+            mode_text = "fresh roster / reset" if reset else "append to saved roster"
+            body = (
+                f"Mode: {mode_text}\n"
+                f"Images scanned this batch: {len(attachments)}\n"
+                f"Previous saved players: {stats['previous_total']}\n"
+                f"Extracted this batch: {stats['extracted']}\n"
+                f"Added: {stats['added']}\n"
+                f"Updated higher-power duplicates: {stats['updated']}\n"
+                f"Ignored duplicates: {stats['ignored_duplicates']}\n"
+                f"Saved roster total: {stats['saved_total']}\n"
+                "Source: command attachments only; no channel screenshots were scraped.\n"
+                "Run `/canyon_scan` again with more screenshots to keep adding to this roster.\n"
+                "Use `reset:true` or `/canyon_clear` to start again.\n\n"
+                + roster_text(saved_players)
+            )
+            header = f"Saved canyon roster: {len(saved_players)} players"
             await send_long_message(interaction, header, body, ephemeral=True)
 
         except Exception as e:
@@ -674,6 +771,7 @@ class CanyonCog(commands.Cog):
         sessions.pop("roster", None)
         sessions.pop(str(guild_id), None)
         sessions.pop("last_rows", None)
+        sessions.pop("scan_batches", None)
         save_sessions(guild_id, sessions)
 
         await interaction.followup.send("Saved canyon roster and row draft cleared.", ephemeral=True)
