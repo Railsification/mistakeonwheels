@@ -236,15 +236,18 @@ async def send_long_message(
     interaction: discord.Interaction,
     title: str,
     body: str,
+    *,
+    ephemeral: bool = False,
 ) -> None:
     content = f"**{title}**\n```text\n{body}\n```"
     if len(content) <= 1900:
-        await interaction.followup.send(content)
+        await interaction.followup.send(content, ephemeral=ephemeral)
         return
 
     fp = io.BytesIO(body.encode("utf-8"))
-    file = discord.File(fp, filename=f"{title.lower().replace(' ', '_')}.txt")
-    await interaction.followup.send(f"**{title}**", file=file)
+    safe_title = re.sub(r"[^a-z0-9_ -]", "", title.lower()).strip().replace(" ", "_") or "canyon"
+    file = discord.File(fp, filename=f"{safe_title}.txt")
+    await interaction.followup.send(f"**{title}**", file=file, ephemeral=ephemeral)
 
 
 def build_balanced_rows(
@@ -328,6 +331,15 @@ def build_balanced_rows(
 
 
 class CanyonCog(commands.Cog):
+    HELP_META = {
+        "title": "Canyon",
+        "summary": "Private WoS Canyon screenshot scanning, roster review, lane balancing, and public posting only when ready.",
+        "details": (
+            "Attach Canyon screenshots directly to `/canyon_scan`. The scan result and row drafts are ephemeral/private. "
+            "Use `/canyon_rows` to build a private draft, then `/canyon_post` only when it is ready for the channel."
+        ),
+    }
+
     def __init__(self, bot: commands.Bot):
         self.bot = bot
         self.oa = None
@@ -467,32 +479,59 @@ class CanyonCog(commands.Cog):
         raw_text = self._extract_response_text(response)
         return parse_scan_payload(raw_text)
 
-    @app_commands.command(name="canyon_scan", description="Scan your recent canyon screenshots from this channel")
+    @app_commands.command(name="canyon_scan", description="Privately scan Canyon screenshots attached to this command")
     @app_commands.describe(
-        history_messages="How far back to look in the channel for your screenshots (default 40, max 200)"
+        image_1="Canyon screenshot 1",
+        image_2="Canyon screenshot 2",
+        image_3="Canyon screenshot 3",
+        image_4="Canyon screenshot 4",
+        image_5="Canyon screenshot 5",
+        image_6="Canyon screenshot 6",
+        image_7="Canyon screenshot 7",
+        image_8="Canyon screenshot 8",
+        image_9="Canyon screenshot 9",
+        image_10="Canyon screenshot 10",
     )
     async def canyon_scan(
         self,
         interaction: discord.Interaction,
-        history_messages: Optional[app_commands.Range[int, 10, 200]] = 40,
+        image_1: discord.Attachment,
+        image_2: Optional[discord.Attachment] = None,
+        image_3: Optional[discord.Attachment] = None,
+        image_4: Optional[discord.Attachment] = None,
+        image_5: Optional[discord.Attachment] = None,
+        image_6: Optional[discord.Attachment] = None,
+        image_7: Optional[discord.Attachment] = None,
+        image_8: Optional[discord.Attachment] = None,
+        image_9: Optional[discord.Attachment] = None,
+        image_10: Optional[discord.Attachment] = None,
     ) -> None:
-        await interaction.response.defer(thinking=True)
+        await interaction.response.defer(thinking=True, ephemeral=True)
 
         try:
-            history_limit = history_messages or DEFAULT_HISTORY_MESSAGES
-            attachments = await self._collect_recent_images(interaction, history_limit)
-
-            if not attachments:
-                await interaction.followup.send(
-                    "No recent screenshots found from you in this channel. Post the canyon screenshots first, then run `/canyon_scan`."
+            attachments = [
+                a
+                for a in (
+                    image_1,
+                    image_2,
+                    image_3,
+                    image_4,
+                    image_5,
+                    image_6,
+                    image_7,
+                    image_8,
+                    image_9,
+                    image_10,
                 )
-                return
+                if a is not None
+            ]
 
             players = await self._extract_from_attachments(attachments)
 
             if not players:
                 await interaction.followup.send(
-                    "No joined players were extracted. Make sure the screenshots clearly show the Join rows."
+                    "No joined players were extracted. Make sure the attached screenshots clearly show the Join rows.",
+                    ephemeral=True,
                 )
                 return
 
@@ -500,29 +539,30 @@ class CanyonCog(commands.Cog):
             self._store_roster(guild_id, players)
 
             body = (
-                f"Images scanned: {len(attachments)}\n\n"
+                f"Images scanned: {len(attachments)}\n"
+                "Source: command attachments only; no channel screenshots were scraped.\n\n"
                 + roster_text(players)
             )
             header = f"Scanned {len(players)} joined players"
-            await send_long_message(interaction, header, body)
+            await send_long_message(interaction, header, body, ephemeral=True)
 
         except Exception as e:
-            await interaction.followup.send(f"Scan failed: {e}")
+            await interaction.followup.send(f"Scan failed: {e}", ephemeral=True)
 
-    @app_commands.command(name="canyon_list", description="Show the last scanned canyon roster")
+    @app_commands.command(name="canyon_list", description="Privately show the last scanned canyon roster")
     async def canyon_list(self, interaction: discord.Interaction) -> None:
-        await interaction.response.defer(thinking=True)
+        await interaction.response.defer(thinking=True, ephemeral=True)
 
         guild_id = interaction.guild_id or interaction.user.id
         players = self._load_roster(guild_id)
 
         if not players:
-            await interaction.followup.send("No saved canyon roster. Run `/canyon_scan` first.")
+            await interaction.followup.send("No saved canyon roster. Run `/canyon_scan` first.", ephemeral=True)
             return
 
-        await send_long_message(interaction, f"Saved roster ({len(players)})", roster_text(players))
+        await send_long_message(interaction, f"Saved roster ({len(players)})", roster_text(players), ephemeral=True)
 
-    @app_commands.command(name="canyon_rows", description="Build balanced canyon rows from the saved roster")
+    @app_commands.command(name="canyon_rows", description="Privately build balanced canyon rows and save them as a draft")
     @app_commands.describe(
         leaders="Exactly 4 leaders in lane order: Left, Left middle, Right middle, Right",
         combine="Optional. Example: AstraJ+Asteria; Name3+Name4",
@@ -535,14 +575,14 @@ class CanyonCog(commands.Cog):
         combine: Optional[str] = None,
         exclude: Optional[str] = None,
     ) -> None:
-        await interaction.response.defer(thinking=True)
+        await interaction.response.defer(thinking=True, ephemeral=True)
 
         try:
             guild_id = interaction.guild_id or interaction.user.id
             players = self._load_roster(guild_id)
 
             if not players:
-                await interaction.followup.send("No saved canyon roster. Run `/canyon_scan` first.")
+                await interaction.followup.send("No saved canyon roster. Run `/canyon_scan` first.", ephemeral=True)
                 return
 
             rows, totals, working_players = build_balanced_rows(
@@ -563,22 +603,80 @@ class CanyonCog(commands.Cog):
                 f"Source roster size: {len(working_players)}\n\n"
             )
 
-            await send_long_message(interaction, "Canyon rows", summary + rows_text(rows, totals))
+            draft_body = summary + rows_text(rows, totals)
+
+            sessions = load_sessions(self.bot, guild_id)
+            sessions["last_rows"] = {
+                "updated_at": int(time.time()),
+                "created_by": interaction.user.id,
+                "title": "Canyon rows",
+                "body": draft_body,
+            }
+            save_sessions(guild_id, sessions)
+
+            await send_long_message(
+                interaction,
+                "Private canyon row draft",
+                draft_body + "\n\nRun `/canyon_post` when this is ready to publish.",
+                ephemeral=True,
+            )
 
         except Exception as e:
-            await interaction.followup.send(f"Row build failed: {e}")
+            await interaction.followup.send(f"Row build failed: {e}", ephemeral=True)
 
-    @app_commands.command(name="canyon_clear", description="Clear the saved canyon roster")
+    @app_commands.command(name="canyon_post", description="Post the last private canyon row draft publicly")
+    @app_commands.describe(title="Optional title for the public post")
+    async def canyon_post(
+        self,
+        interaction: discord.Interaction,
+        title: Optional[str] = None,
+    ) -> None:
+        await interaction.response.defer(thinking=True, ephemeral=True)
+
+        guild_id = interaction.guild_id or interaction.user.id
+        sessions = load_sessions(self.bot, guild_id)
+        draft = sessions.get("last_rows")
+
+        if not draft or not draft.get("body"):
+            await interaction.followup.send(
+                "No canyon row draft is ready. Run `/canyon_rows` first.",
+                ephemeral=True,
+            )
+            return
+
+        post_title = title or draft.get("title") or "Canyon rows"
+        body = str(draft.get("body", "")).strip()
+
+        content = f"**{post_title}**\n```text\n{body}\n```"
+        channel = interaction.channel
+
+        if channel is None or not hasattr(channel, "send"):
+            await interaction.followup.send("Could not post in this channel.", ephemeral=True)
+            return
+
+        if len(content) <= 1900:
+            await channel.send(content)
+        else:
+            fp = io.BytesIO(body.encode("utf-8"))
+            safe_title = re.sub(r"[^a-z0-9_ -]", "", post_title.lower()).strip().replace(" ", "_") or "canyon_rows"
+            file = discord.File(fp, filename=f"{safe_title}.txt")
+            await channel.send(f"**{post_title}**", file=file)
+
+        await interaction.followup.send("Posted canyon rows publicly.", ephemeral=True)
+
+
+    @app_commands.command(name="canyon_clear", description="Privately clear the saved canyon roster and row draft")
     async def canyon_clear(self, interaction: discord.Interaction) -> None:
-        await interaction.response.defer(thinking=True)
+        await interaction.response.defer(thinking=True, ephemeral=True)
 
         guild_id = interaction.guild_id or interaction.user.id
         sessions = load_sessions(self.bot, guild_id)
         sessions.pop("roster", None)
         sessions.pop(str(guild_id), None)
+        sessions.pop("last_rows", None)
         save_sessions(guild_id, sessions)
 
-        await interaction.followup.send("Saved canyon roster cleared.")
+        await interaction.followup.send("Saved canyon roster and row draft cleared.", ephemeral=True)
 
 
 async def setup(bot: commands.Bot) -> None:
