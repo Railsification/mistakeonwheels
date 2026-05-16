@@ -11,10 +11,13 @@ import discord
 from discord import app_commands
 from discord.ext import commands, tasks
 
+from core.storage import configured_guild_ids, known_guild_dirs, load_guild_json, migrate_legacy_file_to_primary, save_guild_json
+
 
 FEATURE_KEY = "suggestion_poll"
 DATA_DIR = Path(os.getenv("HOTBOT_DATA_DIR", "."))
 DATA_FILE = DATA_DIR / "suggestion_polls.json"
+SUGGESTION_POLLS_FILENAME = "suggestion_polls.json"
 SETTINGS_FILE = DATA_DIR / "settings.json"
 
 TECH_ROLE_NAMES = {"Tech"}  # change only if your actual hidden/support role is named differently
@@ -134,29 +137,52 @@ class SuggestionPollCog(commands.Cog):
     async def cog_unload(self):
         self.poll_watcher.cancel()
 
+    def _poll_guild_ids(self) -> list[int]:
+        ids = set(configured_guild_ids(self.bot)) | set(known_guild_dirs())
+        legacy = None
+        if DATA_FILE.exists():
+            try:
+                legacy = json.loads(DATA_FILE.read_text(encoding="utf-8"))
+            except Exception:
+                legacy = None
+        if isinstance(legacy, dict):
+            for poll in (legacy.get("polls") or {}).values():
+                try:
+                    gid = int(poll.get("guild_id"))
+                except Exception:
+                    continue
+                if gid:
+                    ids.add(gid)
+        return sorted(ids)
+
     def load_data(self):
         DATA_DIR.mkdir(parents=True, exist_ok=True)
+        migrate_legacy_file_to_primary(SUGGESTION_POLLS_FILENAME, self.bot, {"polls": {}})
+        self.data = {"polls": {}}
 
-        if not DATA_FILE.exists():
-            self.save_data()
-            return
-
-        try:
-            with DATA_FILE.open("r", encoding="utf-8") as f:
-                loaded = json.load(f)
-            if isinstance(loaded, dict):
-                self.data = loaded
-            self.data.setdefault("polls", {})
-        except Exception:
-            self.data = {"polls": {}}
-            self.save_data()
+        for guild_id in self._poll_guild_ids():
+            loaded = load_guild_json(guild_id, SUGGESTION_POLLS_FILENAME, {"polls": {}})
+            if not isinstance(loaded, dict):
+                continue
+            polls = loaded.get("polls") or {}
+            if isinstance(polls, dict):
+                for poll_id, poll in polls.items():
+                    if isinstance(poll, dict):
+                        poll["guild_id"] = int(poll.get("guild_id") or guild_id)
+                        self.data["polls"][str(poll_id)] = poll
 
     def save_data(self):
         DATA_DIR.mkdir(parents=True, exist_ok=True)
-        tmp = DATA_FILE.with_suffix(".tmp")
-        with tmp.open("w", encoding="utf-8") as f:
-            json.dump(self.data, f, indent=2)
-        tmp.replace(DATA_FILE)
+        by_guild: dict[int, dict] = {}
+        for poll_id, poll in (self.data.get("polls") or {}).items():
+            try:
+                guild_id = int(poll.get("guild_id"))
+            except Exception:
+                continue
+            by_guild.setdefault(guild_id, {"polls": {}})["polls"][str(poll_id)] = poll
+
+        for guild_id in set(self._poll_guild_ids()) | set(by_guild.keys()):
+            save_guild_json(guild_id, SUGGESTION_POLLS_FILENAME, by_guild.get(guild_id, {"polls": {}}))
 
     async def interaction_allowed(self, interaction: discord.Interaction) -> bool:
         if not interaction.guild or not interaction.channel:
@@ -164,6 +190,13 @@ class SuggestionPollCog(commands.Cog):
 
         guild_id = interaction.guild.id
         channel_id = interaction.channel.id
+
+        settings = getattr(self.bot, "settings", None)
+        if settings is not None and hasattr(settings, "is_feature_allowed"):
+            try:
+                return bool(settings.is_feature_allowed(guild_id, channel_id, FEATURE_KEY))
+            except Exception:
+                pass
 
         possible_helpers = [
             "feature_allowed",
@@ -945,15 +978,16 @@ class SuggestionPollBotCog(SuggestionPollCog):
 
 
 async def setup(bot: commands.Bot):
+    from core.command_scope import bind_group_public
+
     cog = SuggestionPollCog(bot)
     await bot.add_cog(cog)
 
+    bind_group_public(suggestion_group, bot, include_admin=True)
     try:
         bot.tree.add_command(suggestion_group)
     except app_commands.CommandAlreadyRegistered:
         pass
 
-    try:
-        bot.tree.add_command(council_group)
-    except app_commands.CommandAlreadyRegistered:
-        pass
+    # Admin controls for suggestions live under /council in cogs/admin.py.
+    # Do not register another /council group here.

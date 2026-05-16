@@ -98,19 +98,12 @@ class JoinsCog(commands.Cog):
         await interaction.followup.send(f"🧪 Posted join fact for {target.mention}.")
 
 async def setup(bot: commands.Bot):
-    # attach settings manager if not present yet
     if not hasattr(bot, "settings"):
         from core.settings import SettingsManager
         bot.settings = SettingsManager(bot.hot_config)
+
+    from core.command_scope import bind_public_cog
+
     cog = JoinsCog(bot)
-
-    # HOT-only guild binding
-    guild_id = bot.hot_config["guild_id"]
-    guild_obj = discord.Object(id=guild_id)
-
-    for cmd in cog.get_app_commands():
-        cmd.guild_only = True
-        cmd._guild_ids = {guild_id}
-        cmd.guilds = (guild_obj,)
-
+    bind_public_cog(cog, bot, include_admin=True)
     await bot.add_cog(cog)

@@ -6,25 +6,26 @@ from discord.ext import commands
 from discord import app_commands
 
 from core.logger import log_cmd, warn
-from core.utils import DATA_DIR, load_json, save_json
+from core.storage import load_guild_json, migrate_legacy_file_to_primary, save_guild_json
 from core.vault import is_image
 
-PROFILES_FILE = DATA_DIR / "profiles.json"
+PROFILES_FILENAME = "profiles.json"
 
 
-def load_profiles():
-    return load_json(PROFILES_FILE, {})
+def load_profiles(bot, guild_id: int):
+    migrate_legacy_file_to_primary(PROFILES_FILENAME, bot, {})
+    data = load_guild_json(guild_id, PROFILES_FILENAME, {})
+    return data if isinstance(data, dict) else {}
 
 
-def save_profiles(data):
-    save_json(PROFILES_FILE, data)
+def save_profiles(guild_id: int, data):
+    save_guild_json(guild_id, PROFILES_FILENAME, data)
 
 
 class ImagesCog(commands.Cog):
     def __init__(self, bot: commands.Bot):
         self.bot = bot
         self.settings = bot.settings
-        self.profiles = load_profiles()
         self.media_channel_id = bot.hot_config["media_channel_id"]
 
     # =====================================================================
@@ -71,10 +72,12 @@ class ImagesCog(commands.Cog):
         if not self.settings.is_feature_allowed(guild_id, channel_id, "tag_image"):
             return
 
+        profiles = load_profiles(self.bot, msg.guild.id)
+
         for m in msg.mentions:
             pid = str(m.id)
-            if pid in self.profiles:
-                data = self.profiles[pid]
+            if pid in profiles:
+                data = profiles[pid]
                 url = data.get("image") or data.get("img")
                 if not url:
                     continue
@@ -157,14 +160,15 @@ class ImagesCog(commands.Cog):
                 warn(f"tag_member_image: edit_original_response (error) failed: {ee!r}")
             return
 
-        # store profile info
-        self.profiles[str(member.id)] = {
+        # store profile info under this server only
+        profiles = load_profiles(self.bot, interaction.guild.id)
+        profiles[str(member.id)] = {
             "name": member.display_name,
             "image": url,
             "vault_channel_id": ch_id,
             "vault_message_id": msg_id,
         }
-        save_profiles(self.profiles)
+        save_profiles(interaction.guild.id, profiles)
 
         # final ephemeral confirmation
         try:
@@ -181,11 +185,8 @@ async def setup(bot: commands.Bot):
 
         bot.settings = SettingsManager(bot.hot_config)
 
+    from core.command_scope import bind_public_cog
+
     cog = ImagesCog(bot)
-
-    guild_obj = discord.Object(id=bot.hot_config["guild_id"])
-    for cmd in cog.get_app_commands():
-        cmd._guild_ids = {bot.hot_config["guild_id"]}
-        cmd.guilds = (guild_obj,)
-
+    bind_public_cog(cog, bot, include_admin=True)
     await bot.add_cog(cog)

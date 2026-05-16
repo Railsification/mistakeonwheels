@@ -13,12 +13,14 @@ from discord.ext import commands
 from core.logger import log_cmd
 from core.settings import SettingsManager
 from core.utils import DATA_DIR, ensure_deferred, load_json, save_json
+from core.storage import load_guild_json, migrate_legacy_file_to_primary, save_guild_json
 
 
 FEATURE_KEY = "wos_furnace"
 UPGRADES_PATH = DATA_DIR / "wos_furnace_upgrades.json"
 REFINES_PATH = DATA_DIR / "wos_refine_rates.json"
 PROFILES_PATH = DATA_DIR / "wos_furnace_profiles.json"
+PROFILES_FILENAME = "wos_furnace_profiles.json"
 
 
 LEVEL_CHOICE_VALUES = [f"FC{i}" for i in range(1, 11)]
@@ -355,12 +357,11 @@ class WOSFurnaceCalculator(commands.Cog):
         self.settings: SettingsManager = bot.settings
         self.upgrades: Dict[str, Any] = {}
         self.refines: Dict[str, Any] = {}
-        self.profiles: Dict[str, Any] = {}
+        self.profile_cache: Dict[int, Dict[str, Any]] = {}
         self.level_map: Dict[str, Dict[str, Any]] = {}
         self.level_names: List[str] = []
         self.timezone_name: str = "UTC"
         self.load_reference_files()
-        self.load_profiles()
 
     # -----------------------------
     # loading
@@ -377,14 +378,23 @@ class WOSFurnaceCalculator(commands.Cog):
         }
         self.level_names = [entry["level"] for entry in self.upgrades["levels"]]
 
-    def load_profiles(self) -> None:
-        data = self._load_or_create_json(PROFILES_PATH, {})
+    def load_profiles(self, guild_id: int) -> Dict[str, Any]:
+        migrate_legacy_file_to_primary(PROFILES_FILENAME, self.bot, {})
+        data = load_guild_json(guild_id, PROFILES_FILENAME, {})
         if not isinstance(data, dict):
             raise ReferenceError("wos_furnace_profiles.json must be a JSON object.")
-        self.profiles = {str(k): v for k, v in data.items() if isinstance(v, dict)}
+        profiles = {str(k): v for k, v in data.items() if isinstance(v, dict)}
+        self.profile_cache[int(guild_id)] = profiles
+        return profiles
 
-    def save_profiles(self) -> None:
-        save_json(PROFILES_PATH, self.profiles)
+    def profiles_for_guild(self, guild_id: int) -> Dict[str, Any]:
+        guild_id = int(guild_id)
+        if guild_id not in self.profile_cache:
+            return self.load_profiles(guild_id)
+        return self.profile_cache[guild_id]
+
+    def save_profiles(self, guild_id: int) -> None:
+        save_guild_json(int(guild_id), PROFILES_FILENAME, self.profiles_for_guild(int(guild_id)))
 
     @staticmethod
     def _load_or_create_json(path, default_value: Any) -> Any:
@@ -454,11 +464,14 @@ class WOSFurnaceCalculator(commands.Cog):
             else:
                 await interaction.response.send_message("❌ This command can only be used inside a server channel.", ephemeral=True)
             return False
+        admin_guild_id = int((getattr(self.bot, "hot_config", {}) or {}).get("admin_guild_id", 0) or 0)
+        if admin_guild_id and interaction.guild_id == admin_guild_id:
+            return True
         if self.settings.is_feature_allowed(interaction.guild_id, interaction.channel_id, FEATURE_KEY):
             return True
         msg = (
             f"❌ This command is not allowed in this channel. "
-            f"Use `/feature_channel_add` with feature `{FEATURE_KEY}` to allow it in a channel."
+            f"Use `/council feature_channel_add` from the admin server with feature `{FEATURE_KEY}`."
         )
         if interaction.response.is_done():
             await interaction.followup.send(msg, ephemeral=True)
@@ -517,11 +530,11 @@ class WOSFurnaceCalculator(commands.Cog):
         return entry
 
 
-    def _get_profile(self, user_id: int) -> Dict[str, Any]:
-        return self.profiles.get(str(user_id), {})
+    def _get_profile(self, guild_id: int, user_id: int) -> Dict[str, Any]:
+        return self.profiles_for_guild(guild_id).get(str(user_id), {})
 
-    def _get_profile_buildings(self, user_id: int, fallback_level: str) -> Dict[str, str]:
-        profile = self._get_profile(user_id)
+    def _get_profile_buildings(self, guild_id: int, user_id: int, fallback_level: str) -> Dict[str, str]:
+        profile = self._get_profile(guild_id, user_id)
         saved = profile.get("current_buildings") if isinstance(profile, dict) else {}
         buildings: Dict[str, str] = {}
         for key in BUILDING_ORDER:
@@ -599,6 +612,7 @@ class WOSFurnaceCalculator(commands.Cog):
 
     def _merge_profile_defaults(
         self,
+        guild_id: int,
         user_id: int,
         use_saved: bool,
         current_level: Optional[str],
@@ -608,7 +622,7 @@ class WOSFurnaceCalculator(commands.Cog):
         weekly_fire_crystals_income: Optional[int],
         weekly_rfc_income: Optional[int],
     ) -> Dict[str, Any]:
-        profile = self._get_profile(user_id) if use_saved else {}
+        profile = self._get_profile(guild_id, user_id) if use_saved else {}
         merged = {
             "current_level": current_level if current_level is not None else profile.get("current_level"),
             "current_fire_crystals": (
@@ -1145,7 +1159,8 @@ class WOSFurnaceCalculator(commands.Cog):
             return
         await ensure_deferred(interaction, ephemeral=True)
         try:
-            existing = dict(self._get_profile(interaction.user.id) or {})
+            guild_id = int(interaction.guild_id or 0)
+            existing = dict(self._get_profile(guild_id, interaction.user.id) or {})
             base_level = current_level or existing.get("current_level")
             if not base_level:
                 raise ReferenceError("current_level is required the first time you save your furnace profile.")
@@ -1181,7 +1196,7 @@ class WOSFurnaceCalculator(commands.Cog):
                     self._get_level_entry(value)
                     buildings[key] = value
 
-            self.profiles[str(interaction.user.id)] = {
+            self.profiles_for_guild(guild_id)[str(interaction.user.id)] = {
                 "current_level": base_level,
                 "current_buildings": buildings,
                 "fire_crystals": merged_fire_crystals,
@@ -1192,7 +1207,7 @@ class WOSFurnaceCalculator(commands.Cog):
                 "weekly_refined_fire_crystals_income": merged_weekly_rfc_income,
                 "updated_at": datetime.now(self._tz()).isoformat(timespec="seconds"),
             }
-            self.save_profiles()
+            self.save_profiles(guild_id)
             await interaction.followup.send("✅ Furnace profile saved.", ephemeral=True)
         except Exception as exc:
             await interaction.followup.send(f"❌ {exc}", ephemeral=True)
@@ -1203,7 +1218,7 @@ class WOSFurnaceCalculator(commands.Cog):
         if not await self._ensure_allowed(interaction):
             return
         await ensure_deferred(interaction, ephemeral=True)
-        profile = self._get_profile(interaction.user.id)
+        profile = self._get_profile(int(interaction.guild_id or 0), interaction.user.id)
         if not profile:
             await interaction.followup.send("No saved furnace profile found.", ephemeral=True)
             return
@@ -1302,6 +1317,7 @@ class WOSFurnaceCalculator(commands.Cog):
                 raise ReferenceError("target_date cannot be before today in the configured timezone.")
 
             merged = self._merge_profile_defaults(
+                guild_id=int(interaction.guild_id or 0),
                 user_id=interaction.user.id,
                 use_saved=use_saved,
                 current_level=current_level,
@@ -1322,7 +1338,7 @@ class WOSFurnaceCalculator(commands.Cog):
             )
             weekly_rfc_income_val = self._require_non_negative("weekly_rfc_income", int(merged["weekly_rfc_income"]))
 
-            current_buildings = self._get_profile_buildings(interaction.user.id, current_level_name) if use_saved else self._default_buildings_for_level(current_level_name)
+            current_buildings = self._get_profile_buildings(int(interaction.guild_id or 0), interaction.user.id, current_level_name) if use_saved else self._default_buildings_for_level(current_level_name)
             steps = self.build_upgrade_steps(current_level_name, target_level, package_name, current_buildings)
             summary = self.summarize_steps(steps)
             projected_fc_income = self._project_weekly_amount(weekly_fc_income, start_date, parsed_date)
@@ -1479,6 +1495,7 @@ class WOSFurnaceCalculator(commands.Cog):
                 raise ReferenceError("target_date cannot be before today in the configured timezone.")
 
             merged = self._merge_profile_defaults(
+                guild_id=int(interaction.guild_id or 0),
                 user_id=interaction.user.id,
                 use_saved=use_saved,
                 current_level=current_level,
@@ -1488,7 +1505,7 @@ class WOSFurnaceCalculator(commands.Cog):
                 weekly_fire_crystals_income=weekly_fire_crystals_income,
                 weekly_rfc_income=weekly_rfc_income,
             )
-            profile = self._get_profile(interaction.user.id) if use_saved else {}
+            profile = self._get_profile(int(interaction.guild_id or 0), interaction.user.id) if use_saved else {}
             if weekly_refines is None:
                 weekly_refines = int(profile.get("weekly_refines", 0))
             weekly_refines = self._require_non_negative("weekly_refines", int(weekly_refines))
@@ -1512,7 +1529,7 @@ class WOSFurnaceCalculator(commands.Cog):
             guaranteed_rfc_pool = current_rfc + projected_rfc_income + refine_projection.minimum_rfc
             expected_rfc_pool = current_rfc + projected_rfc_income + math.floor(refine_projection.expected_rfc)
 
-            current_buildings = self._get_profile_buildings(interaction.user.id, current_level_name) if use_saved else self._default_buildings_for_level(current_level_name)
+            current_buildings = self._get_profile_buildings(int(interaction.guild_id or 0), interaction.user.id, current_level_name) if use_saved else self._default_buildings_for_level(current_level_name)
             guaranteed_result = self.forecast_reachable_level(current_level_name, total_fc_pool, guaranteed_rfc_pool, package_name, current_buildings)
             expected_result = self.forecast_reachable_level(current_level_name, total_fc_pool, expected_rfc_pool, package_name, current_buildings)
 
@@ -1650,9 +1667,9 @@ class WOSFurnaceCalculator(commands.Cog):
         await ensure_deferred(interaction, ephemeral=True)
         try:
             self.load_reference_files()
-            self.load_profiles()
+            self.profile_cache.clear()
             await interaction.followup.send(
-                f"✅ Reloaded `{UPGRADES_PATH.name}`, `{REFINES_PATH.name}`, and `{PROFILES_PATH.name}` successfully.",
+                f"✅ Reloaded `{UPGRADES_PATH.name}`, `{REFINES_PATH.name}`, and per-guild `{PROFILES_FILENAME}` successfully.",
                 ephemeral=True,
             )
         except Exception as exc:
@@ -1663,9 +1680,15 @@ class WOSFurnaceCalculator(commands.Cog):
 async def setup(bot: commands.Bot) -> None:
     if not hasattr(bot, "settings"):
         bot.settings = SettingsManager(bot.hot_config)
+
+    from core.command_scope import bind_command_to_guilds, public_guild_ids, admin_guild_ids
+
     cog = WOSFurnaceCalculator(bot)
-    guild_obj = discord.Object(id=bot.hot_config["guild_id"])
+
+    # Old /forge admin group is intentionally not registered.
+    # Furnace admin actions are exposed under /council from cogs/admin.py.
+    cog.__cog_app_commands__ = [cmd for cmd in cog.get_app_commands() if cmd.name != "forge"]
+
     for cmd in cog.get_app_commands():
-        cmd._guild_ids = {bot.hot_config["guild_id"]}
-        cmd.guilds = (guild_obj,)
+        bind_command_to_guilds(cmd, public_guild_ids(bot, include_admin=True))
     await bot.add_cog(cog)

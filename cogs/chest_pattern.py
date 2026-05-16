@@ -1,4 +1,3 @@
-import os
 import csv
 import io
 import json
@@ -11,11 +10,13 @@ from discord import app_commands
 from discord.ext import commands
 
 
-GUILD_ID = int(os.getenv("GUILD_ID", "0") or 0)
-
 DATA_DIR = Path("data")
 DATA_DIR.mkdir(parents=True, exist_ok=True)
+
+from core.storage import load_guild_json, migrate_legacy_file_to_primary, save_guild_json
+
 KNOWLEDGE_FILE = DATA_DIR / "chest_pattern_knowledge.json"
+KNOWLEDGE_FILENAME = "chest_pattern_knowledge.json"
 
 CELL_X = [0.135, 0.376, 0.616, 0.852]
 CELL_Y = [0.547, 0.670, 0.792]
@@ -79,27 +80,32 @@ def fresh_guild_data():
     }
 
 
-def load_knowledge():
-    if not KNOWLEDGE_FILE.exists():
-        return {"guilds": {}}
-
+def load_knowledge(bot, guild_key: str):
     try:
-        with KNOWLEDGE_FILE.open("r", encoding="utf-8") as f:
-            data = json.load(f)
-        if not isinstance(data, dict):
-            return {"guilds": {}}
-        if "guilds" not in data or not isinstance(data["guilds"], dict):
-            data["guilds"] = {}
-        return data
+        guild_id = int(guild_key)
     except Exception:
-        return {"guilds": {}}
+        return {"guilds": {guild_key: fresh_guild_data()}}
+
+    migrate_legacy_file_to_primary(KNOWLEDGE_FILENAME, bot, {"guilds": {}})
+    stored = load_guild_json(guild_id, KNOWLEDGE_FILENAME, {})
+
+    if isinstance(stored, dict) and "guilds" in stored and isinstance(stored["guilds"], dict):
+        guild_data = stored["guilds"].get(guild_key, fresh_guild_data())
+    elif isinstance(stored, dict) and "totals" in stored:
+        guild_data = stored
+    else:
+        guild_data = fresh_guild_data()
+
+    return {"guilds": {guild_key: guild_data}}
 
 
-def save_knowledge(data):
-    tmp = KNOWLEDGE_FILE.with_suffix(".tmp")
-    with tmp.open("w", encoding="utf-8") as f:
-        json.dump(data, f, indent=2)
-    tmp.replace(KNOWLEDGE_FILE)
+def save_knowledge(bot, guild_key: str, data):
+    try:
+        guild_id = int(guild_key)
+    except Exception:
+        return
+    guild_data = (data.get("guilds") or {}).get(guild_key, fresh_guild_data())
+    save_guild_json(guild_id, KNOWLEDGE_FILENAME, guild_data)
 
 
 def get_guild_key(interaction: discord.Interaction):
@@ -514,8 +520,9 @@ class ChestPatternCog(commands.Cog):
         ]
         attachments = [a for a in attachments if a is not None]
 
-        data = load_knowledge()
-        guild_data = ensure_guild_data(data, get_guild_key(interaction))
+        guild_key = get_guild_key(interaction)
+        data = load_knowledge(self.bot, guild_key)
+        guild_data = ensure_guild_data(data, guild_key)
 
         known_hashes = set(guild_data["hashes"])
         prior_order = list(guild_data.get("last_order", []))
@@ -571,7 +578,7 @@ class ChestPatternCog(commands.Cog):
         guild_data["last_order"] = [row["cell"] for row in ranked]
 
         if learned > 0:
-            save_knowledge(data)
+            save_knowledge(self.bot, guild_key, data)
 
         summary = build_summary(
             ranked=ranked,
@@ -601,8 +608,9 @@ class ChestPatternCog(commands.Cog):
     async def chest_stats(self, interaction: discord.Interaction):
         await interaction.response.defer(ephemeral=True, thinking=True)
 
-        data = load_knowledge()
-        guild_data = ensure_guild_data(data, get_guild_key(interaction))
+        guild_key = get_guild_key(interaction)
+        data = load_knowledge(self.bot, guild_key)
+        guild_data = ensure_guild_data(data, guild_key)
         ranked = build_ranked_order(guild_data)
 
         summary = build_summary(
@@ -637,17 +645,18 @@ class ChestPatternCog(commands.Cog):
             await interaction.followup.send("Admin only.", ephemeral=True)
             return
 
-        data = load_knowledge()
+        guild_key = get_guild_key(interaction)
+        data = load_knowledge(self.bot, guild_key)
         data.setdefault("guilds", {})
-        data["guilds"][get_guild_key(interaction)] = fresh_guild_data()
-        save_knowledge(data)
+        data["guilds"][guild_key] = fresh_guild_data()
+        save_knowledge(self.bot, guild_key, data)
 
         await interaction.followup.send("Chest knowledge reset.", ephemeral=True)
 
 
 async def setup(bot):
+    from core.command_scope import bind_public_cog
+
     cog = ChestPatternCog(bot)
-    if GUILD_ID:
-        await bot.add_cog(cog, guild=discord.Object(id=GUILD_ID))
-    else:
-        await bot.add_cog(cog)
+    bind_public_cog(cog, bot, include_admin=True)
+    await bot.add_cog(cog)

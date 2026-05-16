@@ -10,8 +10,17 @@ from discord import app_commands
 from discord.ext import commands
 
 from core.utils import DATA_DIR, load_json, save_json
+from core.storage import (
+    configured_guild_ids,
+    guild_json_path,
+    known_guild_dirs,
+    load_guild_json,
+    migrate_legacy_file_to_primary,
+    save_guild_json,
+)
 
 POLLS_FILE = DATA_DIR / "polls.json"
+POLLS_FILENAME = "polls.json"
 NUMBER_EMOJIS = ["1️⃣", "2️⃣", "3️⃣", "4️⃣", "5️⃣", "6️⃣", "7️⃣", "8️⃣", "9️⃣", "🔟"]
 
 
@@ -102,28 +111,54 @@ class Polls(commands.Cog):
             print(f"[polls] {cmd_name}: initial response failed: {e!r}")
             return False
 
+    def _poll_guild_ids(self) -> list[int]:
+        ids = set(configured_guild_ids(self.bot)) | set(known_guild_dirs())
+        legacy = load_json(POLLS_FILE, [])
+        if isinstance(legacy, list):
+            for poll in legacy:
+                try:
+                    gid = int(poll.get("guild_id"))
+                except Exception:
+                    continue
+                if gid:
+                    ids.add(gid)
+        return sorted(ids)
+
     def load_polls(self) -> list[dict]:
-        print(f"[polls] loading from: {POLLS_FILE}")
-        data = load_json(POLLS_FILE, [])
+        migrate_legacy_file_to_primary(POLLS_FILENAME, self.bot, [])
+        records: list[dict] = []
 
-        if not isinstance(data, list):
-            print(f"[polls] polls.json is not a list: {type(data).__name__}")
-            return []
+        for guild_id in self._poll_guild_ids():
+            path = guild_json_path(guild_id, POLLS_FILENAME)
+            print(f"[polls] loading from: {path}")
+            data = load_guild_json(guild_id, POLLS_FILENAME, [])
+            if not isinstance(data, list):
+                print(f"[polls] {path} is not a list: {type(data).__name__}")
+                data = []
 
-        print(f"[polls] loaded {len(data)} poll record(s)")
+            changed = False
+            for poll in data:
+                poll["guild_id"] = int(poll.get("guild_id") or guild_id)
+                if self.upgrade_poll_record(poll):
+                    changed = True
+            if changed:
+                save_guild_json(guild_id, POLLS_FILENAME, data)
+            records.extend(data)
 
-        changed = False
-        for poll in data:
-            if self.upgrade_poll_record(poll):
-                changed = True
-
-        if changed:
-            self.save_polls(data)
-
-        return data
+        print(f"[polls] loaded {len(records)} poll record(s) across guild storage")
+        return records
 
     def save_polls(self, polls: list[dict]) -> None:
-        save_json(POLLS_FILE, polls)
+        by_guild: dict[int, list[dict]] = {}
+        for poll in polls:
+            try:
+                guild_id = int(poll.get("guild_id"))
+            except Exception:
+                continue
+            by_guild.setdefault(guild_id, []).append(poll)
+
+        for guild_id in set(self._poll_guild_ids()) | set(by_guild.keys()):
+            save_guild_json(guild_id, POLLS_FILENAME, by_guild.get(guild_id, []))
 
     def upgrade_poll_record(self, poll: dict) -> bool:
         changed = False
@@ -698,9 +733,8 @@ class Polls(commands.Cog):
 
 
 async def setup(bot: commands.Bot):
-    guild_id = int((getattr(bot, "hot_config", {}) or {}).get("guild_id", 0) or 0)
+    from core.command_scope import bind_public_cog
 
-    if guild_id:
-        await bot.add_cog(Polls(bot), guild=discord.Object(id=guild_id))
-    else:
-        await bot.add_cog(Polls(bot))
+    cog = Polls(bot)
+    bind_public_cog(cog, bot, include_admin=True)
+    await bot.add_cog(cog)

@@ -195,12 +195,8 @@ async def setup(bot: commands.Bot):
     if not hasattr(bot, "settings"):
         bot.settings = SettingsManager(bot.hot_config)
 
+    from core.command_scope import bind_public_cog
+
     cog = GamesCog(bot)
-
-    # match your other cogs: guild-scoped commands
-    guild_obj = discord.Object(id=bot.hot_config["guild_id"])
-    for cmd in cog.get_app_commands():
-        cmd._guild_ids = {bot.hot_config["guild_id"]}
-        cmd.guilds = (guild_obj,)
-
+    bind_public_cog(cog, bot, include_admin=True)
     await bot.add_cog(cog)

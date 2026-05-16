@@ -22,7 +22,10 @@ load_dotenv()
 DATA_DIR = Path("data")
 DATA_DIR.mkdir(parents=True, exist_ok=True)
 
+from core.storage import load_guild_json, migrate_legacy_file_to_primary, save_guild_json
+
 SESSIONS_FILE = DATA_DIR / "canyon_sessions.json"
+SESSIONS_FILENAME = "canyon_sessions.json"
 LANES = ["Left", "Left middle", "Right middle", "Right"]
 MAX_SCAN_IMAGES = 15
 DEFAULT_HISTORY_MESSAGES = 40
@@ -43,17 +46,14 @@ class GroupItem:
         return sum(p.power for p in self.members)
 
 
-def load_sessions() -> dict:
-    if not SESSIONS_FILE.exists():
-        return {}
-    try:
-        return json.loads(SESSIONS_FILE.read_text(encoding="utf-8"))
-    except Exception:
-        return {}
+def load_sessions(bot, guild_id: int) -> dict:
+    migrate_legacy_file_to_primary(SESSIONS_FILENAME, bot, {})
+    data = load_guild_json(guild_id, SESSIONS_FILENAME, {})
+    return data if isinstance(data, dict) else {}
 
 
-def save_sessions(data: dict) -> None:
-    SESSIONS_FILE.write_text(json.dumps(data, indent=2), encoding="utf-8")
+def save_sessions(guild_id: int, data: dict) -> None:
+    save_guild_json(guild_id, SESSIONS_FILENAME, data)
 
 
 def normalize_name(name: str) -> str:
@@ -365,16 +365,16 @@ class CanyonCog(commands.Cog):
         return text
 
     def _store_roster(self, guild_id: int, players: list[Player]) -> None:
-        sessions = load_sessions()
-        sessions[str(guild_id)] = {
+        sessions = load_sessions(self.bot, guild_id)
+        sessions["roster"] = {
             "updated_at": int(time.time()),
             "players": [{"name": p.name, "power": p.power} for p in players],
         }
-        save_sessions(sessions)
+        save_sessions(guild_id, sessions)
 
     def _load_roster(self, guild_id: int) -> list[Player]:
-        sessions = load_sessions()
-        data = sessions.get(str(guild_id))
+        sessions = load_sessions(self.bot, guild_id)
+        data = sessions.get("roster") or sessions.get(str(guild_id))
         if not data or not data.get("players"):
             return []
         return [Player(name=x["name"], power=int(x["power"])) for x in data["players"]]
@@ -573,21 +573,17 @@ class CanyonCog(commands.Cog):
         await interaction.response.defer(thinking=True)
 
         guild_id = interaction.guild_id or interaction.user.id
-        sessions = load_sessions()
+        sessions = load_sessions(self.bot, guild_id)
+        sessions.pop("roster", None)
         sessions.pop(str(guild_id), None)
-        save_sessions(sessions)
+        save_sessions(guild_id, sessions)
 
         await interaction.followup.send("Saved canyon roster cleared.")
 
 
 async def setup(bot: commands.Bot) -> None:
+    from core.command_scope import bind_public_cog
+
     cog = CanyonCog(bot)
-    guild_id = bot.hot_config["guild_id"]
-    guild_obj = discord.Object(id=guild_id)
-
-    for cmd in cog.get_app_commands():
-        cmd.guild_only = True
-        cmd._guild_ids = {guild_id}
-        cmd.guilds = (guild_obj,)
-
+    bind_public_cog(cog, bot, include_admin=True)
     await bot.add_cog(cog)

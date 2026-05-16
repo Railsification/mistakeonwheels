@@ -7,18 +7,21 @@ from discord.ext import commands
 from discord import app_commands
 
 from core.logger import log_cmd, warn
-from core.utils import DATA_DIR, load_json, save_json, ensure_deferred
+from core.utils import ensure_deferred
 from core.settings import SettingsManager
+from core.storage import load_guild_json, migrate_legacy_file_to_primary, save_guild_json
 
-SPEECH_FILE = DATA_DIR / "speech_styles.json"
-
-
-def load_styles() -> dict:
-    return load_json(SPEECH_FILE, {})
+SPEECH_FILENAME = "speech_styles.json"
 
 
-def save_styles(data: dict) -> None:
-    save_json(SPEECH_FILE, data)
+def load_styles(bot, guild_id: int) -> dict:
+    migrate_legacy_file_to_primary(SPEECH_FILENAME, bot, {})
+    data = load_guild_json(guild_id, SPEECH_FILENAME, {})
+    return data if isinstance(data, dict) else {}
+
+
+def save_styles(guild_id: int, data: dict) -> None:
+    save_guild_json(guild_id, SPEECH_FILENAME, data)
 
 
 class SpeechCog(commands.Cog):
@@ -36,7 +39,6 @@ class SpeechCog(commands.Cog):
     def __init__(self, bot: commands.Bot):
         self.bot = bot
         self.settings: SettingsManager = bot.settings
-        self.styles: dict = load_styles()
         self.api_key: str | None = bot.hot_config["openai_api_key"]
         self.model: str = bot.hot_config["openai_model"]
 
@@ -99,7 +101,8 @@ class SpeechCog(commands.Cog):
         if not self.settings.is_feature_allowed(msg.guild.id, msg.channel.id, "speech"):
             return
 
-        cfg = self.styles.get(str(msg.author.id))
+        styles = load_styles(self.bot, msg.guild.id)
+        cfg = styles.get(str(msg.author.id))
         if not cfg or not cfg.get("enabled", True) or not self.api_key:
             return
 
@@ -157,11 +160,12 @@ class SpeechCog(commands.Cog):
             )
             return
 
-        self.styles[str(member.id)] = {
+        styles = load_styles(self.bot, interaction.guild_id)
+        styles[str(member.id)] = {
             "style": style,
             "enabled": True,
         }
-        save_styles(self.styles)
+        save_styles(interaction.guild_id, styles)
 
         await interaction.followup.send(
             f"✅ Speech style set for {member.mention}.\n"
@@ -197,7 +201,8 @@ class SpeechCog(commands.Cog):
 
         await ensure_deferred(interaction, ephemeral=True)
 
-        cfg = self.styles.get(str(member.id))
+        styles = load_styles(self.bot, interaction.guild_id)
+        cfg = styles.get(str(member.id))
         if not cfg:
             await interaction.followup.send(
                 "ℹ️ No speech style configured for that member.",
@@ -206,7 +211,7 @@ class SpeechCog(commands.Cog):
             return
 
         cfg["enabled"] = enabled
-        save_styles(self.styles)
+        save_styles(interaction.guild_id, styles)
         state = "ON" if enabled else "OFF"
         await interaction.followup.send(
             f"✅ Speech style for {member.mention} is now **{state}**.",
@@ -238,7 +243,8 @@ class SpeechCog(commands.Cog):
         await ensure_deferred(interaction, ephemeral=True)
 
         target = member or interaction.user
-        cfg = self.styles.get(str(target.id))
+        styles = load_styles(self.bot, interaction.guild_id)
+        cfg = styles.get(str(target.id))
         if not cfg:
             await interaction.followup.send(
                 f"ℹ️ No speech style configured for {target.mention}.",
@@ -261,12 +267,8 @@ async def setup(bot: commands.Bot):
         from core.settings import SettingsManager
         bot.settings = SettingsManager(bot.hot_config)
 
+    from core.command_scope import bind_public_cog
+
     cog = SpeechCog(bot)
-
-    # guild-lock commands like other cogs
-    guild_obj = discord.Object(id=bot.hot_config["guild_id"])
-    for cmd in cog.get_app_commands():
-        cmd._guild_ids = {bot.hot_config["guild_id"]}
-        cmd.guilds = (guild_obj,)
-
+    bind_public_cog(cog, bot, include_admin=True)
     await bot.add_cog(cog)
