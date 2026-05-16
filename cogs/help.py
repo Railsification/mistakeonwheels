@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import difflib
 import re
 from typing import Optional, Iterable, Any
 
@@ -15,22 +16,82 @@ from core.utils import ensure_deferred
 UTILITY_COMMANDS = {"hello", "acktest"}
 ADMIN_COMMANDS = {"council"}
 
-FRIENDLY_COG_NAMES = {
-    "AdminCog": "Council / Admin",
-    "CanyonCog": "Canyon",
-    "ChestPatternCog": "Chest Pattern",
-    "Connect4Cog": "Connect 4",
-    "GamesCog": "Games",
-    "HelpCog": "Help",
-    "ImagesCog": "Images / Profiles",
-    "JoinsCog": "Join Facts",
-    "MiscCog": "Misc",
-    "PfpCog": "PFP Theme",
-    "Polls": "Image Polls",
-    "SpeechCog": "Speech Convert",
-    "SuggestionPollCog": "Suggestion Polls",
-    "TicTacToeCog": "Tic Tac Toe",
-    "WOSFurnaceCalculator": "WoS Furnace Calculator",
+COG_INFO: dict[str, dict[str, Any]] = {
+    "AdminCog": {
+        "title": "Council / Admin",
+        "summary": "Admin/test-server controls for sync, setup, feature channels, and maintenance.",
+        "aliases": {"admin", "council", "setup", "sync"},
+    },
+    "CanyonCog": {
+        "title": "Canyon",
+        "summary": "WoS Canyon scanning, lane lists, row setup, and balancing helpers.",
+        "aliases": {"canyon", "lane", "lanes"},
+    },
+    "ChestPatternCog": {
+        "title": "Chest Pattern",
+        "summary": "Tracks WoS chest/puzzle results and suggests better opening order over time.",
+        "aliases": {"chest", "pattern", "chests"},
+    },
+    "Connect4Cog": {
+        "title": "Connect 4",
+        "summary": "Connect 4 game commands.",
+        "aliases": {"connect4", "connect 4"},
+    },
+    "GamesCog": {
+        "title": "Games",
+        "summary": "Game launcher and small Discord games.",
+        "aliases": {"games", "game"},
+    },
+    "HelpCog": {
+        "title": "Help",
+        "summary": "Shows all command groups and every loaded cog, with detailed command/cog help.",
+        "aliases": {"help"},
+    },
+    "ImagesCog": {
+        "title": "Images / Profiles",
+        "summary": "Profile image storage, member image tagging, and image helper commands.",
+        "aliases": {"images", "profiles", "profile", "tag"},
+    },
+    "JoinsCog": {
+        "title": "Join Facts",
+        "summary": "Posts join facts/topics when members join configured channels.",
+        "aliases": {"join", "joins", "facts"},
+    },
+    "MiscCog": {
+        "title": "Misc",
+        "summary": "Small utility commands such as sanity checks and facts.",
+        "aliases": {"misc", "fact", "hello"},
+    },
+    "PfpCog": {
+        "title": "PFP Theme",
+        "summary": "WoS profile-picture theme prompts and current theme helpers.",
+        "aliases": {"pfp", "theme", "profile picture"},
+    },
+    "Polls": {
+        "title": "Image Polls",
+        "summary": "Image polls with votes, timers, refresh, cancel, and result handling.",
+        "aliases": {"poll", "polls", "image poll"},
+    },
+    "SpeechCog": {
+        "title": "Speech Convert",
+        "summary": "Per-server speech style conversion in configured channels.",
+        "aliases": {"speech", "speech convert", "text convert"},
+    },
+    "SuggestionPollCog": {
+        "title": "Suggestion Polls",
+        "summary": "Collect WoS PFP ideas, let members add options, vote, and produce a winner/shortlist.",
+        "aliases": {"suggestion", "suggestions", "idea", "ideas"},
+    },
+    "TicTacToeCog": {
+        "title": "Tic Tac Toe",
+        "summary": "Tic Tac Toe game commands.",
+        "aliases": {"tictactoe", "tic tac toe", "noughts"},
+    },
+    "WOSFurnaceCalculator": {
+        "title": "WoS Furnace Calculator",
+        "summary": "Fire Crystal/refine planning, furnace profile saving, and upgrade forecasts.",
+        "aliases": {"furnace", "furance", "forge", "fire crystal", "refines"},
+    },
 }
 
 COG_COMMAND_ALIASES = {
@@ -46,6 +107,22 @@ COG_COMMAND_ALIASES = {
     },
 }
 
+INPUT_ALIASES = {
+    "furance": "furnace",
+    "furancecalculator": "furnace",
+    "wosfurnace": "furnace",
+    "suggestions": "suggestion",
+    "suggestionpoll": "suggestion",
+    "suggestionpolls": "suggestion",
+    "imagepoll": "image_poll",
+    "polls": "poll",
+    "speechconvert": "speech",
+    "pfptheme": "pfp",
+    "chestpattern": "chest",
+    "tic tac toe": "tictactoe",
+    "connect 4": "connect4",
+}
+
 MAIN_ORDER = [
     "help",
     "image_poll",
@@ -57,6 +134,7 @@ MAIN_ORDER = [
     "furnace_refines_needed",
     "furnace_upgrade_forecast",
     "speech_convert",
+    "speech_lookup",
     "canyon_scan",
     "canyon_list",
     "games",
@@ -69,6 +147,16 @@ MAIN_ORDER = [
 
 def _normalise(value: str) -> str:
     return re.sub(r"[^a-z0-9]+", "", (value or "").lower())
+
+
+def _canonical_input(value: str) -> str:
+    raw = (value or "").strip().lower().lstrip("/")
+    norm = _normalise(raw)
+    if raw in INPUT_ALIASES:
+        return INPUT_ALIASES[raw]
+    if norm in INPUT_ALIASES:
+        return INPUT_ALIASES[norm]
+    return raw
 
 
 def _split_camel(value: str) -> str:
@@ -99,6 +187,12 @@ def _chunks(lines: Iterable[str], limit: int = 950) -> list[str]:
 
 
 class HelpCog(commands.Cog):
+    HELP_META = {
+        "title": "Help",
+        "summary": "Shows main commands, every loaded cog, and detailed command/cog help.",
+        "details": "Use `/help` for the overview or `/help command:<name>` for a command group or cog.",
+    }
+
     def __init__(self, bot: commands.Bot):
         self.bot = bot
 
@@ -114,6 +208,8 @@ class HelpCog(commands.Cog):
     def _visible_in_guild(self, command: Any, guild_id: int) -> bool:
         gids = getattr(command, "_guild_ids", None)
         if gids is None:
+            # This should not happen in v1.7.3, but treat global commands as visible
+            # so /help can still expose accidental registrations during testing.
             return True
         return guild_id in set(int(x) for x in gids)
 
@@ -139,7 +235,7 @@ class HelpCog(commands.Cog):
         return (index, name.lower())
 
     def _find_command(self, guild_id: int, wanted: str):
-        wanted = wanted.strip().lower().lstrip("/")
+        wanted = _canonical_input(wanted)
         if not wanted:
             return None
 
@@ -157,13 +253,31 @@ class HelpCog(commands.Cog):
                     return None
             return current
 
-        # Also support old flat command names like furnace_set.
+        # Also support old flat command names like furnace_set or fuzzy aliases like furnace.
+        wanted_norm = _normalise(wanted)
         for command in self._visible_top_commands(guild_id):
-            if command.qualified_name.lower() == wanted:
+            if _normalise(command.qualified_name) == wanted_norm:
+                return command
+            if _normalise(command.name) == wanted_norm:
                 return command
             for child in getattr(command, "commands", []) or []:
-                if child.qualified_name.lower() == wanted:
+                if _normalise(child.qualified_name) == wanted_norm:
                     return child
+
+        # If user asks for a feature name, return the best matching command under that feature.
+        alias_candidates = []
+        for command in self._visible_top_commands(guild_id):
+            alias_candidates.append(command.name)
+            for child in getattr(command, "commands", []) or []:
+                alias_candidates.append(child.qualified_name)
+        best = difflib.get_close_matches(wanted_norm, [_normalise(x) for x in alias_candidates], n=1, cutoff=0.86)
+        if best:
+            for command in self._visible_top_commands(guild_id):
+                if _normalise(command.name) == best[0] or _normalise(command.qualified_name) == best[0]:
+                    return command
+                for child in getattr(command, "commands", []) or []:
+                    if _normalise(child.qualified_name) == best[0]:
+                        return child
 
         return None
 
@@ -178,35 +292,40 @@ class HelpCog(commands.Cog):
                 raw = None
         return raw if isinstance(raw, dict) else {}
 
+    def _cog_info(self, cog_name: str) -> dict[str, Any]:
+        return COG_INFO.get(cog_name, {})
+
     def _cog_title(self, cog_name: str, cog: commands.Cog) -> str:
         meta = self._meta(cog)
-        title = meta.get("title") or meta.get("name")
+        title = meta.get("title") or meta.get("name") or self._cog_info(cog_name).get("title")
         if title:
             return str(title)
-        return FRIENDLY_COG_NAMES.get(cog_name) or _split_camel(cog_name)
+        return _split_camel(cog_name)
 
     def _cog_summary(self, cog_name: str, cog: commands.Cog) -> str:
         meta = self._meta(cog)
-        summary = meta.get("summary") or meta.get("description")
+        summary = meta.get("summary") or meta.get("description") or self._cog_info(cog_name).get("summary")
         if summary:
             return str(summary)
 
         listeners = len(cog.get_listeners())
         if listeners:
-            return f"Loaded with {listeners} listener(s)."
-        return "Loaded."
+            return "Background/listener feature."
+        return "Command module."
 
     def _cog_tokens(self, cog_name: str, cog: commands.Cog) -> set[str]:
         title = self._cog_title(cog_name, cog)
         base = cog_name.lower().replace("cog", "")
         split = _split_camel(cog_name).lower()
+        aliases = set(self._cog_info(cog_name).get("aliases", set()))
         tokens = {_normalise(cog_name), _normalise(title), _normalise(base), _normalise(split)}
+        tokens.update(_normalise(x) for x in aliases if x)
         tokens.update(_normalise(x) for x in re.split(r"\s+", split) if x)
         tokens.discard("")
         return tokens
 
     def _commands_for_cog(self, cog_name: str, cog: commands.Cog, guild_id: int) -> list[Any]:
-        commands_for_guild = self._visible_top_commands(guild_id, include_admin=True)
+        commands_for_guild = self._visible_top_commands(guild_id, include_admin=self._is_admin_guild(guild_id))
         result: list[Any] = []
         seen: set[str] = set()
 
@@ -247,20 +366,14 @@ class HelpCog(commands.Cog):
 
         return sorted(result, key=self._command_sort_key)
 
-    def _cog_visible_in_guild(self, cog_name: str, cog: commands.Cog, guild_id: int) -> bool:
-        if cog_name == "AdminCog" and not self._is_admin_guild(guild_id):
-            return True  # show as loaded/admin-only, but do not expose /council details
-        return True
-
     def _find_cog(self, guild_id: int, wanted: str):
-        needle = _normalise(wanted.strip().lower().lstrip("/"))
+        wanted = _canonical_input(wanted)
+        needle = _normalise(wanted)
         if not needle:
             return None
 
+        candidates: dict[str, tuple[str, commands.Cog]] = {}
         for cog_name, cog in self.bot.cogs.items():
-            if not self._cog_visible_in_guild(cog_name, cog, guild_id):
-                continue
-
             names = {
                 _normalise(cog_name),
                 _normalise(self._cog_title(cog_name, cog)),
@@ -269,15 +382,22 @@ class HelpCog(commands.Cog):
             aliases = {_normalise(x) for x in COG_COMMAND_ALIASES.get(cog_name, set())}
             names.update(aliases)
 
+            for name in names:
+                if name:
+                    candidates[name] = (cog_name, cog)
+
             if needle in names:
                 return cog_name, cog
 
-            # Match /canyon to CanyonCog or /furnace to WoS Furnace Calculator.
             for command in self._commands_for_cog(cog_name, cog, guild_id):
                 if needle == _normalise(command.name) or needle == _normalise(command.qualified_name):
                     return cog_name, cog
                 if _normalise(command.name).startswith(needle) and len(needle) >= 4:
                     return cog_name, cog
+
+        close = difflib.get_close_matches(needle, list(candidates.keys()), n=1, cutoff=0.82)
+        if close:
+            return candidates[close[0]]
 
         return None
 
@@ -302,9 +422,10 @@ class HelpCog(commands.Cog):
 
     def _cog_line(self, cog_name: str, cog: commands.Cog, guild_id: int) -> str:
         title = self._cog_title(cog_name, cog)
+        summary = self._cog_summary(cog_name, cog)
 
         if cog_name == "AdminCog" and not self._is_admin_guild(guild_id):
-            return f"**{title}** — loaded; admin/test server only."
+            return f"**{title}** — admin/test-server only; no public commands."
 
         commands_for_cog = self._commands_for_cog(cog_name, cog, guild_id)
         if commands_for_cog:
@@ -315,12 +436,9 @@ class HelpCog(commands.Cog):
                 names.append(f"`/{command.name}`{suffix}")
             extra = len(commands_for_cog) - 8
             more = f" +{extra} more" if extra > 0 else ""
-            return f"**{title}** — " + ", ".join(names) + more
+            return f"**{title}** — {summary} Commands: " + ", ".join(names) + more
 
-        listeners = len(cog.get_listeners())
-        if listeners:
-            return f"**{title}** — loaded; listener/background feature only."
-        return f"**{title}** — loaded; no slash commands."
+        return f"**{title}** — {summary}"
 
     def _detailed_cog_embed(self, guild_id: int, cog_name: str, cog: commands.Cog) -> discord.Embed:
         title = self._cog_title(cog_name, cog)
@@ -331,12 +449,8 @@ class HelpCog(commands.Cog):
             colour=discord.Colour.blurple(),
         )
 
-        embed.add_field(name="Loaded cog", value=f"`{cog_name}`", inline=True)
-        listeners = cog.get_listeners()
-        embed.add_field(name="Listeners", value=str(len(listeners)), inline=True)
-
         if cog_name == "AdminCog" and not self._is_admin_guild(guild_id):
-            embed.add_field(name="Commands", value="Admin/test server only.", inline=False)
+            embed.add_field(name="Commands", value="Admin/test-server only. Not available in this server.", inline=False)
             return embed
 
         commands_for_cog = self._commands_for_cog(cog_name, cog, guild_id)
@@ -350,18 +464,42 @@ class HelpCog(commands.Cog):
                 name = "Commands" if index == 1 else f"Commands {index}"
                 embed.add_field(name=name, value=chunk, inline=False)
         else:
-            embed.add_field(name="Commands", value="No slash commands registered for this cog.", inline=False)
+            embed.add_field(name="Commands", value="No public slash commands for this cog.", inline=False)
 
+        listeners = cog.get_listeners()
         if listeners:
             names = [f"`{name}`" for name, _ in listeners[:10]]
             more = f" +{len(listeners) - 10} more" if len(listeners) > 10 else ""
-            embed.add_field(name="Listeners", value=", ".join(names) + more, inline=False)
+            embed.add_field(name="Background listeners", value=", ".join(names) + more, inline=False)
 
         details = self._meta(cog).get("details")
         if details:
             embed.add_field(name="Details", value=str(details)[:1024], inline=False)
 
         return embed
+
+    def _not_found_message(self, guild_id: int, wanted: str) -> str:
+        names: list[str] = []
+        for command in self._visible_top_commands(guild_id):
+            names.append(command.name)
+            for sub in self._subcommands(command):
+                names.append(sub.qualified_name)
+        for cog_name, cog in self.bot.cogs.items():
+            names.append(self._cog_title(cog_name, cog))
+            names.extend(self._cog_info(cog_name).get("aliases", set()))
+
+        wanted_norm = _normalise(wanted)
+        choices = sorted(set(names))
+        close = difflib.get_close_matches(wanted_norm, [_normalise(x) for x in choices], n=3, cutoff=0.65)
+        suggestions = []
+        for close_norm in close:
+            for name in choices:
+                if _normalise(name) == close_norm:
+                    suggestions.append(name)
+                    break
+        if suggestions:
+            return f"No command or cog found for `{wanted}`. Closest: " + ", ".join(f"`{x}`" for x in suggestions)
+        return f"No command or loaded cog found for `{wanted}`."
 
     # ---------- slash command ----------
 
@@ -416,7 +554,7 @@ class HelpCog(commands.Cog):
                 await interaction.followup.send(embed=self._detailed_cog_embed(guild_id, cog_name, cog), ephemeral=True)
                 return
 
-            await interaction.followup.send(f"No command or loaded cog found for `{command}`.", ephemeral=True)
+            await interaction.followup.send(self._not_found_message(guild_id, command), ephemeral=True)
             return
 
         visible_commands = self._visible_top_commands(guild_id)
@@ -426,7 +564,7 @@ class HelpCog(commands.Cog):
 
         embed = discord.Embed(
             title="HotBot Help",
-            description="Main commands first. Every loaded cog is listed below. Use `/help command:<name>` for details.",
+            description="Main commands first. Then every loaded cog/feature. Use `/help command:<name>` for details.",
             colour=discord.Colour.blurple(),
         )
 
@@ -434,23 +572,25 @@ class HelpCog(commands.Cog):
             lines = [self._short_command_line(cmd) for cmd in main]
             for index, chunk in enumerate(_chunks(lines), start=1):
                 embed.add_field(name="Main Commands" if index == 1 else f"Main Commands {index}", value=chunk, inline=False)
-
-        if admin and self._is_admin_guild(guild_id):
-            lines = [self._short_command_line(cmd) for cmd in admin]
-            embed.add_field(name="Admin/Test Commands", value="\n".join(lines), inline=False)
+        else:
+            embed.add_field(name="Main Commands", value="No public commands synced for this server yet.", inline=False)
 
         cog_lines = []
         for cog_name, cog in sorted(self.bot.cogs.items(), key=lambda item: self._cog_title(item[0], item[1]).lower()):
             cog_lines.append(self._cog_line(cog_name, cog, guild_id))
 
         for index, chunk in enumerate(_chunks(cog_lines), start=1):
-            embed.add_field(name="Loaded Cogs" if index == 1 else f"Loaded Cogs {index}", value=chunk, inline=False)
+            embed.add_field(name="Cogs / Features" if index == 1 else f"Cogs / Features {index}", value=chunk, inline=False)
 
         if utility:
             lines = [self._short_command_line(cmd) for cmd in utility]
             embed.add_field(name="Utility", value="\n".join(lines), inline=False)
 
-        embed.set_footer(text="New cogs appear here automatically after they load/sync. Detailed help accepts command names and cog names.")
+        if admin and self._is_admin_guild(guild_id):
+            lines = [self._short_command_line(cmd) for cmd in admin]
+            embed.add_field(name="Admin/Test Commands", value="\n".join(lines), inline=False)
+
+        embed.set_footer(text="New cogs appear automatically after load/sync. Detailed help accepts command names and cog names.")
         await interaction.followup.send(embed=embed, ephemeral=True)
 
     @help_cmd.autocomplete("command")
@@ -477,7 +617,10 @@ class HelpCog(commands.Cog):
                 add_choice(f"/{sub.qualified_name}", sub.qualified_name)
 
         for cog_name, cog in sorted(self.bot.cogs.items(), key=lambda item: self._cog_title(item[0], item[1]).lower()):
-            add_choice(self._cog_title(cog_name, cog), self._cog_title(cog_name, cog).lower())
+            title = self._cog_title(cog_name, cog)
+            add_choice(title, title.lower())
+            for alias in self._cog_info(cog_name).get("aliases", set()):
+                add_choice(str(alias), str(alias).lower())
 
         return choices[:25]
 

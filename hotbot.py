@@ -118,6 +118,18 @@ class HotBot(commands.Bot):
 
         return ordered
 
+    async def clear_global_slash_commands(self) -> list[str]:
+        """Remove old global slash commands from Discord.
+
+        v1.7+ is guild-scoped only. Older global commands can otherwise keep
+        appearing in public servers until Discord is explicitly told to remove
+        them.
+        """
+        existing = sorted(c.name for c in self.tree.get_commands(guild=None))
+        self.tree.clear_commands(guild=None)
+        await self.tree.sync(guild=None)
+        return existing
+
     async def sync_configured_guilds(self) -> dict[int, list[str]]:
         results: dict[int, list[str]] = {}
         for guild_id in all_guild_ids(self):
@@ -157,6 +169,12 @@ class HotBot(commands.Bot):
             return
 
         try:
+            cleared = await self.clear_global_slash_commands()
+            if cleared:
+                ok(f"Cleared old global command(s): {', '.join(cleared)}")
+            else:
+                ok("Global command list clear checked: none registered")
+
             results = await self.sync_configured_guilds()
             for guild_id, names in results.items():
                 ok(f"Synced {len(names)} command(s) to guild {guild_id}")

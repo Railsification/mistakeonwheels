@@ -238,6 +238,15 @@ class AdminCog(commands.Cog):
             return
 
         lines = []
+
+        clear_global = getattr(self.bot, "clear_global_slash_commands", None)
+        if callable(clear_global):
+            cleared = await clear_global()
+            if cleared:
+                lines.append("Cleared old global command(s): " + ", ".join(f"`/{name}`" for name in cleared))
+            else:
+                lines.append("Global command list clear checked: none registered.")
+
         for gid in targets:
             synced = await self.bot.tree.sync(guild=discord.Object(id=gid))
             names = ", ".join(sorted(c.name for c in synced))
