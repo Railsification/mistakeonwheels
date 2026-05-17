@@ -1,2 +1,2 @@
 BOT_NAME = "HotBot"
-BOT_VERSION = "1.7.12"
+BOT_VERSION = "1.7.13"

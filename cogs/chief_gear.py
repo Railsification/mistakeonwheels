@@ -60,6 +60,18 @@ SLOT_NAMES = {
 }
 SLOT_CHOICES = [app_commands.Choice(name=name, value=key) for key, name in SLOT_NAMES.items()]
 
+# Weekly Enhancement Material Exchange shop rates from WoS Chief Gear.
+# `max_per_week` is the visible weekly remaining cap for that exchange row.
+EXCHANGE_RULES = {
+    "polish_to_plans": {"from": "polish", "from_qty": 10, "to": "plans", "to_qty": 1, "max_per_week": 50},
+    "polish_to_alloy": {"from": "polish", "from_qty": 1, "to": "alloy", "to_qty": 50, "max_per_week": 1000},
+    "alloy_to_plans": {"from": "alloy", "from_qty": 1000, "to": "plans", "to_qty": 1, "max_per_week": 50},
+    "alloy_to_polish": {"from": "alloy", "from_qty": 200, "to": "polish", "to_qty": 1, "max_per_week": 500},
+    "plans_to_amber": {"from": "plans", "from_qty": 10, "to": "amber", "to_qty": 1, "max_per_week": 500},
+    "plans_to_polish": {"from": "plans", "from_qty": 1, "to": "polish", "to_qty": 3, "max_per_week": 500},
+    "plans_to_alloy": {"from": "plans", "from_qty": 1, "to": "alloy", "to_qty": 300, "max_per_week": 500},
+}
+
 DEFAULT_PROFILE = {
     "inventory": {"alloy": 0, "polish": 0, "plans": 0, "amber": 0},
     "slots": {slot: None for slot in SLOT_KEYS},
@@ -238,6 +250,57 @@ class ChiefGearCog(commands.Cog):
             return None
         return self.levels[next_order]["key"]
 
+    def _visible_click_cost_for_level(self, current_key: Optional[str]) -> dict[str, int]:
+        """Return the visible one-click cost from the selected gear panel.
+
+        WoS shows four enhancement clicks inside each table row/star. The table material
+        row is the full row cost, so the visible click cost is usually one quarter of
+        the next row's material cost. Used only to split OCR strings like `855` into
+        `85/5`; it is not shown as a planning result.
+        """
+        next_key = self._next_level_key(current_key)
+        if not next_key:
+            return {res: 0 for res in RESOURCE_KEYS}
+        row = self.level_by_key.get(next_key, {})
+        mats = row.get("materials", {}) if isinstance(row, dict) else {}
+        costs: dict[str, int] = {}
+        for res in RESOURCE_KEYS:
+            value = int(mats.get(res, 0) or 0)
+            costs[res] = int(round(value / 4)) if value else 0
+        return costs
+
+    def _normalise_inventory_value(self, res: str, raw: str, expected_cost: Optional[int] = None) -> tuple[int, int]:
+        """Parse one HAVE/COST OCR region.
+
+        Tesseract often drops the slash in `85/5` and returns `855`. If we know the
+        selected gear's visible click cost, split the OCR number by that suffix.
+        """
+        raw = raw or ""
+        match = re.search(r"(\d[\d,]*)\s*/\s*(\d[\d,]*)", raw)
+        if match:
+            return self._parse_int(match.group(1)), self._parse_int(match.group(2))
+
+        nums = re.findall(r"\d[\d,]*", raw)
+        if len(nums) >= 2:
+            return self._parse_int(nums[0]), self._parse_int(nums[1])
+        if not nums:
+            return 0, 0
+
+        digits = re.sub(r"\D", "", nums[0])
+        if expected_cost and expected_cost > 0:
+            suffix = str(int(expected_cost))
+            if digits.endswith(suffix) and len(digits) > len(suffix):
+                have = int(digits[:-len(suffix)] or "0")
+                return have, int(expected_cost)
+
+        # Amber is commonly tiny and `85/5` is often OCR'd as `855`.
+        if res == "amber" and len(digits) >= 3 and digits.endswith(("5", "10", "15", "20", "25", "40")):
+            for suffix in ("40", "25", "20", "15", "10", "5"):
+                if digits.endswith(suffix) and len(digits) > len(suffix):
+                    return int(digits[:-len(suffix)]), int(suffix)
+
+        return int(digits or 0), 0
+
     def _format_costs(self, costs: dict[str, int]) -> str:
         return " | ".join(f"{RESOURCE_NAMES[k]}: **{int(costs.get(k, 0)):,}**" for k in RESOURCE_KEYS)
 
@@ -322,7 +385,7 @@ class ChiefGearCog(commands.Cog):
                 pass
         return None, "\n".join(texts)
 
-    def _parse_resource_regions(self, pil_img) -> tuple[dict[str, int], dict[str, int], str]:
+    def _parse_resource_regions(self, pil_img, expected_cost: Optional[dict[str, int]] = None) -> tuple[dict[str, int], dict[str, int], str]:
         # Values are always shown as HAVE/COST under the four resource icons.
         # Fixed columns are much more reliable than OCRing the whole line at once.
         w, h = pil_img.size
@@ -340,17 +403,9 @@ class ChiefGearCog(commands.Cog):
             crop = pil_img.crop((int(w * x1), int(h * y1), int(w * x2), int(h * y2)))
             text = self._ocr_text(crop, numeric_only=True, psm=7)
             raw_parts.append(f"{res}:{text.strip()}")
-            match = re.search(r"(\d[\d,]*)\s*/\s*(\d[\d,]*)", text)
-            if match:
-                inventory[res] = self._parse_int(match.group(1))
-                selected_cost[res] = self._parse_int(match.group(2))
-                continue
-            nums = re.findall(r"\d[\d,]*", text)
-            if len(nums) >= 2:
-                inventory[res] = self._parse_int(nums[0])
-                selected_cost[res] = self._parse_int(nums[1])
-            elif len(nums) == 1:
-                inventory[res] = self._parse_int(nums[0])
+            have, cost = self._normalise_inventory_value(res, text, (expected_cost or {}).get(res))
+            inventory[res] = have
+            selected_cost[res] = cost
         return inventory, selected_cost, " | ".join(raw_parts)
 
     def _crop_slot_card(self, pil_img, slot: str):
@@ -532,34 +587,42 @@ class ChiefGearCog(commands.Cog):
         key = f"red_t{tier}_{stars}"
         return key if key in self.level_by_key else None
 
+    def _parse_card_for_slot(self, slot: str, card) -> ParsedSlotScan:
+        tier, raw_tier = self._ocr_tier_from_card(card)
+        stars = self._count_gear_stars(card)
+        level_key = self._level_key_from_visible_card(tier, stars)
+        notes: list[str] = []
+        if level_key is None:
+            notes.append("Could not confidently read tier/stars from the top gear tile.")
+        return ParsedSlotScan(slot=slot, tier=tier, stars=stars, level_key=level_key, raw_tier_text=raw_tier, notes=notes)
+
     def _parse_all_visible_slots(self, pil_img) -> dict[str, ParsedSlotScan]:
         parsed: dict[str, ParsedSlotScan] = {}
         detected_cards = self._detect_slot_cards(pil_img)
         for slot in SLOT_KEYS:
-            notes: list[str] = []
+            candidates: list[ParsedSlotScan] = []
             try:
-                card = detected_cards.get(slot) if detected_cards else self._crop_slot_card(pil_img, slot)
-                tier, raw_tier = self._ocr_tier_from_card(card)
-                stars = self._count_gear_stars(card)
-                level_key = self._level_key_from_visible_card(tier, stars)
-                if level_key is None:
-                    notes.append("Could not confidently read tier/stars from the top gear tile.")
+                if detected_cards and detected_cards.get(slot) is not None:
+                    candidates.append(self._parse_card_for_slot(slot, detected_cards[slot]))
+            except Exception:
+                pass
+            try:
+                candidates.append(self._parse_card_for_slot(slot, self._crop_slot_card(pil_img, slot)))
+            except Exception:
+                pass
+
+            good = [c for c in candidates if c.level_key]
+            if good:
+                # Prefer the read with the highest visible star count; fixed crops often keep star strips cleaner.
+                parsed[slot] = sorted(good, key=lambda c: (int(c.stars or 0), len(c.raw_tier_text or "")), reverse=True)[0]
+                parsed[slot].notes = []
+            elif candidates:
+                best = sorted(candidates, key=lambda c: (c.tier is not None, int(c.stars or 0)), reverse=True)[0]
+                parsed[slot] = best
+            else:
                 parsed[slot] = ParsedSlotScan(
-                    slot=slot,
-                    tier=tier,
-                    stars=stars,
-                    level_key=level_key,
-                    raw_tier_text=raw_tier,
-                    notes=notes,
-                )
-            except Exception as exc:
-                parsed[slot] = ParsedSlotScan(
-                    slot=slot,
-                    tier=None,
-                    stars=None,
-                    level_key=None,
-                    raw_tier_text="",
-                    notes=[f"Slot scan failed: {exc}"],
+                    slot=slot, tier=None, stars=None, level_key=None, raw_tier_text="",
+                    notes=["Slot scan failed."],
                 )
         return parsed
 
@@ -576,7 +639,8 @@ class ChiefGearCog(commands.Cog):
         else:
             notes.append("Could not OCR the selected gear power total.")
 
-        inventory, selected_cost, resource_text = self._parse_resource_regions(pil_img)
+        expected_click_cost = self._visible_click_cost_for_level(level_key) if level_key else None
+        inventory, selected_cost, resource_text = self._parse_resource_regions(pil_img, expected_click_cost)
         if not any(inventory.values()):
             # Last resort fallback.
             full_text = self._ocr_text(pil_img, psm=6)
@@ -629,7 +693,8 @@ class ChiefGearCog(commands.Cog):
                 "`/chief_gear scan image:<screenshot>` — scans all six visible gear slots + inventory\n"
                 "`/chief_gear view` — shows saved profile\n"
                 "`/chief_gear plan target:<level>` — materials needed to target\n"
-                "`/chief_gear recommend` — spends saved inventory on cheapest next upgrades"
+                "`/chief_gear recommend` — spends saved inventory until no more upgrades fit\n"
+                "`/chief_gear exchange_plan target:<level> weeks:2 convert_to_amber:false` — weekly exchange/shop conversion plan"
             ),
             inline=False,
         )
@@ -772,6 +837,96 @@ class ChiefGearCog(commands.Cog):
             embed.add_field(name="Levels" if idx == 0 else "Levels continued", value="\n".join(lines[idx:idx+15]), inline=False)
         await interaction.followup.send(embed=embed, ephemeral=True)
 
+    def _target_totals(self, profile: dict[str, Any], target_key: str, slot: Optional[str] = None):
+        slots = [slot] if slot else list(SLOT_KEYS)
+        totals = {res: 0 for res in RESOURCE_KEYS}
+        detail_lines: list[str] = []
+        skipped: list[str] = []
+        for slot_key in slots:
+            current_key = profile.get("slots", {}).get(slot_key)
+            if not current_key:
+                skipped.append(SLOT_NAMES[slot_key])
+                continue
+            costs = self._cost_between(current_key, target_key)
+            for res in RESOURCE_KEYS:
+                totals[res] += costs[res]
+            detail_lines.append(f"**{SLOT_NAMES[slot_key]}**: {self._level_label(current_key)} → {self._level_label(target_key)}")
+        return totals, detail_lines, skipped
+
+    def _apply_exchange(self, inv: dict[str, int], rule_key: str, count: int) -> str:
+        rule = EXCHANGE_RULES[rule_key]
+        src = rule["from"]
+        dst = rule["to"]
+        from_qty = int(rule["from_qty"])
+        to_qty = int(rule["to_qty"])
+        count = max(0, int(count))
+        inv[src] -= from_qty * count
+        inv[dst] += to_qty * count
+        return f"{count}x {from_qty:,} {RESOURCE_NAMES[src]} → {to_qty:,} {RESOURCE_NAMES[dst]}"
+
+    def _weekly_exchange_plan(self, inventory: dict[str, int], needed: dict[str, int], weeks: int, convert_to_amber: bool):
+        working = {res: int(inventory.get(res, 0) or 0) for res in RESOURCE_KEYS}
+        weeks = max(1, int(weeks))
+        week_lines: list[list[str]] = [[] for _ in range(weeks)]
+
+        def missing_now() -> dict[str, int]:
+            return {res: max(0, int(needed.get(res, 0)) - int(working.get(res, 0))) for res in RESOURCE_KEYS}
+
+        def surplus_now(res: str) -> int:
+            return max(0, int(working.get(res, 0)) - int(needed.get(res, 0)))
+
+        # Optional amber conversion. If disabled, amber is left for buying/events.
+        for week in range(weeks):
+            if not convert_to_amber:
+                break
+            miss = missing_now()
+            if miss["amber"] <= 0:
+                break
+            rule = EXCHANGE_RULES["plans_to_amber"]
+            max_by_cap = int(rule["max_per_week"])
+            max_by_need = miss["amber"]
+            max_by_surplus_plans = surplus_now("plans") // int(rule["from_qty"])
+            count = min(max_by_cap, max_by_need, max_by_surplus_plans)
+            if count > 0:
+                week_lines[week].append(self._apply_exchange(working, "plans_to_amber", count))
+
+        # Use true surplus resources only; do not convert material still needed for the target.
+        for week in range(weeks):
+            miss = missing_now()
+            # If polish is short and alloy is surplus, turn alloy into polish.
+            if miss["polish"] > 0 and surplus_now("alloy") >= EXCHANGE_RULES["alloy_to_polish"]["from_qty"]:
+                rule = EXCHANGE_RULES["alloy_to_polish"]
+                count = min(int(rule["max_per_week"]), miss["polish"], surplus_now("alloy") // int(rule["from_qty"]))
+                if count > 0:
+                    week_lines[week].append(self._apply_exchange(working, "alloy_to_polish", count))
+
+            miss = missing_now()
+            # If alloy is short and polish is surplus, turn polish into alloy.
+            if miss["alloy"] > 0 and surplus_now("polish") >= EXCHANGE_RULES["polish_to_alloy"]["from_qty"]:
+                rule = EXCHANGE_RULES["polish_to_alloy"]
+                count = min(int(rule["max_per_week"]), (miss["alloy"] + 49) // 50, surplus_now("polish") // int(rule["from_qty"]))
+                if count > 0:
+                    week_lines[week].append(self._apply_exchange(working, "polish_to_alloy", count))
+
+            miss = missing_now()
+            # Spend surplus design plans on the bigger remaining shortage.
+            for rule_key in ("plans_to_polish", "plans_to_alloy"):
+                if surplus_now("plans") <= 0:
+                    break
+                miss = missing_now()
+                if rule_key == "plans_to_polish" and miss["polish"] <= 0:
+                    continue
+                if rule_key == "plans_to_alloy" and miss["alloy"] <= 0:
+                    continue
+                rule = EXCHANGE_RULES[rule_key]
+                dst = rule["to"]
+                per = int(rule["to_qty"])
+                count = min(int(rule["max_per_week"]), surplus_now("plans"), (miss[dst] + per - 1) // per)
+                if count > 0:
+                    week_lines[week].append(self._apply_exchange(working, rule_key, count))
+
+        return working, week_lines, missing_now()
+
     @chief_gear.command(name="plan", description="Calculate materials needed from saved level(s) to a target.")
     @app_commands.describe(target="Target level", slot="Optional: calculate one slot only")
     @app_commands.choices(slot=SLOT_CHOICES)
@@ -819,8 +974,8 @@ class ChiefGearCog(commands.Cog):
         await interaction.followup.send(embed=embed, ephemeral=True)
 
     @chief_gear.command(name="recommend", description="Recommend cheapest next upgrades using your saved inventory.")
-    @app_commands.describe(max_steps="Maximum upgrades to show")
-    async def recommend_cmd(self, interaction: discord.Interaction, max_steps: app_commands.Range[int, 1, 25] = 10):
+    @app_commands.describe(max_steps="Safety cap only. Default tries to spend until no more upgrades fit.")
+    async def recommend_cmd(self, interaction: discord.Interaction, max_steps: app_commands.Range[int, 1, 100] = 100):
         log_cmd("chief_gear recommend", interaction)
         if not await self._ensure_allowed(interaction):
             return
@@ -861,11 +1016,75 @@ class ChiefGearCog(commands.Cog):
             embed.description = "No affordable next upgrades from the saved profile/inventory."
         else:
             lines = []
-            for idx, (slot_key, old_key, next_key, cost) in enumerate(steps, start=1):
+            for idx, (slot_key, old_key, next_key, cost) in enumerate(steps[:20], start=1):
                 lines.append(f"**{idx}. {SLOT_NAMES[slot_key]}**: {self._level_label(old_key)} → {self._level_label(next_key)}")
+            if len(steps) > 20:
+                lines.append(f"...and {len(steps) - 20} more affordable upgrades.")
             embed.add_field(name="Upgrade order", value="\n".join(lines)[:1000], inline=False)
             embed.add_field(name="Inventory left after plan", value=self._format_costs(inventory), inline=False)
         await interaction.followup.send(embed=embed, ephemeral=True)
+
+    @chief_gear.command(name="exchange_plan", description="Plan weekly material exchanges toward a Chief Gear target.")
+    @app_commands.describe(
+        target="Target level",
+        weeks="How many weekly exchange resets before you spend materials",
+        convert_to_amber="True = convert surplus plans to amber. False = leave amber to buy/earn.",
+    )
+    async def exchange_plan_cmd(
+        self,
+        interaction: discord.Interaction,
+        target: str,
+        weeks: app_commands.Range[int, 1, 8] = 2,
+        convert_to_amber: bool = False,
+    ):
+        log_cmd("chief_gear exchange_plan", interaction)
+        if not await self._ensure_allowed(interaction):
+            return
+        await ensure_deferred(interaction, ephemeral=True)
+
+        target_key = self._resolve_level_key(target)
+        if not target_key:
+            await interaction.followup.send(f"Unknown target `{target}`. Try `/chief_gear levels`.", ephemeral=True)
+            return
+
+        profile = self._get_profile(int(interaction.guild_id), int(interaction.user.id))
+        needed, detail_lines, skipped = self._target_totals(profile, target_key)
+        inv = {res: int(profile.get("inventory", {}).get(res, 0) or 0) for res in RESOURCE_KEYS}
+        before_missing = self._missing_costs(inv, needed)
+        after_inv, week_lines, after_missing = self._weekly_exchange_plan(inv, needed, int(weeks), bool(convert_to_amber))
+
+        embed = self._base_embed("Chief Gear Weekly Exchange Plan")
+        embed.add_field(name="Target", value=f"{self._level_label(target_key)} across **{len(detail_lines)}** saved slots", inline=False)
+        if skipped:
+            embed.add_field(name="Skipped / not set", value=", ".join(skipped), inline=False)
+        embed.add_field(name="Needed", value=self._format_costs(needed), inline=False)
+        embed.add_field(name="You have", value=self._format_costs(inv), inline=False)
+        embed.add_field(name="Missing before exchange", value=self._format_costs(before_missing), inline=False)
+        embed.add_field(
+            name="Amber mode",
+            value=(
+                "Convert surplus Design Plans into Amber where possible."
+                if convert_to_amber
+                else "Do **not** convert Design Plans into Amber. Amber shortfall stays as buy/earn."
+            ),
+            inline=False,
+        )
+
+        for idx, lines in enumerate(week_lines, start=1):
+            embed.add_field(
+                name=f"Week {idx} exchange",
+                value="\n".join(lines) if lines else "No safe exchange using only surplus materials.",
+                inline=False,
+            )
+
+        embed.add_field(name="After planned exchanges", value=self._format_costs(after_inv), inline=False)
+        embed.add_field(name="Still missing after exchange", value=self._format_costs(after_missing), inline=False)
+        embed.set_footer(text="Exchange plan only spends surplus resources so it will not break the target plan.")
+        await interaction.followup.send(embed=embed, ephemeral=True)
+
+    @exchange_plan_cmd.autocomplete("target")
+    async def exchange_plan_target_autocomplete(self, interaction: discord.Interaction, current: str):
+        return await self._level_autocomplete(interaction, current)
 
     # ---------- autocomplete / resolve ----------
 
