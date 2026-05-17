@@ -275,6 +275,8 @@ class ChiefGearCog(commands.Cog):
         return int(re.sub(r"[^0-9]", "", value or "") or 0)
 
     def _parse_inventory_line(self, text: str) -> tuple[dict[str, int], dict[str, int]]:
+        # Legacy fallback only. The main scanner uses fixed resource regions so OCR cannot join
+        # `17,50011,449` into one fake number.
         pairs = re.findall(r"(\d[\d,]*)\s*/\s*(\d[\d,]*)", text)
         inventory = {res: 0 for res in RESOURCE_KEYS}
         next_cost = {res: 0 for res in RESOURCE_KEYS}
@@ -284,14 +286,12 @@ class ChiefGearCog(commands.Cog):
         return inventory, next_cost
 
     def _parse_power(self, text: str) -> Optional[int]:
-        # Prefer comma-separated six/seven digit numbers near the current power line.
         candidates = []
         for match in re.finditer(r"\d{1,3}(?:,\d{3})+", text):
             value = self._parse_int(match.group(0))
             if 200000 <= value <= 6000000:
                 candidates.append(value)
         if candidates:
-            # Current power is normally the first big number OCR sees; ignore inventory later by using full-text order.
             return candidates[0]
 
         for match in re.finditer(r"\b\d{6,7}\b", text):
@@ -300,17 +300,145 @@ class ChiefGearCog(commands.Cog):
                 return value
         return None
 
+    def _parse_power_from_region(self, pil_img) -> tuple[Optional[int], str]:
+        # Current selected gear power sits below the T/progress bar and above Stat Bonuses.
+        # Crop it directly so inventory values do not get mistaken as power.
+        w, h = pil_img.size
+        crops = [
+            (0.24, 0.535, 0.84, 0.595),
+            (0.20, 0.520, 0.86, 0.610),
+        ]
+        texts: list[str] = []
+        for x1, y1, x2, y2 in crops:
+            try:
+                crop = pil_img.crop((int(w * x1), int(h * y1), int(w * x2), int(h * y2)))
+                text = self._ocr_text(crop, numeric_only=True, psm=7)
+                if text.strip():
+                    texts.append(text.strip())
+                    power = self._parse_power(text)
+                    if power:
+                        return power, "\n".join(texts)
+            except Exception:
+                pass
+        return None, "\n".join(texts)
+
+    def _parse_resource_regions(self, pil_img) -> tuple[dict[str, int], dict[str, int], str]:
+        # Values are always shown as HAVE/COST under the four resource icons.
+        # Fixed columns are much more reliable than OCRing the whole line at once.
+        w, h = pil_img.size
+        regions = {
+            "alloy": (0.03, 0.815, 0.27, 0.855),
+            "polish": (0.27, 0.815, 0.50, 0.855),
+            "plans": (0.52, 0.815, 0.75, 0.855),
+            "amber": (0.75, 0.815, 0.98, 0.855),
+        }
+        inventory = {res: 0 for res in RESOURCE_KEYS}
+        selected_cost = {res: 0 for res in RESOURCE_KEYS}
+        raw_parts: list[str] = []
+        for res in RESOURCE_KEYS:
+            x1, y1, x2, y2 = regions[res]
+            crop = pil_img.crop((int(w * x1), int(h * y1), int(w * x2), int(h * y2)))
+            text = self._ocr_text(crop, numeric_only=True, psm=7)
+            raw_parts.append(f"{res}:{text.strip()}")
+            match = re.search(r"(\d[\d,]*)\s*/\s*(\d[\d,]*)", text)
+            if match:
+                inventory[res] = self._parse_int(match.group(1))
+                selected_cost[res] = self._parse_int(match.group(2))
+                continue
+            nums = re.findall(r"\d[\d,]*", text)
+            if len(nums) >= 2:
+                inventory[res] = self._parse_int(nums[0])
+                selected_cost[res] = self._parse_int(nums[1])
+            elif len(nums) == 1:
+                inventory[res] = self._parse_int(nums[0])
+        return inventory, selected_cost, " | ".join(raw_parts)
+
     def _crop_slot_card(self, pil_img, slot: str):
         w, h = pil_img.size
         x1, y1, x2, y2 = self.SLOT_CARD_REGIONS[slot]
         return pil_img.crop((int(w * x1), int(h * y1), int(w * x2), int(h * y2)))
 
+    def _detect_slot_cards(self, pil_img) -> dict[str, Any]:
+        """Detect the six visible gear tiles by their red/pink card background."""
+        if cv2 is None or np is None:
+            return {}
+
+        arr = np.array(pil_img.convert("RGB"))
+        h, w = arr.shape[:2]
+        hsv = cv2.cvtColor(arr, cv2.COLOR_RGB2HSV)
+        mask1 = cv2.inRange(hsv, np.array([0, 45, 80]), np.array([14, 255, 255]))
+        mask2 = cv2.inRange(hsv, np.array([158, 45, 80]), np.array([179, 255, 255]))
+        mask = mask1 | mask2
+        mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, np.ones((5, 5), np.uint8), iterations=2)
+        contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+
+        boxes: list[tuple[int, int, int, int]] = []
+        for contour in contours:
+            x, y, bw, bh = cv2.boundingRect(contour)
+            area = cv2.contourArea(contour)
+            cx = x + bw / 2
+            if not (0.08 * w <= bw <= 0.20 * w):
+                continue
+            if not (0.055 * h <= bh <= 0.105 * h):
+                continue
+            if not (0.10 * h <= y <= 0.46 * h):
+                continue
+            if 0.34 * w <= cx <= 0.66 * w:
+                # central selected gear icon, not one of the six equipment tiles
+                continue
+            if area < 0.0035 * w * h:
+                continue
+            boxes.append((x, y, bw, bh))
+
+        left = sorted([b for b in boxes if b[0] + b[2] / 2 < w / 2], key=lambda b: b[1])[:3]
+        right = sorted([b for b in boxes if b[0] + b[2] / 2 >= w / 2], key=lambda b: b[1])[:3]
+        if len(left) < 3 or len(right) < 3:
+            return {}
+
+        mapping = {
+            "goggles": left[0],
+            "chest": left[1],
+            "ring": left[2],
+            "watch": right[0],
+            "pants": right[1],
+            "cane": right[2],
+        }
+        cards = {}
+        pad_x = int(w * 0.006)
+        pad_y = int(h * 0.004)
+        for slot, (x, y, bw, bh) in mapping.items():
+            # Bottom tiles can include the charm gems below the gear card. Keep the red card square only.
+            card_h = min(bh, int(bw * 1.07))
+            cards[slot] = pil_img.crop((
+                max(0, x - pad_x),
+                max(0, y - pad_y),
+                min(w, x + bw + pad_x),
+                min(h, y + card_h + pad_y),
+            ))
+        return cards
+
     def _yellow_mask(self, rgb_arr):
         if cv2 is None or np is None:
             raise RuntimeError("opencv/numpy is not installed.")
         hsv = cv2.cvtColor(rgb_arr, cv2.COLOR_RGB2HSV)
-        # WoS tier labels and red-gear stars are saturated yellow/gold.
-        return cv2.inRange(hsv, np.array([12, 70, 110]), np.array([48, 255, 255]))
+        return cv2.inRange(hsv, np.array([12, 60, 95]), np.array([50, 255, 255]))
+
+    def _tier_candidate_from_text(self, text: str) -> Optional[int]:
+        cleaned = (text or "").upper()
+        cleaned = cleaned.replace("I", "1").replace("L", "1").replace("|", "1")
+        cleaned = re.sub(r"[^T1234]", "", cleaned)
+        if not cleaned:
+            return None
+        idx = cleaned.find("T")
+        if idx >= 0:
+            for ch in cleaned[idx + 1:]:
+                if ch in "1234":
+                    return int(ch)
+            return None
+        digits = [int(ch) for ch in cleaned if ch in "1234"]
+        if digits:
+            return digits[0]
+        return None
 
     def _ocr_tier_from_card(self, card_img) -> tuple[Optional[int], str]:
         if pytesseract is None or cv2 is None or np is None:
@@ -318,33 +446,48 @@ class ChiefGearCog(commands.Cog):
 
         arr = np.array(card_img.convert("RGB"))
         ch, cw = arr.shape[:2]
-        label = arr[0:int(ch * 0.34), 0:int(cw * 0.52)]
-        big = cv2.resize(label, None, fx=6, fy=6, interpolation=cv2.INTER_CUBIC)
-        mask = self._yellow_mask(big)
-        mask = cv2.dilate(mask, np.ones((2, 2), np.uint8), iterations=1)
-
-        texts: list[str] = []
-        for psm in (7, 8, 10, 13):
-            try:
-                text = pytesseract.image_to_string(
-                    mask,
-                    config=f"--psm {psm} -c tessedit_char_whitelist=Tt1234Il|",
-                ) or ""
-                if text.strip():
-                    texts.append(text.strip())
-            except Exception:
-                pass
-
-        raw = " ".join(texts).upper()
-        cleaned = raw.replace(" ", "").replace("\n", "")
-        cleaned = cleaned.replace("I", "1").replace("L", "1").replace("|", "1")
-
-        # Prefer explicit digits. Tesseract sometimes reads T2 as 12, and T1 as TT/T.
-        for digit in ("4", "3", "2", "1"):
-            if digit in cleaned:
-                return int(digit), raw
-        if "T" in cleaned:
-            return 1, raw
+        crop_defs = [
+            (0.00, 0.00, 0.55, 0.33),
+            (0.00, 0.00, 0.48, 0.28),
+            (0.00, 0.00, 0.62, 0.36),
+        ]
+        raw_texts: list[str] = []
+        votes: list[int] = []
+        for x1, y1, x2, y2 in crop_defs:
+            crop = arr[int(ch * y1):int(ch * y2), int(cw * x1):int(cw * x2)]
+            if crop.size == 0:
+                continue
+            for scale in (6, 8):
+                big = cv2.resize(crop, None, fx=scale, fy=scale, interpolation=cv2.INTER_CUBIC)
+                inputs = [("rgb", big)]
+                try:
+                    mask = self._yellow_mask(big)
+                    mask = cv2.dilate(mask, np.ones((2, 2), np.uint8), iterations=1)
+                    inputs.append(("mask", 255 - mask))
+                except Exception:
+                    pass
+                for _, ocr_img in inputs:
+                    for psm in (7, 8, 13):
+                        try:
+                            text = pytesseract.image_to_string(
+                                ocr_img,
+                                config=f"--psm {psm} -c tessedit_char_whitelist=Tt1234Il|",
+                            ) or ""
+                        except Exception:
+                            continue
+                        text = text.strip()
+                        if not text:
+                            continue
+                        raw_texts.append(text)
+                        candidate = self._tier_candidate_from_text(text)
+                        if candidate is not None:
+                            votes.append(candidate)
+        raw = " ".join(raw_texts)
+        if votes:
+            # Most common wins. If there is a tie, lower tier wins because OCR often reads stars as extra 3s.
+            counts = {tier: votes.count(tier) for tier in set(votes)}
+            tier = sorted(counts.items(), key=lambda item: (-item[1], item[0]))[0][0]
+            return int(tier), raw
         return None, raw
 
     def _count_gear_stars(self, card_img) -> int:
@@ -354,47 +497,48 @@ class ChiefGearCog(commands.Cog):
         ch, cw = arr.shape[:2]
         mask = self._yellow_mask(arr)
 
-        # Real gear stars sit vertically on the left side of the gear tile.
-        # This removes the T label at the top and the charm icons under the card.
-        mask[:int(ch * 0.25), :] = 0
-        mask[:, int(cw * 0.45):] = 0
-        mask[int(ch * 0.86):, :] = 0
+        # Yellow gear stars sit down the far-left edge inside the card.
+        # Ignore the T label, charm gems under the card, and yellow gear artwork.
+        mask[:int(ch * 0.29), :] = 0
+        mask[:, int(cw * 0.37):] = 0
+        mask[int(ch * 0.88):, :] = 0
+        mask = cv2.morphologyEx(mask, cv2.MORPH_OPEN, np.ones((2, 2), np.uint8), iterations=1)
 
         contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-        centers: list[tuple[int, int]] = []
+        centers: list[int] = []
         for contour in contours:
-            x, y, w, h = cv2.boundingRect(contour)
+            x, y, bw, bh = cv2.boundingRect(contour)
             area = cv2.contourArea(contour)
-            if not (0.12 * cw <= w <= 0.32 * cw):
+            ratio = bw / max(1, bh)
+            if not (12 <= bw <= 45 and 12 <= bh <= 45):
                 continue
-            if not (0.12 * ch <= h <= 0.32 * ch):
+            if not (0.55 <= ratio <= 1.65):
                 continue
-            if area < 0.010 * cw * ch:
+            if area < 150:
                 continue
-            centers.append((x + w // 2, y + h // 2))
+            if x > int(cw * 0.14):
+                continue
+            centers.append(y + bh // 2)
 
-        # Merge broken/star contours by vertical position.
         merged: list[int] = []
-        for _, cy in sorted(centers, key=lambda item: item[1]):
-            if not merged or abs(cy - merged[-1]) > max(8, int(ch * 0.12)):
+        for cy in sorted(centers):
+            if not merged or abs(cy - merged[-1]) > int(ch * 0.15):
                 merged.append(cy)
         return max(0, min(3, len(merged)))
 
     def _level_key_from_visible_card(self, tier: Optional[int], stars: int) -> Optional[str]:
         if tier is None:
             return None
-        if tier <= 0:
-            key = f"red_{stars}"
-        else:
-            key = f"red_t{tier}_{stars}"
+        key = f"red_t{tier}_{stars}"
         return key if key in self.level_by_key else None
 
     def _parse_all_visible_slots(self, pil_img) -> dict[str, ParsedSlotScan]:
         parsed: dict[str, ParsedSlotScan] = {}
+        detected_cards = self._detect_slot_cards(pil_img)
         for slot in SLOT_KEYS:
             notes: list[str] = []
             try:
-                card = self._crop_slot_card(pil_img, slot)
+                card = detected_cards.get(slot) if detected_cards else self._crop_slot_card(pil_img, slot)
                 tier, raw_tier = self._ocr_tier_from_card(card)
                 stars = self._count_gear_stars(card)
                 level_key = self._level_key_from_visible_card(tier, stars)
@@ -423,35 +567,34 @@ class ChiefGearCog(commands.Cog):
         w, h = pil_img.size
         notes: list[str] = []
 
-        full_text = self._ocr_text(pil_img, psm=6)
-        power = self._parse_power(full_text)
+        power, power_text = self._parse_power_from_region(pil_img)
         level_key = None
         if power is not None:
             level_key, diff = self._find_nearest_power_level(power)
             if level_key is None:
                 notes.append(f"Power `{power:,}` did not match a known table row. Closest diff: {diff:,}.")
         else:
-            notes.append("Could not OCR the current power total.")
+            notes.append("Could not OCR the selected gear power total.")
 
-        # Resource counts are in the lower area of the Chief Gear screen.
-        resource_crop = pil_img.crop((0, int(h * 0.78), w, int(h * 0.86)))
-        resource_text = self._ocr_text(resource_crop, numeric_only=True, psm=6)
-        inventory, next_cost = self._parse_inventory_line(resource_text)
-
+        inventory, selected_cost, resource_text = self._parse_resource_regions(pil_img)
         if not any(inventory.values()):
-            # Fallback: full OCR sometimes captures the line better.
+            # Last resort fallback.
+            full_text = self._ocr_text(pil_img, psm=6)
             inv2, cost2 = self._parse_inventory_line(full_text)
             if any(inv2.values()):
-                inventory, next_cost = inv2, cost2
+                inventory, selected_cost = inv2, cost2
             else:
                 notes.append("Could not OCR inventory counts from the screenshot.")
+                full_text = ""
+        else:
+            full_text = ""
 
         return ParsedScan(
             level_key=level_key,
             power_total=power,
             inventory=inventory,
-            next_cost=next_cost,
-            raw_text=(full_text + "\n" + resource_text).strip(),
+            next_cost=selected_cost,
+            raw_text=(power_text + "\n" + resource_text + "\n" + full_text).strip(),
             confidence_notes=notes,
         )
 
@@ -573,8 +716,6 @@ class ChiefGearCog(commands.Cog):
         embed.add_field(name="Detected power", value=f"{parsed.power_total:,}" if parsed.power_total else "not read", inline=True)
         embed.add_field(name="Visible gear levels", value="\n".join(slot_lines)[:1000], inline=False)
         embed.add_field(name="Inventory", value=self._format_costs(parsed.inventory), inline=False)
-        if any(parsed.next_cost.values()):
-            embed.add_field(name="Visible next-click cost", value=self._format_costs(parsed.next_cost), inline=False)
         all_notes = list(parsed.confidence_notes) + note_lines
         if all_notes:
             embed.add_field(name="Scan notes", value="\n".join(all_notes)[:1000], inline=False)
