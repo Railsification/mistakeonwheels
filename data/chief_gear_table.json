@@ -1,0 +1,748 @@
+{
+  "schema_version": 1,
+  "notes": "Materials are milestone totals from the Chief Gear table screenshots.",
+  "resources": {
+    "alloy": "Hardened Alloy",
+    "polish": "Polishing Solution",
+    "plans": "Design Plans",
+    "amber": "Amber"
+  },
+  "levels": [
+    {
+      "key": "green_0",
+      "display": "Green (Uncommon) 0",
+      "tier": "Green (Uncommon)",
+      "stars": 0,
+      "order": 0,
+      "materials": {
+        "alloy": 1500,
+        "polish": 15,
+        "plans": 0,
+        "amber": 0
+      },
+      "stat_total_percent": 9.35,
+      "power_total": 224400,
+      "troop_deployment_capacity": null
+    },
+    {
+      "key": "green_1",
+      "display": "Green (Uncommon) 1",
+      "tier": "Green (Uncommon)",
+      "stars": 1,
+      "order": 1,
+      "materials": {
+        "alloy": 3800,
+        "polish": 40,
+        "plans": 0,
+        "amber": 0
+      },
+      "stat_total_percent": 12.75,
+      "power_total": 306000,
+      "troop_deployment_capacity": null
+    },
+    {
+      "key": "blue_0",
+      "display": "Blue (Rare) 0",
+      "tier": "Blue (Rare)",
+      "stars": 0,
+      "order": 2,
+      "materials": {
+        "alloy": 7000,
+        "polish": 70,
+        "plans": 0,
+        "amber": 0
+      },
+      "stat_total_percent": 17.0,
+      "power_total": 408000,
+      "troop_deployment_capacity": null
+    },
+    {
+      "key": "blue_1",
+      "display": "Blue (Rare) 1",
+      "tier": "Blue (Rare)",
+      "stars": 1,
+      "order": 3,
+      "materials": {
+        "alloy": 9700,
+        "polish": 95,
+        "plans": 0,
+        "amber": 0
+      },
+      "stat_total_percent": 21.25,
+      "power_total": 510000,
+      "troop_deployment_capacity": null
+    },
+    {
+      "key": "blue_2",
+      "display": "Blue (Rare) 2",
+      "tier": "Blue (Rare)",
+      "stars": 2,
+      "order": 4,
+      "materials": {
+        "alloy": 0,
+        "polish": 0,
+        "plans": 45,
+        "amber": 0
+      },
+      "stat_total_percent": 25.5,
+      "power_total": 612000,
+      "troop_deployment_capacity": null
+    },
+    {
+      "key": "blue_3",
+      "display": "Blue (Rare) 3",
+      "tier": "Blue (Rare)",
+      "stars": 3,
+      "order": 5,
+      "materials": {
+        "alloy": 0,
+        "polish": 0,
+        "plans": 50,
+        "amber": 0
+      },
+      "stat_total_percent": 29.75,
+      "power_total": 714000,
+      "troop_deployment_capacity": null
+    },
+    {
+      "key": "purple_0",
+      "display": "Purple (Epic) 0",
+      "tier": "Purple (Epic)",
+      "stars": 0,
+      "order": 6,
+      "materials": {
+        "alloy": 0,
+        "polish": 0,
+        "plans": 60,
+        "amber": 0
+      },
+      "stat_total_percent": 34.0,
+      "power_total": 816000,
+      "troop_deployment_capacity": null
+    },
+    {
+      "key": "purple_1",
+      "display": "Purple (Epic) 1",
+      "tier": "Purple (Epic)",
+      "stars": 1,
+      "order": 7,
+      "materials": {
+        "alloy": 0,
+        "polish": 0,
+        "plans": 70,
+        "amber": 0
+      },
+      "stat_total_percent": 36.89,
+      "power_total": 885360,
+      "troop_deployment_capacity": null
+    },
+    {
+      "key": "purple_2",
+      "display": "Purple (Epic) 2",
+      "tier": "Purple (Epic)",
+      "stars": 2,
+      "order": 8,
+      "materials": {
+        "alloy": 6500,
+        "polish": 65,
+        "plans": 40,
+        "amber": 0
+      },
+      "stat_total_percent": 39.78,
+      "power_total": 954720,
+      "troop_deployment_capacity": null
+    },
+    {
+      "key": "purple_3",
+      "display": "Purple (Epic) 3",
+      "tier": "Purple (Epic)",
+      "stars": 3,
+      "order": 9,
+      "materials": {
+        "alloy": 8000,
+        "polish": 80,
+        "plans": 50,
+        "amber": 0
+      },
+      "stat_total_percent": 42.67,
+      "power_total": 1024080,
+      "troop_deployment_capacity": null
+    },
+    {
+      "key": "purple_t1_0",
+      "display": "Purple (Epic) T1 0",
+      "tier": "Purple (Epic) T1",
+      "stars": 0,
+      "order": 10,
+      "materials": {
+        "alloy": 10000,
+        "polish": 95,
+        "plans": 60,
+        "amber": 0
+      },
+      "stat_total_percent": 45.56,
+      "power_total": 1093440,
+      "troop_deployment_capacity": null
+    },
+    {
+      "key": "purple_t1_1",
+      "display": "Purple (Epic) T1 1",
+      "tier": "Purple (Epic) T1",
+      "stars": 1,
+      "order": 11,
+      "materials": {
+        "alloy": 11000,
+        "polish": 110,
+        "plans": 70,
+        "amber": 0
+      },
+      "stat_total_percent": 48.45,
+      "power_total": 1162800,
+      "troop_deployment_capacity": null
+    },
+    {
+      "key": "purple_t1_2",
+      "display": "Purple (Epic) T1 2",
+      "tier": "Purple (Epic) T1",
+      "stars": 2,
+      "order": 12,
+      "materials": {
+        "alloy": 13000,
+        "polish": 130,
+        "plans": 85,
+        "amber": 0
+      },
+      "stat_total_percent": 51.34,
+      "power_total": 1232160,
+      "troop_deployment_capacity": null
+    },
+    {
+      "key": "purple_t1_3",
+      "display": "Purple (Epic) T1 3",
+      "tier": "Purple (Epic) T1",
+      "stars": 3,
+      "order": 13,
+      "materials": {
+        "alloy": 15000,
+        "polish": 160,
+        "plans": 100,
+        "amber": 0
+      },
+      "stat_total_percent": 54.23,
+      "power_total": 1301520,
+      "troop_deployment_capacity": null
+    },
+    {
+      "key": "gold_0",
+      "display": "Gold (Mythic) 0",
+      "tier": "Gold (Mythic)",
+      "stars": 0,
+      "order": 14,
+      "materials": {
+        "alloy": 22000,
+        "polish": 220,
+        "plans": 40,
+        "amber": 0
+      },
+      "stat_total_percent": 56.78,
+      "power_total": 1362720,
+      "troop_deployment_capacity": null
+    },
+    {
+      "key": "gold_1",
+      "display": "Gold (Mythic) 1",
+      "tier": "Gold (Mythic)",
+      "stars": 1,
+      "order": 15,
+      "materials": {
+        "alloy": 23000,
+        "polish": 230,
+        "plans": 40,
+        "amber": 0
+      },
+      "stat_total_percent": 59.33,
+      "power_total": 1423920,
+      "troop_deployment_capacity": null
+    },
+    {
+      "key": "gold_2",
+      "display": "Gold (Mythic) 2",
+      "tier": "Gold (Mythic)",
+      "stars": 2,
+      "order": 16,
+      "materials": {
+        "alloy": 25000,
+        "polish": 250,
+        "plans": 45,
+        "amber": 0
+      },
+      "stat_total_percent": 61.88,
+      "power_total": 1485120,
+      "troop_deployment_capacity": null
+    },
+    {
+      "key": "gold_3",
+      "display": "Gold (Mythic) 3",
+      "tier": "Gold (Mythic)",
+      "stars": 3,
+      "order": 17,
+      "materials": {
+        "alloy": 26000,
+        "polish": 260,
+        "plans": 45,
+        "amber": 0
+      },
+      "stat_total_percent": 64.43,
+      "power_total": 1546320,
+      "troop_deployment_capacity": null
+    },
+    {
+      "key": "gold_t1_0",
+      "display": "Gold (Mythic) T1 0",
+      "tier": "Gold (Mythic) T1",
+      "stars": 0,
+      "order": 18,
+      "materials": {
+        "alloy": 28000,
+        "polish": 280,
+        "plans": 45,
+        "amber": 0
+      },
+      "stat_total_percent": 66.98,
+      "power_total": 1607520,
+      "troop_deployment_capacity": null
+    },
+    {
+      "key": "gold_t1_1",
+      "display": "Gold (Mythic) T1 1",
+      "tier": "Gold (Mythic) T1",
+      "stars": 1,
+      "order": 19,
+      "materials": {
+        "alloy": 30000,
+        "polish": 300,
+        "plans": 55,
+        "amber": 0
+      },
+      "stat_total_percent": 69.53,
+      "power_total": 1668720,
+      "troop_deployment_capacity": null
+    },
+    {
+      "key": "gold_t1_2",
+      "display": "Gold (Mythic) T1 2",
+      "tier": "Gold (Mythic) T1",
+      "stars": 2,
+      "order": 20,
+      "materials": {
+        "alloy": 32000,
+        "polish": 320,
+        "plans": 55,
+        "amber": 0
+      },
+      "stat_total_percent": 72.08,
+      "power_total": 1729920,
+      "troop_deployment_capacity": null
+    },
+    {
+      "key": "gold_t1_3",
+      "display": "Gold (Mythic) T1 3",
+      "tier": "Gold (Mythic) T1",
+      "stars": 3,
+      "order": 21,
+      "materials": {
+        "alloy": 35000,
+        "polish": 340,
+        "plans": 55,
+        "amber": 0
+      },
+      "stat_total_percent": 74.63,
+      "power_total": 1791120,
+      "troop_deployment_capacity": null
+    },
+    {
+      "key": "gold_t2_0",
+      "display": "Gold (Mythic) T2 0",
+      "tier": "Gold (Mythic) T2",
+      "stars": 0,
+      "order": 22,
+      "materials": {
+        "alloy": 38000,
+        "polish": 360,
+        "plans": 55,
+        "amber": 0
+      },
+      "stat_total_percent": 77.18,
+      "power_total": 1852320,
+      "troop_deployment_capacity": null
+    },
+    {
+      "key": "gold_t2_1",
+      "display": "Gold (Mythic) T2 1",
+      "tier": "Gold (Mythic) T2",
+      "stars": 1,
+      "order": 23,
+      "materials": {
+        "alloy": 43000,
+        "polish": 430,
+        "plans": 75,
+        "amber": 0
+      },
+      "stat_total_percent": 79.73,
+      "power_total": 1913520,
+      "troop_deployment_capacity": null
+    },
+    {
+      "key": "gold_t2_2",
+      "display": "Gold (Mythic) T2 2",
+      "tier": "Gold (Mythic) T2",
+      "stars": 2,
+      "order": 24,
+      "materials": {
+        "alloy": 45000,
+        "polish": 460,
+        "plans": 80,
+        "amber": 0
+      },
+      "stat_total_percent": 82.28,
+      "power_total": 1974720,
+      "troop_deployment_capacity": null
+    },
+    {
+      "key": "gold_t2_3",
+      "display": "Gold (Mythic) T2 3",
+      "tier": "Gold (Mythic) T2",
+      "stars": 3,
+      "order": 25,
+      "materials": {
+        "alloy": 48000,
+        "polish": 500,
+        "plans": 85,
+        "amber": 0
+      },
+      "stat_total_percent": 85.0,
+      "power_total": 2040000,
+      "troop_deployment_capacity": null
+    },
+    {
+      "key": "red_0",
+      "display": "Red (Legendary) 0",
+      "tier": "Red (Legendary)",
+      "stars": 0,
+      "order": 26,
+      "materials": {
+        "alloy": 50000,
+        "polish": 530,
+        "plans": 85,
+        "amber": 10
+      },
+      "stat_total_percent": 89.25,
+      "power_total": 2142000,
+      "troop_deployment_capacity": 40
+    },
+    {
+      "key": "red_1",
+      "display": "Red (Legendary) 1",
+      "tier": "Red (Legendary)",
+      "stars": 1,
+      "order": 27,
+      "materials": {
+        "alloy": 52000,
+        "polish": 560,
+        "plans": 90,
+        "amber": 10
+      },
+      "stat_total_percent": 93.5,
+      "power_total": 2244000,
+      "troop_deployment_capacity": 80
+    },
+    {
+      "key": "red_2",
+      "display": "Red (Legendary) 2",
+      "tier": "Red (Legendary)",
+      "stars": 2,
+      "order": 28,
+      "materials": {
+        "alloy": 54000,
+        "polish": 590,
+        "plans": 95,
+        "amber": 10
+      },
+      "stat_total_percent": 97.75,
+      "power_total": 2346000,
+      "troop_deployment_capacity": 120
+    },
+    {
+      "key": "red_3",
+      "display": "Red (Legendary) 3",
+      "tier": "Red (Legendary)",
+      "stars": 3,
+      "order": 29,
+      "materials": {
+        "alloy": 56000,
+        "polish": 620,
+        "plans": 100,
+        "amber": 10
+      },
+      "stat_total_percent": 102.0,
+      "power_total": 2448000,
+      "troop_deployment_capacity": 160
+    },
+    {
+      "key": "red_t1_0",
+      "display": "Red (Legendary) T1 0",
+      "tier": "Red (Legendary) T1",
+      "stars": 0,
+      "order": 30,
+      "materials": {
+        "alloy": 59000,
+        "polish": 670,
+        "plans": 110,
+        "amber": 15
+      },
+      "stat_total_percent": 106.25,
+      "power_total": 2550000,
+      "troop_deployment_capacity": 290
+    },
+    {
+      "key": "red_t1_1",
+      "display": "Red (Legendary) T1 1",
+      "tier": "Red (Legendary) T1",
+      "stars": 1,
+      "order": 31,
+      "materials": {
+        "alloy": 61000,
+        "polish": 700,
+        "plans": 115,
+        "amber": 15
+      },
+      "stat_total_percent": 110.5,
+      "power_total": 2652000,
+      "troop_deployment_capacity": 330
+    },
+    {
+      "key": "red_t1_2",
+      "display": "Red (Legendary) T1 2",
+      "tier": "Red (Legendary) T1",
+      "stars": 2,
+      "order": 32,
+      "materials": {
+        "alloy": 63000,
+        "polish": 730,
+        "plans": 120,
+        "amber": 15
+      },
+      "stat_total_percent": 114.75,
+      "power_total": 2754000,
+      "troop_deployment_capacity": 370
+    },
+    {
+      "key": "red_t1_3",
+      "display": "Red (Legendary) T1 3",
+      "tier": "Red (Legendary) T1",
+      "stars": 3,
+      "order": 33,
+      "materials": {
+        "alloy": 65000,
+        "polish": 760,
+        "plans": 125,
+        "amber": 15
+      },
+      "stat_total_percent": 119.0,
+      "power_total": 2856000,
+      "troop_deployment_capacity": 410
+    },
+    {
+      "key": "red_t2_0",
+      "display": "Red (Legendary) T2 0",
+      "tier": "Red (Legendary) T2",
+      "stars": 0,
+      "order": 34,
+      "materials": {
+        "alloy": 68000,
+        "polish": 810,
+        "plans": 135,
+        "amber": 20
+      },
+      "stat_total_percent": 123.25,
+      "power_total": 2958000,
+      "troop_deployment_capacity": 540
+    },
+    {
+      "key": "red_t2_1",
+      "display": "Red (Legendary) T2 1",
+      "tier": "Red (Legendary) T2",
+      "stars": 1,
+      "order": 35,
+      "materials": {
+        "alloy": 70000,
+        "polish": 840,
+        "plans": 140,
+        "amber": 20
+      },
+      "stat_total_percent": 127.5,
+      "power_total": 3060000,
+      "troop_deployment_capacity": 580
+    },
+    {
+      "key": "red_t2_2",
+      "display": "Red (Legendary) T2 2",
+      "tier": "Red (Legendary) T2",
+      "stars": 2,
+      "order": 36,
+      "materials": {
+        "alloy": 72000,
+        "polish": 870,
+        "plans": 145,
+        "amber": 20
+      },
+      "stat_total_percent": 131.75,
+      "power_total": 3162000,
+      "troop_deployment_capacity": 620
+    },
+    {
+      "key": "red_t2_3",
+      "display": "Red (Legendary) T2 3",
+      "tier": "Red (Legendary) T2",
+      "stars": 3,
+      "order": 37,
+      "materials": {
+        "alloy": 74000,
+        "polish": 900,
+        "plans": 150,
+        "amber": 20
+      },
+      "stat_total_percent": 136.0,
+      "power_total": 3264000,
+      "troop_deployment_capacity": 660
+    },
+    {
+      "key": "red_t3_0",
+      "display": "Red (Legendary) T3 0",
+      "tier": "Red (Legendary) T3",
+      "stars": 0,
+      "order": 38,
+      "materials": {
+        "alloy": 77000,
+        "polish": 950,
+        "plans": 160,
+        "amber": 25
+      },
+      "stat_total_percent": 140.25,
+      "power_total": 3366000,
+      "troop_deployment_capacity": 790
+    },
+    {
+      "key": "red_t3_1",
+      "display": "Red (Legendary) T3 1",
+      "tier": "Red (Legendary) T3",
+      "stars": 1,
+      "order": 39,
+      "materials": {
+        "alloy": 80000,
+        "polish": 990,
+        "plans": 165,
+        "amber": 25
+      },
+      "stat_total_percent": 144.5,
+      "power_total": 3468000,
+      "troop_deployment_capacity": 830
+    },
+    {
+      "key": "red_t3_2",
+      "display": "Red (Legendary) T3 2",
+      "tier": "Red (Legendary) T3",
+      "stars": 2,
+      "order": 40,
+      "materials": {
+        "alloy": 83000,
+        "polish": 1030,
+        "plans": 170,
+        "amber": 25
+      },
+      "stat_total_percent": 148.75,
+      "power_total": 3570000,
+      "troop_deployment_capacity": 870
+    },
+    {
+      "key": "red_t3_3",
+      "display": "Red (Legendary) T3 3",
+      "tier": "Red (Legendary) T3",
+      "stars": 3,
+      "order": 41,
+      "materials": {
+        "alloy": 86000,
+        "polish": 1070,
+        "plans": 180,
+        "amber": 25
+      },
+      "stat_total_percent": 153.0,
+      "power_total": 3672000,
+      "troop_deployment_capacity": 910
+    },
+    {
+      "key": "red_t4_0",
+      "display": "Red (Legendary) T4 0",
+      "tier": "Red (Legendary) T4",
+      "stars": 0,
+      "order": 42,
+      "materials": {
+        "alloy": 120000,
+        "polish": 1500,
+        "plans": 250,
+        "amber": 40
+      },
+      "stat_total_percent": 161.5,
+      "power_total": 3876000,
+      "troop_deployment_capacity": 1050
+    },
+    {
+      "key": "red_t4_1",
+      "display": "Red (Legendary) T4 1",
+      "tier": "Red (Legendary) T4",
+      "stars": 1,
+      "order": 43,
+      "materials": {
+        "alloy": 140000,
+        "polish": 1650,
+        "plans": 275,
+        "amber": 40
+      },
+      "stat_total_percent": 170.0,
+      "power_total": 4080000,
+      "troop_deployment_capacity": 1100
+    },
+    {
+      "key": "red_t4_2",
+      "display": "Red (Legendary) T4 2",
+      "tier": "Red (Legendary) T4",
+      "stars": 2,
+      "order": 44,
+      "materials": {
+        "alloy": 160000,
+        "polish": 1800,
+        "plans": 300,
+        "amber": 40
+      },
+      "stat_total_percent": 178.5,
+      "power_total": 4284000,
+      "troop_deployment_capacity": 1150
+    },
+    {
+      "key": "red_t4_3",
+      "display": "Red (Legendary) T4 3",
+      "tier": "Red (Legendary) T4",
+      "stars": 3,
+      "order": 45,
+      "materials": {
+        "alloy": 180000,
+        "polish": 1950,
+        "plans": 325,
+        "amber": 40
+      },
+      "stat_total_percent": 187.0,
+      "power_total": 4488000,
+      "troop_deployment_capacity": 1200
+    }
+  ]
+}

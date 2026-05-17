@@ -6,3 +6,5 @@ openai
 pydantic
 opencv-python-headless
 numpy
+pytesseract
+Pillow

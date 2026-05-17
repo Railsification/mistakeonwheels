@@ -30,6 +30,7 @@ FEATURE_KEYS = [
     "suggestion_poll",
     "canyon",
     "chest_pattern",
+    "chief_gear",
 ]
 
 SETTINGS_FILENAME = "settings.json"
