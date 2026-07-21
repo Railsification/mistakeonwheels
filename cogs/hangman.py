@@ -27,7 +27,7 @@ from core.vault import is_image
 GAMES_FILENAME = "hangman_games.json"
 WORDS_FILENAME = "hangman_words.json"
 MEDIA_FILENAME = "hangman_media.json"
-MAX_MISSES = 6
+MAX_MISSES = 7
 
 DEFAULT_WORDS: dict[str, list[str]] = {
     "Heroes": [
@@ -873,13 +873,13 @@ class HangmanMediaCog(commands.Cog):
 
     @app_commands.command(name="hangman_image", description="Save one Hangman stage image into the media vault")
     @app_commands.describe(
-        stage="Stage number from 0 to 6",
+        stage="Stage number from 0 to 7",
         image="WoS Hangman image for this stage",
     )
     async def hangman_image(
         self,
         interaction: discord.Interaction,
-        stage: app_commands.Range[int, 0, 6],
+        stage: app_commands.Range[int, 0, 7],
         image: discord.Attachment,
     ) -> None:
         log_cmd("hangman_image", interaction)
