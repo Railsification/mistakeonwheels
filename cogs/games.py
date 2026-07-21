@@ -6,21 +6,23 @@ from discord import app_commands
 from discord.ext import commands
 
 from core.logger import log_cmd
-from core.utils import ensure_deferred
 from core.settings import SettingsManager
-
+from core.utils import ensure_deferred
 
 GAMES = [
+    ("Hangman", "hangman"),
     ("Connect 4", "connect4"),
     ("Tic Tac Toe", "tictactoe"),
 ]
+
+TWO_PLAYER_GAMES = {"connect4", "tictactoe"}
 
 
 def game_label(key: str | None) -> str:
     if not key:
         return "None"
-    for name, k in GAMES:
-        if k == key:
+    for name, game_key in GAMES:
+        if game_key == key:
             return name
     return key
 
@@ -47,7 +49,12 @@ class GameSelect(discord.ui.Select):
 
 class OpponentSelect(discord.ui.UserSelect):
     def __init__(self):
-        super().__init__(placeholder="Pick an opponent...", min_values=1, max_values=1, row=1)
+        super().__init__(
+            placeholder="Pick an opponent (not needed for Hangman)...",
+            min_values=1,
+            max_values=1,
+            row=1,
+        )
 
     async def callback(self, interaction: discord.Interaction):
         view: GamesView = self.view  # type: ignore
@@ -58,35 +65,41 @@ class OpponentSelect(discord.ui.UserSelect):
 
 class GamesView(discord.ui.View):
     def __init__(self, bot: commands.Bot, author_id: int):
+        # This timeout is only for the private game-picker menu.
+        # A started Hangman game itself has no timeout.
         super().__init__(timeout=300)
         self.bot = bot
         self.author_id = author_id
-
         self.selected_game: str | None = None
         self.opponent_id: int | None = None
-
         self.add_item(GameSelect())
         self.add_item(OpponentSelect())
         self.add_item(StartButton())
         self.add_item(CloseButton())
 
     def disable_all(self):
-        for c in self.children:
-            c.disabled = True
+        for child in self.children:
+            child.disabled = True
 
     def render_content(self) -> str:
-        opp = f"<@{self.opponent_id}>" if self.opponent_id else "_(none)_"
         game = game_label(self.selected_game)
-        ready = "✅" if self.selected_game else "❌"
+        if self.selected_game == "hangman":
+            opponent_line = "Opponent: _not needed — the whole channel plays_"
+            ready = "✅"
+        else:
+            opponent = f"<@{self.opponent_id}>" if self.opponent_id else "_(none)_"
+            opponent_line = f"Opponent: {opponent}"
+            ready = "✅" if self.selected_game and self.opponent_id else "❌"
+
         return (
             "🎮 **Games Menu**\n"
-            "Pick a game + opponent, then press **Start**.\n"
-            f"Opponent: {opp}\n\n"
-            f"{ready} **{game}** — ready."
+            "Pick a game, then press **Start**.\n"
+            f"{opponent_line}\n\n"
+            f"{ready} **{game}** — "
+            + ("ready." if ready == "✅" else "pick an opponent.")
         )
 
     async def refresh(self, interaction: discord.Interaction):
-        # This edits the ephemeral message reliably after defer()
         try:
             await interaction.edit_original_response(content=self.render_content(), view=self)
         except discord.NotFound:
@@ -108,23 +121,32 @@ class StartButton(discord.ui.Button):
 
     async def callback(self, interaction: discord.Interaction):
         view: GamesView = self.view  # type: ignore
-
-        # ACK FAST
         await interaction.response.defer(ephemeral=True)
 
         if not view.selected_game:
             await interaction.followup.send("❌ Pick a game first.", ephemeral=True)
             return
-        if not view.opponent_id:
-            await interaction.followup.send("❌ Pick an opponent first.", ephemeral=True)
-            return
+
         if not interaction.guild:
             await interaction.followup.send("❌ This must be used in a server.", ephemeral=True)
             return
 
-        # Resolve opponent
-        opponent = interaction.guild.get_member(view.opponent_id)
-        if opponent is None:
+        if view.selected_game == "hangman":
+            view.disable_all()
+            await view.refresh(interaction)
+            hangman = interaction.client.get_cog("HangmanCog")
+            if hangman is None:
+                await interaction.followup.send("❌ Hangman cog isn’t loaded.", ephemeral=True)
+                return
+            await hangman.service.start_game(interaction)  # type: ignore[attr-defined]
+            return
+
+        if view.selected_game in TWO_PLAYER_GAMES and not view.opponent_id:
+            await interaction.followup.send("❌ Pick an opponent first.", ephemeral=True)
+            return
+
+        opponent = interaction.guild.get_member(view.opponent_id) if view.opponent_id else None
+        if opponent is None and view.opponent_id:
             try:
                 opponent = await interaction.guild.fetch_member(view.opponent_id)
             except Exception:
@@ -133,11 +155,9 @@ class StartButton(discord.ui.Button):
             await interaction.followup.send("❌ Couldn’t resolve that opponent.", ephemeral=True)
             return
 
-        # Close menu UI
         view.disable_all()
         await view.refresh(interaction)
 
-        # Start the selected game
         if view.selected_game == "connect4":
             c4 = interaction.client.get_cog("Connect4Cog")
             if c4 is None:
@@ -176,7 +196,6 @@ class GamesCog(commands.Cog):
     @app_commands.command(name="games", description="Open the games menu (mobile-friendly)")
     async def games(self, interaction: discord.Interaction):
         log_cmd("games", interaction)
-
         if not self.settings.is_feature_allowed(interaction.guild_id, interaction.channel_id, "games"):
             await interaction.response.send_message(
                 "❌ `/games` can only be used in the configured game channel(s).",
@@ -184,9 +203,7 @@ class GamesCog(commands.Cog):
             )
             return
 
-        # CRITICAL: prevent 10062
         await ensure_deferred(interaction, ephemeral=True)
-
         view = GamesView(self.bot, author_id=interaction.user.id)
         await interaction.followup.send(content=view.render_content(), view=view, ephemeral=True)
 
