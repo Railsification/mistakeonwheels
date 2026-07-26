@@ -1,31 +1,42 @@
-# core/game_stats.py
 from __future__ import annotations
 
 from copy import deepcopy
+from datetime import datetime, timezone
+from threading import Lock
 from typing import Any, Iterable
 
 from core.storage import load_guild_json, save_guild_json
 
 STATS_FILENAME = "game_stats.json"
-MIN_GAMES_FOR_WIN_RATE = 3
-MAX_PROCESSED_RESULTS = 5000
+SCHEMA_VERSION = 1
+MAX_PROCESSED_EVENTS = 5000
 
-GAME_ALIASES = {
-    "overall": "overall",
-    "tictactoe": "tictactoe",
-    "tic_tac_toe": "tictactoe",
-    "tic tac toe": "tictactoe",
-    "connect4": "connect4",
-    "connect_4": "connect4",
-    "connectfour": "connect4",
-    "connect_four": "connect4",
-    "connect four": "connect4",
-    "hangman": "hangman",
+GAME_LABELS: dict[str, str] = {
+    "tictactoe": "Tic Tac Toe",
+    "connect4": "Connect Four",
+    "hangman": "Hangman",
 }
-GAME_KEYS = ("overall", "tictactoe", "connect4", "hangman")
+GAME_KEYS: tuple[str, ...] = tuple(GAME_LABELS)
+
+_LOCKS: dict[int, Lock] = {}
+_LOCKS_GUARD = Lock()
 
 
-def _empty_record() -> dict[str, int]:
+def _utc_now() -> str:
+    return datetime.now(timezone.utc).isoformat()
+
+
+def _guild_lock(guild_id: int) -> Lock:
+    guild_id = int(guild_id)
+    with _LOCKS_GUARD:
+        lock = _LOCKS.get(guild_id)
+        if lock is None:
+            lock = Lock()
+            _LOCKS[guild_id] = lock
+        return lock
+
+
+def _blank_game_stats() -> dict[str, Any]:
     return {
         "played": 0,
         "wins": 0,
@@ -33,312 +44,289 @@ def _empty_record() -> dict[str, int]:
         "draws": 0,
         "current_streak": 0,
         "best_streak": 0,
+        "last_played_at": "",
     }
 
 
-def _empty_player() -> dict[str, dict[str, int]]:
-    return {key: _empty_record() for key in GAME_KEYS}
+def _blank_player() -> dict[str, Any]:
+    return {"games": {game: _blank_game_stats() for game in GAME_KEYS}}
 
 
-def _normalise_game(game: str) -> str:
-    key = str(game or "").strip().lower()
-    normalised = GAME_ALIASES.get(key)
-    if normalised not in ("tictactoe", "connect4", "hangman"):
-        raise ValueError(f"Unsupported game: {game!r}")
-    return normalised
+def _blank_blob() -> dict[str, Any]:
+    return {
+        "version": SCHEMA_VERSION,
+        "players": {},
+        "processed_events": [],
+    }
 
 
-def _normalise_record(raw: Any) -> dict[str, int]:
-    record = _empty_record()
+def _safe_non_negative_int(value: Any) -> int:
+    try:
+        return max(0, int(value))
+    except (TypeError, ValueError):
+        return 0
+
+
+def _normalise_game_stats(raw: Any) -> dict[str, Any]:
+    clean = _blank_game_stats()
     if not isinstance(raw, dict):
-        return record
+        return clean
 
-    for key in record:
-        try:
-            record[key] = max(0, int(raw.get(key, 0) or 0))
-        except (TypeError, ValueError):
-            record[key] = 0
-
-    record["played"] = max(
-        record["played"],
-        record["wins"] + record["losses"] + record["draws"],
-    )
-    record["best_streak"] = max(
-        record["best_streak"],
-        record["current_streak"],
-    )
-    return record
+    for key in ("played", "wins", "losses", "draws", "current_streak", "best_streak"):
+        clean[key] = _safe_non_negative_int(raw.get(key))
+    clean["last_played_at"] = str(raw.get("last_played_at") or "")
+    clean["best_streak"] = max(clean["best_streak"], clean["current_streak"])
+    return clean
 
 
-def _normalise_player(raw: Any) -> dict[str, dict[str, int]]:
-    player = _empty_player()
+def _normalise_blob(raw: Any) -> dict[str, Any]:
+    blob = _blank_blob()
     if not isinstance(raw, dict):
-        return player
+        return blob
 
-    for key in GAME_KEYS:
-        player[key] = _normalise_record(raw.get(key))
-    return player
+    players = raw.get("players")
+    if isinstance(players, dict):
+        for raw_user_id, raw_player in players.items():
+            try:
+                user_id = str(int(raw_user_id))
+            except (TypeError, ValueError):
+                continue
+
+            player = _blank_player()
+            raw_games = raw_player.get("games") if isinstance(raw_player, dict) else None
+            if isinstance(raw_games, dict):
+                for game in GAME_KEYS:
+                    player["games"][game] = _normalise_game_stats(raw_games.get(game))
+            blob["players"][user_id] = player
+
+    events = raw.get("processed_events")
+    if isinstance(events, list):
+        clean_events = [str(event) for event in events if str(event).strip()]
+        blob["processed_events"] = clean_events[-MAX_PROCESSED_EVENTS:]
+
+    return blob
 
 
 def _load_blob(guild_id: int) -> dict[str, Any]:
-    raw = load_guild_json(
-        int(guild_id),
-        STATS_FILENAME,
-        {"version": 1, "players": {}, "processed_results": []},
-    )
-    if not isinstance(raw, dict):
-        raw = {}
-
-    raw["version"] = 1
-
-    players = raw.get("players")
-    if not isinstance(players, dict):
-        players = {}
-
-    cleaned_players: dict[str, dict[str, dict[str, int]]] = {}
-    for user_id, player_raw in players.items():
-        user_text = str(user_id)
-        if user_text.isdigit():
-            cleaned_players[user_text] = _normalise_player(player_raw)
-    raw["players"] = cleaned_players
-
-    processed = raw.get("processed_results")
-    if isinstance(processed, dict):
-        processed = list(processed.keys())
-    if not isinstance(processed, list):
-        processed = []
-
-    cleaned_processed: list[str] = []
-    seen: set[str] = set()
-    for item in processed:
-        text = str(item).strip()
-        if text and text not in seen:
-            cleaned_processed.append(text)
-            seen.add(text)
-    raw["processed_results"] = cleaned_processed[-MAX_PROCESSED_RESULTS:]
-    return raw
+    raw = load_guild_json(int(guild_id), STATS_FILENAME, _blank_blob())
+    return _normalise_blob(raw)
 
 
 def _save_blob(guild_id: int, blob: dict[str, Any]) -> None:
+    blob["version"] = SCHEMA_VERSION
     save_guild_json(int(guild_id), STATS_FILENAME, blob)
 
 
-def _player(blob: dict[str, Any], user_id: int) -> dict[str, dict[str, int]]:
+def _player(blob: dict[str, Any], user_id: int) -> dict[str, Any]:
     key = str(int(user_id))
-    players = blob["players"]
-    if key not in players:
-        players[key] = _empty_player()
-    else:
-        players[key] = _normalise_player(players[key])
-    return players[key]
+    player = blob["players"].get(key)
+    if not isinstance(player, dict):
+        player = _blank_player()
+        blob["players"][key] = player
+    return player
 
 
-def _apply_result(record: dict[str, int], result: str) -> None:
-    record["played"] += 1
+def _event_is_new(blob: dict[str, Any], event_id: str) -> bool:
+    event_id = str(event_id).strip()
+    if not event_id:
+        raise ValueError("event_id cannot be empty")
 
-    if result == "win":
-        record["wins"] += 1
-        record["current_streak"] += 1
-        record["best_streak"] = max(
-            record["best_streak"],
-            record["current_streak"],
-        )
-    elif result == "loss":
-        record["losses"] += 1
-        record["current_streak"] = 0
-    elif result == "draw":
-        record["draws"] += 1
-        record["current_streak"] = 0
-    else:
-        raise ValueError(f"Unsupported result: {result!r}")
-
-
-def _unique_ids(values: Iterable[int] | None) -> list[int]:
-    output: list[int] = []
-    seen: set[int] = set()
-    for value in values or []:
-        try:
-            user_id = int(value)
-        except (TypeError, ValueError):
-            continue
-        if user_id > 0 and user_id not in seen:
-            output.append(user_id)
-            seen.add(user_id)
-    return output
-
-
-def record_game_result(
-    guild_id: int,
-    game: str,
-    *,
-    player_ids: Iterable[int] | None = None,
-    participants: Iterable[int] | None = None,
-    winner_id: int | None = None,
-    loser_ids: Iterable[int] | None = None,
-    draw: bool = False,
-    result_id: str | None = None,
-) -> bool:
-    """Record one completed game.
-
-    Returns False when result_id has already been processed.
-    Cancellations should not call this function.
-    """
-    game_key = _normalise_game(game)
-    participant_ids = _unique_ids(player_ids or participants)
-    loser_id_list = _unique_ids(loser_ids)
-
-    clean_winner: int | None
-    try:
-        clean_winner = int(winner_id) if winner_id else None
-    except (TypeError, ValueError):
-        clean_winner = None
-
-    if clean_winner and clean_winner not in participant_ids:
-        participant_ids.append(clean_winner)
-
-    for loser_id in loser_id_list:
-        if loser_id not in participant_ids:
-            participant_ids.append(loser_id)
-
-    if not participant_ids:
+    events: list[str] = blob["processed_events"]
+    if event_id in events:
         return False
 
-    clean_result_id = str(result_id or "").strip()
-    blob = _load_blob(guild_id)
-    processed: list[str] = blob["processed_results"]
-
-    if clean_result_id and clean_result_id in processed:
-        return False
-
-    loser_set = set(loser_id_list)
-
-    for user_id in participant_ids:
-        if draw:
-            result = "draw"
-        elif clean_winner and user_id == clean_winner:
-            result = "win"
-        elif user_id in loser_set or len(participant_ids) > 1:
-            result = "loss"
-        else:
-            # A one-player result with a winner is a solo win, such as Hangman.
-            result = "win" if clean_winner == user_id else "loss"
-
-        player = _player(blob, user_id)
-        _apply_result(player[game_key], result)
-        _apply_result(player["overall"], result)
-
-    if clean_result_id:
-        processed.append(clean_result_id)
-        blob["processed_results"] = processed[-MAX_PROCESSED_RESULTS:]
-
-    _save_blob(guild_id, blob)
+    events.append(event_id)
+    if len(events) > MAX_PROCESSED_EVENTS:
+        del events[:-MAX_PROCESSED_EVENTS]
     return True
 
 
-def record_head_to_head_result(
+def _touch(stats: dict[str, Any], now: str) -> None:
+    stats["played"] = _safe_non_negative_int(stats.get("played")) + 1
+    stats["last_played_at"] = now
+
+
+def record_head_to_head(
     guild_id: int,
     game: str,
-    player1_id: int,
-    player2_id: int,
+    player_one_id: int,
+    player_two_id: int,
     *,
     winner_id: int | None,
-    result_id: str,
+    event_id: str,
 ) -> bool:
-    return record_game_result(
-        guild_id,
-        game,
-        player_ids=[player1_id, player2_id],
-        winner_id=winner_id,
-        draw=winner_id is None,
-        result_id=result_id,
-    )
+    """Record a completed Tic Tac Toe or Connect Four game.
+
+    winner_id=None records a draw. The event ID makes the write idempotent,
+    so a retried Discord interaction cannot award the same result twice.
+    """
+    guild_id = int(guild_id)
+    game = str(game).strip().lower()
+    p1 = int(player_one_id)
+    p2 = int(player_two_id)
+
+    if game not in {"tictactoe", "connect4"}:
+        raise ValueError(f"Unsupported head-to-head game: {game}")
+    if p1 == p2:
+        raise ValueError("A head-to-head game needs two different players")
+    if winner_id is not None and int(winner_id) not in {p1, p2}:
+        raise ValueError("winner_id must be one of the two players")
+
+    with _guild_lock(guild_id):
+        blob = _load_blob(guild_id)
+        if not _event_is_new(blob, event_id):
+            return False
+
+        now = _utc_now()
+        p1_stats = _player(blob, p1)["games"][game]
+        p2_stats = _player(blob, p2)["games"][game]
+        _touch(p1_stats, now)
+        _touch(p2_stats, now)
+
+        if winner_id is None:
+            p1_stats["draws"] += 1
+            p2_stats["draws"] += 1
+            p1_stats["current_streak"] = 0
+            p2_stats["current_streak"] = 0
+        else:
+            winner = p1 if int(winner_id) == p1 else p2
+            loser = p2 if winner == p1 else p1
+            winner_stats = p1_stats if winner == p1 else p2_stats
+            loser_stats = p2_stats if loser == p2 else p1_stats
+
+            winner_stats["wins"] += 1
+            winner_stats["current_streak"] += 1
+            winner_stats["best_streak"] = max(
+                winner_stats["best_streak"],
+                winner_stats["current_streak"],
+            )
+            loser_stats["losses"] += 1
+            loser_stats["current_streak"] = 0
+
+        _save_blob(guild_id, blob)
+        return True
 
 
-def record_solo_win(
+def record_hangman_solve(
     guild_id: int,
-    game: str,
     user_id: int,
     *,
-    result_id: str,
+    event_id: str,
 ) -> bool:
-    return record_game_result(
-        guild_id,
-        game,
-        player_ids=[user_id],
-        winner_id=user_id,
-        result_id=result_id,
-    )
+    """Record the user who completed a Hangman word.
+
+    Hangman is cooperative, so only solves are recorded. Other guessers are
+    not assigned losses.
+    """
+    guild_id = int(guild_id)
+    user_id = int(user_id)
+
+    with _guild_lock(guild_id):
+        blob = _load_blob(guild_id)
+        if not _event_is_new(blob, event_id):
+            return False
+
+        stats = _player(blob, user_id)["games"]["hangman"]
+        now = _utc_now()
+        _touch(stats, now)
+        stats["wins"] += 1
+        stats["current_streak"] += 1
+        stats["best_streak"] = max(stats["best_streak"], stats["current_streak"])
+
+        _save_blob(guild_id, blob)
+        return True
 
 
-def record_hangman_win(
-    guild_id: int,
-    user_id: int,
-    *,
-    result_id: str,
-) -> bool:
-    return record_solo_win(
-        guild_id,
-        "hangman",
-        user_id,
-        result_id=result_id,
-    )
+def get_player_stats(guild_id: int, user_id: int) -> dict[str, Any]:
+    with _guild_lock(int(guild_id)):
+        blob = _load_blob(int(guild_id))
+        player = blob["players"].get(str(int(user_id)))
+        return deepcopy(player) if isinstance(player, dict) else _blank_player()
 
 
-# Compatibility aliases for earlier leaderboard builds.
-record_result = record_game_result
-record_multiplayer_result = record_head_to_head_result
+def _overall_from_player(player: dict[str, Any]) -> dict[str, Any]:
+    games = player.get("games") if isinstance(player, dict) else {}
+    total = _blank_game_stats()
+    total["last_played_at"] = ""
+
+    for game in GAME_KEYS:
+        stats = _normalise_game_stats(games.get(game) if isinstance(games, dict) else None)
+        for key in ("played", "wins", "losses", "draws"):
+            total[key] += stats[key]
+        if stats["last_played_at"] > total["last_played_at"]:
+            total["last_played_at"] = stats["last_played_at"]
+
+    # A combined streak across unrelated games would be misleading.
+    total["current_streak"] = 0
+    total["best_streak"] = 0
+    return total
 
 
-def get_player_stats(guild_id: int, user_id: int) -> dict[str, dict[str, int]]:
-    blob = _load_blob(guild_id)
-    player = blob["players"].get(str(int(user_id)))
-    return deepcopy(_normalise_player(player))
+def get_overall_stats(guild_id: int, user_id: int) -> dict[str, Any]:
+    return _overall_from_player(get_player_stats(guild_id, user_id))
 
 
-def get_all_player_stats(
-    guild_id: int,
-) -> dict[int, dict[str, dict[str, int]]]:
-    blob = _load_blob(guild_id)
-    return {
-        int(user_id): deepcopy(_normalise_player(player))
-        for user_id, player in blob["players"].items()
-        if str(user_id).isdigit()
-    }
+def win_rate(stats: dict[str, Any]) -> float:
+    played = _safe_non_negative_int(stats.get("played"))
+    wins = _safe_non_negative_int(stats.get("wins"))
+    return (wins / played) if played else 0.0
 
 
-def win_rate(record: dict[str, int]) -> float | None:
-    played = int(record.get("played", 0) or 0)
-    if played < MIN_GAMES_FOR_WIN_RATE:
-        return None
-    return (int(record.get("wins", 0) or 0) / played) * 100.0
-
-
-def leaderboard_entries(
+def get_leaderboard(
     guild_id: int,
     game: str = "overall",
-) -> list[tuple[int, dict[str, int]]]:
-    key = GAME_ALIASES.get(str(game or "").strip().lower(), "overall")
-    if key not in GAME_KEYS:
-        key = "overall"
+    *,
+    limit: int | None = None,
+) -> list[dict[str, Any]]:
+    game = str(game or "overall").strip().lower()
+    if game != "overall" and game not in GAME_KEYS:
+        raise ValueError(f"Unknown game: {game}")
 
-    entries: list[tuple[int, dict[str, int]]] = []
-    for user_id, player in get_all_player_stats(guild_id).items():
-        record = player[key]
-        if record["played"] > 0:
-            entries.append((user_id, record))
+    with _guild_lock(int(guild_id)):
+        blob = _load_blob(int(guild_id))
 
-    def sort_key(item: tuple[int, dict[str, int]]) -> tuple[float, ...]:
-        user_id, record = item
-        rate = win_rate(record)
-        eligible_rate = rate if rate is not None else -1.0
-        return (
-            float(record["wins"]),
-            eligible_rate,
-            float(record["best_streak"]),
-            float(record["draws"]),
-            float(-record["losses"]),
-            float(-user_id),
+    rows: list[dict[str, Any]] = []
+    for raw_user_id, player in blob["players"].items():
+        user_id = int(raw_user_id)
+        stats = (
+            _overall_from_player(player)
+            if game == "overall"
+            else _normalise_game_stats(player["games"].get(game))
+        )
+        if stats["played"] <= 0 and stats["wins"] <= 0:
+            continue
+        rows.append({"user_id": user_id, "stats": stats})
+
+    if game == "hangman":
+        rows.sort(
+            key=lambda row: (
+                -row["stats"]["wins"],
+                -row["stats"]["best_streak"],
+                row["user_id"],
+            )
+        )
+    else:
+        rows.sort(
+            key=lambda row: (
+                -row["stats"]["wins"],
+                -win_rate(row["stats"]),
+                -row["stats"]["played"],
+                row["user_id"],
+            )
         )
 
-    entries.sort(key=sort_key, reverse=True)
-    return entries
+    if limit is not None:
+        return rows[: max(0, int(limit))]
+    return rows
+
+
+def get_rank(guild_id: int, user_id: int, game: str = "overall") -> int | None:
+    user_id = int(user_id)
+    for index, row in enumerate(get_leaderboard(guild_id, game), start=1):
+        if row["user_id"] == user_id:
+            return index
+    return None
+
+
+def iter_game_keys() -> Iterable[str]:
+    return GAME_KEYS
