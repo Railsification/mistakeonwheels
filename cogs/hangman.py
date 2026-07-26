@@ -27,6 +27,7 @@ from core.vault import is_image
 GAMES_FILENAME = "hangman_games.json"
 WORDS_FILENAME = "hangman_words.json"
 MEDIA_FILENAME = "hangman_media.json"
+WORD_CYCLE_FILENAME = "hangman_word_cycle.json"
 MAX_MISSES = 7
 
 DEFAULT_WORDS: dict[str, list[str]] = {
@@ -376,9 +377,62 @@ class HangmanService:
         return categories
 
     def _pick_word(self, guild_id: int) -> tuple[str, str]:
+        """Pick without repeating an automatic answer until the bank is exhausted."""
         categories = self._load_words(guild_id)
-        category = random.choice(list(categories.keys()))
-        return category, random.choice(categories[category])
+        candidates = [
+            (category, word)
+            for category, words in categories.items()
+            for word in words
+        ]
+        if not candidates:
+            raise RuntimeError("Hangman word bank is empty.")
+
+        state = load_guild_json(
+            guild_id,
+            WORD_CYCLE_FILENAME,
+            {"used_words": [], "last_word": ""},
+        )
+        if not isinstance(state, dict):
+            state = {"used_words": [], "last_word": ""}
+
+        valid_words = {word for _category, word in candidates}
+        used_words = {
+            _normalise_phrase(str(word))
+            for word in state.get("used_words", [])
+            if _normalise_phrase(str(word)) in valid_words
+        }
+        last_word = _normalise_phrase(str(state.get("last_word") or ""))
+
+        available = [
+            (category, word)
+            for category, word in candidates
+            if word not in used_words
+        ]
+
+        # A completed cycle starts again, but never with the previous cycle's
+        # final answer when there is more than one word available.
+        if not available:
+            used_words.clear()
+            available = [
+                (category, word)
+                for category, word in candidates
+                if len(valid_words) == 1 or word != last_word
+            ]
+            if not available:
+                available = candidates.copy()
+
+        category, word = random.choice(available)
+        used_words.add(word)
+
+        save_guild_json(
+            guild_id,
+            WORD_CYCLE_FILENAME,
+            {
+                "used_words": sorted(used_words),
+                "last_word": word,
+            },
+        )
+        return category, word
 
     def _load_media(self) -> dict[str, Any]:
         raw = load_global_json(MEDIA_FILENAME, {"stages": {}})
@@ -439,7 +493,9 @@ class HangmanService:
         if status == "won":
             title = "🔥 Hangman — Solved!"
             colour = discord.Colour.green()
-            description = f"The word was:\n```{word}```"
+            winner_id = int(game.get("winner_id") or 0)
+            winner_line = f"🎉 <@{winner_id}> solved it!\n\n" if winner_id else ""
+            description = f"{winner_line}The word was:\n```{word}```"
         elif status == "lost":
             title = "🥶 Hangman — Frozen Out"
             colour = discord.Colour.red()
@@ -652,6 +708,7 @@ class HangmanService:
                 game["guessed_letters"] = sorted(guessed)
                 won = _word_is_complete(word, guessed)
                 if won:
+                    game["winner_id"] = interaction.user.id
                     self._remove_game(guild_id, channel_id)
                     await self._edit_game_message(game, status="won")
                     await interaction.followup.send(f"Correct — **{letter}** solved it!", ephemeral=True)
@@ -698,6 +755,7 @@ class HangmanService:
             word = _normalise_phrase(str(game.get("word") or ""))
             if guess == word:
                 game["guessed_letters"] = sorted({char for char in word if char.isalpha()})
+                game["winner_id"] = interaction.user.id
                 self._remove_game(guild_id, channel_id)
                 await self._edit_game_message(game, status="won")
                 await interaction.followup.send("Correct — you solved it!", ephemeral=True)
