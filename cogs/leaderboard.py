@@ -1,8 +1,6 @@
-# cogs/leaderboard.py
 from __future__ import annotations
 
-import re
-from typing import Any, Callable, Coroutine
+from typing import Any
 
 import discord
 from discord import app_commands
@@ -10,357 +8,282 @@ from discord.ext import commands
 
 from core.command_scope import bind_public_cog
 from core.game_stats import (
-    GAME_KEYS,
-    MIN_GAMES_FOR_WIN_RATE,
+    GAME_LABELS,
+    get_leaderboard,
+    get_overall_stats,
     get_player_stats,
-    leaderboard_entries,
-    record_hangman_win,
+    get_rank,
     win_rate,
 )
-from core.logger import log_cmd, warn
-from core.utils import ensure_deferred
+from core.logger import log_cmd
+from core.settings import SettingsManager
 
-GAME_LABELS = {
-    "overall": "Overall",
-    "tictactoe": "Tic Tac Toe",
-    "connect4": "Connect Four",
-    "hangman": "Hangman",
-}
+OVERALL = "overall"
+GAME_CHOICES = [
+    app_commands.Choice(name="Overall", value=OVERALL),
+    app_commands.Choice(name="Tic Tac Toe", value="tictactoe"),
+    app_commands.Choice(name="Connect Four", value="connect4"),
+    app_commands.Choice(name="Hangman", value="hangman"),
+]
+
+
+def _label(game: str) -> str:
+    return "Overall" if game == OVERALL else GAME_LABELS.get(game, game)
+
+
+def _medal(rank: int) -> str:
+    return {1: "🥇", 2: "🥈", 3: "🥉"}.get(rank, f"**{rank}.**")
+
+
+def _percent(value: float) -> str:
+    return f"{round(value * 100):d}%"
 
 
 def _member_name(guild: discord.Guild, user_id: int) -> str:
-    member = guild.get_member(user_id)
+    member = guild.get_member(int(user_id))
     if member is not None:
-        return member.display_name
-    return f"<@{user_id}>"
+        return member.mention
+    return f"<@{int(user_id)}>"
 
 
-def _rate_text(record: dict[str, int]) -> str:
-    rate = win_rate(record)
-    if rate is None:
-        return f"— (<{MIN_GAMES_FOR_WIN_RATE} games)"
-    return f"{rate:.1f}%"
+def _record_text(game: str, stats: dict[str, Any]) -> str:
+    wins = int(stats.get("wins") or 0)
+    losses = int(stats.get("losses") or 0)
+    draws = int(stats.get("draws") or 0)
+    played = int(stats.get("played") or 0)
 
-
-def build_leaderboard_embed(
-    guild: discord.Guild,
-    selected: str,
-) -> discord.Embed:
-    selected = selected if selected in GAME_KEYS else "overall"
-    title = GAME_LABELS[selected]
-    entries = leaderboard_entries(guild.id, selected)
-
-    embed = discord.Embed(
-        title=f"🏆 {guild.name} — {title} Leaderboard",
-        colour=discord.Colour.gold(),
-    )
-
-    if not entries:
-        embed.description = "No completed games have been recorded yet."
-        return embed
-
-    medals = ("🥇", "🥈", "🥉")
-    lines: list[str] = []
-
-    for index, (user_id, record) in enumerate(entries[:10], start=1):
-        rank = medals[index - 1] if index <= 3 else f"**{index}.**"
-        name = _member_name(guild, user_id)
-        lines.append(
-            f"{rank} **{name}** — "
-            f"{record['wins']}W / {record['losses']}L / {record['draws']}D "
-            f"• {_rate_text(record)} "
-            f"• Best streak {record['best_streak']}"
-        )
-
-    embed.description = "\n".join(lines)
-    embed.set_footer(
-        text=(
-            f"Win rate is shown after {MIN_GAMES_FOR_WIN_RATE} games. "
-            "Cancellations do not count."
-        )
-    )
-    return embed
-
-
-def build_stats_embed(
-    guild: discord.Guild,
-    member: discord.Member,
-) -> discord.Embed:
-    all_stats = get_player_stats(guild.id, member.id)
-    embed = discord.Embed(
-        title=f"🎮 Game Stats — {member.display_name}",
-        colour=discord.Colour.blurple(),
-    )
-    embed.set_thumbnail(url=member.display_avatar.url)
-
-    for key in GAME_KEYS:
-        record = all_stats[key]
-        embed.add_field(
-            name=GAME_LABELS[key],
-            value=(
-                f"Played: **{record['played']}**\n"
-                f"W / L / D: **{record['wins']} / {record['losses']} / {record['draws']}**\n"
-                f"Win rate: **{_rate_text(record)}**\n"
-                f"Streak: **{record['current_streak']}** "
-                f"(best **{record['best_streak']}**)"
-            ),
-            inline=key != "overall",
-        )
-
-    return embed
-
-
-class LeaderboardButton(discord.ui.Button):
-    def __init__(self, game_key: str, row: int):
-        super().__init__(
-            label=GAME_LABELS[game_key],
-            style=discord.ButtonStyle.secondary,
-            custom_id=f"hotbot:leaderboard:{game_key}:v1",
-            row=row,
-        )
-        self.game_key = game_key
-
-    async def callback(self, interaction: discord.Interaction) -> None:
-        view: LeaderboardView = self.view  # type: ignore[assignment]
-        if interaction.user.id != view.author_id:
-            await interaction.response.send_message(
-                "Use `/leaderboard` to open your own controls.",
-                ephemeral=True,
-            )
-            return
-
-        if interaction.guild is None:
-            await interaction.response.send_message(
-                "This only works in a server.",
-                ephemeral=True,
-            )
-            return
-
-        view.selected = self.game_key
-        view.update_styles()
-        await interaction.response.edit_message(
-            embed=build_leaderboard_embed(interaction.guild, view.selected),
-            view=view,
-        )
+    if game == "hangman":
+        return f"**{wins}** solve{'s' if wins != 1 else ''}"
+    if game == OVERALL:
+        return f"**{wins}** wins • {played} recorded"
+    return f"**{wins}W** • {losses}L • {draws}D • {_percent(win_rate(stats))}"
 
 
 class LeaderboardView(discord.ui.View):
-    def __init__(self, author_id: int, selected: str = "overall"):
-        super().__init__(timeout=300)
-        self.author_id = int(author_id)
-        self.selected = selected if selected in GAME_KEYS else "overall"
+    def __init__(self, cog: "LeaderboardCog"):
+        # Persistent view: buttons keep working indefinitely and are restored
+        # when the bot starts again.
+        super().__init__(timeout=None)
+        self.cog = cog
 
-        self.add_item(LeaderboardButton("overall", 0))
-        self.add_item(LeaderboardButton("tictactoe", 0))
-        self.add_item(LeaderboardButton("connect4", 0))
-        self.add_item(LeaderboardButton("hangman", 0))
-        self.update_styles()
-
-    def update_styles(self) -> None:
-        for item in self.children:
-            if isinstance(item, LeaderboardButton):
-                item.style = (
-                    discord.ButtonStyle.primary
-                    if item.game_key == self.selected
-                    else discord.ButtonStyle.secondary
-                )
-
-
-class LeaderboardCog(commands.Cog):
-    def __init__(self, bot: commands.Bot):
-        self.bot = bot
-        self._hangman_hook_installed = False
-
-    @commands.Cog.listener()
-    async def on_ready(self) -> None:
-        self._install_hangman_hooks()
-
-    def _install_hangman_hooks(self) -> None:
-        """Add Hangman wins to the leaderboard without replacing hangman.py."""
-        if self._hangman_hook_installed:
-            return
-
-        hangman_cog = self.bot.get_cog("HangmanCog")
-        service = getattr(hangman_cog, "service", None)
-        if service is None:
-            return
-
-        if getattr(service, "_hotbot_game_stats_hooked", False):
-            self._hangman_hook_installed = True
-            return
-
-        original_letter = getattr(service, "submit_letter", None)
-        original_word = getattr(service, "submit_word", None)
-        get_game = getattr(service, "_get_game", None)
-
-        if not callable(original_letter) or not callable(original_word) or not callable(get_game):
-            warn("Leaderboard could not attach Hangman result hooks.")
-            return
-
-        def normalise(value: str) -> str:
-            return re.sub(r"\s+", " ", (value or "").strip().upper())
-
-        def prospective_letter_win(
-            interaction: discord.Interaction,
-            raw_letter: str,
-        ) -> tuple[int, int, str] | None:
-            if not interaction.guild_id or not interaction.channel_id:
-                return None
-
-            game = get_game(interaction.guild_id, interaction.channel_id)
-            if not isinstance(game, dict):
-                return None
-
-            letter = raw_letter.strip().upper()
-            if len(letter) != 1 or not letter.isalpha():
-                return None
-
-            word = normalise(str(game.get("word") or ""))
-            guessed = {
-                str(value).strip().upper()
-                for value in game.get("guessed_letters", [])
-                if str(value).strip()
-            }
-            wrong = {
-                str(value).strip().upper()
-                for value in game.get("wrong_letters", [])
-                if str(value).strip()
-            }
-
-            if letter in guessed or letter in wrong or letter not in word:
-                return None
-
-            after = guessed | {letter}
-            solved = all(not char.isalpha() or char in after for char in word)
-            if not solved:
-                return None
-
-            message_id = int(game.get("message_id") or 0)
-            result_id = (
-                f"hangman:{interaction.guild_id}:"
-                f"{interaction.channel_id}:{message_id}"
-            )
-            return interaction.guild_id, interaction.channel_id, result_id
-
-        def prospective_word_win(
-            interaction: discord.Interaction,
-            raw_word: str,
-        ) -> tuple[int, int, str] | None:
-            if not interaction.guild_id or not interaction.channel_id:
-                return None
-
-            game = get_game(interaction.guild_id, interaction.channel_id)
-            if not isinstance(game, dict):
-                return None
-
-            if normalise(raw_word) != normalise(str(game.get("word") or "")):
-                return None
-
-            message_id = int(game.get("message_id") or 0)
-            result_id = (
-                f"hangman:{interaction.guild_id}:"
-                f"{interaction.channel_id}:{message_id}"
-            )
-            return interaction.guild_id, interaction.channel_id, result_id
-
-        async def wrapped_letter(
-            interaction: discord.Interaction,
-            raw_letter: str,
-        ) -> None:
-            possible = prospective_letter_win(interaction, raw_letter)
-            await original_letter(interaction, raw_letter)
-
-            if possible is None:
-                return
-
-            guild_id, channel_id, result_id = possible
-            remaining = get_game(guild_id, channel_id)
-            if remaining is None:
-                record_hangman_win(
-                    guild_id,
-                    interaction.user.id,
-                    result_id=result_id,
-                )
-
-        async def wrapped_word(
-            interaction: discord.Interaction,
-            raw_word: str,
-        ) -> None:
-            possible = prospective_word_win(interaction, raw_word)
-            await original_word(interaction, raw_word)
-
-            if possible is None:
-                return
-
-            guild_id, channel_id, result_id = possible
-            remaining = get_game(guild_id, channel_id)
-            if remaining is None:
-                record_hangman_win(
-                    guild_id,
-                    interaction.user.id,
-                    result_id=result_id,
-                )
-
-        service.submit_letter = wrapped_letter
-        service.submit_word = wrapped_word
-        service._hotbot_game_stats_hooked = True
-        self._hangman_hook_installed = True
-
-    @app_commands.command(
-        name="leaderboard",
-        description="Show this server's game leaderboard.",
-    )
-    async def leaderboard(self, interaction: discord.Interaction) -> None:
-        log_cmd("leaderboard", interaction)
+    async def _switch(self, interaction: discord.Interaction, game: str) -> None:
         if interaction.guild is None:
             await interaction.response.send_message(
-                "This only works in a server.",
+                "This leaderboard only works in a server.",
                 ephemeral=True,
             )
             return
 
-        await ensure_deferred(interaction, ephemeral=False)
-        view = LeaderboardView(interaction.user.id)
-        await interaction.followup.send(
-            embed=build_leaderboard_embed(interaction.guild, "overall"),
-            view=view,
-            ephemeral=False,
+        # Acknowledge the button immediately before reading the stats file.
+        await interaction.response.defer()
+        await interaction.edit_original_response(
+            embed=self.cog.build_leaderboard_embed(interaction.guild, game),
+            view=self,
         )
 
-    @app_commands.command(
-        name="stats",
-        description="Show game stats for yourself or another member.",
+    @discord.ui.button(
+        label="Overall",
+        emoji="🏆",
+        style=discord.ButtonStyle.primary,
+        row=0,
+        custom_id="hotbot:leaderboard:overall",
     )
-    @app_commands.describe(member="Member to inspect; defaults to you")
+    async def overall(self, interaction: discord.Interaction, _button: discord.ui.Button) -> None:
+        await self._switch(interaction, OVERALL)
+
+    @discord.ui.button(
+        label="Tic Tac Toe",
+        emoji="❎",
+        style=discord.ButtonStyle.secondary,
+        row=0,
+        custom_id="hotbot:leaderboard:tictactoe",
+    )
+    async def tictactoe(self, interaction: discord.Interaction, _button: discord.ui.Button) -> None:
+        await self._switch(interaction, "tictactoe")
+
+    @discord.ui.button(
+        label="Connect Four",
+        emoji="🔴",
+        style=discord.ButtonStyle.secondary,
+        row=0,
+        custom_id="hotbot:leaderboard:connect4",
+    )
+    async def connect4(self, interaction: discord.Interaction, _button: discord.ui.Button) -> None:
+        await self._switch(interaction, "connect4")
+
+    @discord.ui.button(
+        label="Hangman",
+        emoji="🔥",
+        style=discord.ButtonStyle.secondary,
+        row=0,
+        custom_id="hotbot:leaderboard:hangman",
+    )
+    async def hangman(self, interaction: discord.Interaction, _button: discord.ui.Button) -> None:
+        await self._switch(interaction, "hangman")
+
+    @discord.ui.button(
+        label="My Stats",
+        emoji="📊",
+        style=discord.ButtonStyle.success,
+        row=1,
+        custom_id="hotbot:leaderboard:my_stats",
+    )
+    async def my_stats(self, interaction: discord.Interaction, _button: discord.ui.Button) -> None:
+        if interaction.guild is None:
+            await interaction.response.send_message("This only works in a server.", ephemeral=True)
+            return
+
+        await interaction.response.defer(ephemeral=True, thinking=True)
+        await interaction.edit_original_response(
+            embed=self.cog.build_stats_embed(interaction.guild, interaction.user),
+        )
+
+
+class LeaderboardCog(commands.Cog):
+    HELP_META = {
+        "title": "Game Leaderboards",
+        "summary": "Per-server wins and player records for Hangman, Connect Four and Tic Tac Toe.",
+        "details": "Use /leaderboard for the server rankings or /stats to see a player's full game record.",
+    }
+
+    def __init__(self, bot: commands.Bot):
+        self.bot = bot
+        self.settings: SettingsManager = bot.settings
+
+    def build_leaderboard_embed(self, guild: discord.Guild, game: str = OVERALL) -> discord.Embed:
+        game = game if game in {OVERALL, *GAME_LABELS.keys()} else OVERALL
+        rows = get_leaderboard(guild.id, game, limit=10)
+
+        embed = discord.Embed(
+            title=f"🏆 {guild.name} Game Leaderboard",
+            description=f"**{_label(game)}** rankings",
+            colour=discord.Colour.gold(),
+        )
+
+        if not rows:
+            embed.add_field(
+                name="No results yet",
+                value="Finish a game and the leaderboard will start automatically.",
+                inline=False,
+            )
+        else:
+            lines: list[str] = []
+            for rank, row in enumerate(rows, start=1):
+                user = _member_name(guild, row["user_id"])
+                lines.append(f"{_medal(rank)} {user} — {_record_text(game, row['stats'])}")
+            embed.add_field(name="Top 10", value="\n".join(lines), inline=False)
+
+        if guild.icon:
+            embed.set_thumbnail(url=guild.icon.url)
+        embed.set_footer(
+            text="Only games completed in this server count. Cancelled games are ignored."
+        )
+        return embed
+
+    def build_stats_embed(
+        self,
+        guild: discord.Guild,
+        user: discord.Member | discord.User,
+        selected_game: str | None = None,
+    ) -> discord.Embed:
+        player = get_player_stats(guild.id, user.id)
+        games = player["games"]
+        overall = get_overall_stats(guild.id, user.id)
+        rank = get_rank(guild.id, user.id, OVERALL)
+
+        embed = discord.Embed(
+            title=f"📊 Game Stats — {user.display_name}",
+            colour=discord.Colour.blurple(),
+        )
+        avatar = getattr(user, "display_avatar", None)
+        if avatar is not None:
+            embed.set_thumbnail(url=avatar.url)
+
+        rank_text = f"#{rank}" if rank is not None else "Unranked"
+        embed.description = (
+            f"**Server rank:** {rank_text}\n"
+            f"**Total wins/solves:** {overall['wins']}\n"
+            f"**Completed results:** {overall['played']}"
+        )
+
+        shown_games = [selected_game] if selected_game in GAME_LABELS else list(GAME_LABELS)
+        for game in shown_games:
+            stats = games[game]
+            if game == "hangman":
+                value = (
+                    f"Words solved: **{stats['wins']}**\n"
+                    "Hangman is cooperative, so other guessers do not receive losses."
+                )
+            else:
+                game_rank = get_rank(guild.id, user.id, game)
+                rank_line = f"Rank: **#{game_rank}**" if game_rank is not None else "Rank: **Unranked**"
+                value = (
+                    f"Record: **{stats['wins']}W — {stats['losses']}L — {stats['draws']}D**\n"
+                    f"Win rate: **{_percent(win_rate(stats))}**\n"
+                    f"Win streak: **{stats['current_streak']}** • Best: **{stats['best_streak']}**\n"
+                    f"{rank_line}"
+                )
+            embed.add_field(name=GAME_LABELS[game], value=value, inline=False)
+
+        embed.set_footer(text="Stats begin counting after this update is installed.")
+        return embed
+
+    @app_commands.command(name="leaderboard", description="Show this server's game leaderboard")
+    @app_commands.describe(game="Overall rankings or one specific game")
+    @app_commands.choices(game=GAME_CHOICES)
+    async def leaderboard(
+        self,
+        interaction: discord.Interaction,
+        game: app_commands.Choice[str] | None = None,
+    ) -> None:
+        log_cmd("leaderboard", interaction)
+        if interaction.guild is None:
+            await interaction.response.send_message("This command only works in a server.", ephemeral=True)
+            return
+
+        selected = game.value if game else OVERALL
+        await interaction.response.defer(thinking=True)
+        await interaction.edit_original_response(
+            embed=self.build_leaderboard_embed(interaction.guild, selected),
+            view=LeaderboardView(self),
+        )
+
+    @app_commands.command(name="stats", description="Show your or another member's game stats")
+    @app_commands.describe(
+        member="Member to inspect; leave blank for yourself",
+        game="Optionally show only one game",
+    )
+    @app_commands.choices(game=GAME_CHOICES[1:])
     async def stats(
         self,
         interaction: discord.Interaction,
         member: discord.Member | None = None,
+        game: app_commands.Choice[str] | None = None,
     ) -> None:
         log_cmd("stats", interaction)
         if interaction.guild is None:
-            await interaction.response.send_message(
-                "This only works in a server.",
-                ephemeral=True,
-            )
+            await interaction.response.send_message("This command only works in a server.", ephemeral=True)
             return
 
         target = member or interaction.user
-        if not isinstance(target, discord.Member):
-            await interaction.response.send_message(
-                "Could not resolve that member.",
-                ephemeral=True,
-            )
-            return
-
-        await ensure_deferred(interaction, ephemeral=False)
-        await interaction.followup.send(
-            embed=build_stats_embed(interaction.guild, target),
-            ephemeral=False,
+        await interaction.response.defer(ephemeral=True, thinking=True)
+        await interaction.edit_original_response(
+            embed=self.build_stats_embed(
+                interaction.guild,
+                target,
+                game.value if game else None,
+            ),
         )
 
 
 async def setup(bot: commands.Bot) -> None:
+    if not hasattr(bot, "settings"):
+        bot.settings = SettingsManager(bot.hot_config)
+
     cog = LeaderboardCog(bot)
     bind_public_cog(cog, bot, include_admin=True)
     await bot.add_cog(cog)
+
+    # Register the persistent component handlers so existing leaderboard
+    # messages continue working after a bot restart.
+    bot.add_view(LeaderboardView(cog))
