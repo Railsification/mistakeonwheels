@@ -93,7 +93,6 @@ DEFAULT_WORDS: dict[str, list[str]] = {
         "Frostfire Mine",
         "Hall of Chiefs",
         "Fishing Tournament",
-        "Swordland Showdown",
         "Tundra Trading Station",
     ],
     "General": [
