@@ -16,6 +16,7 @@ from .storage import (
 )
 from .utils import load_json
 
+GAME_FEATURE_KEYS = ("hangman", "connect4", "tictactoe")
 
 FEATURE_KEYS = [
     "speech",
@@ -23,6 +24,7 @@ FEATURE_KEYS = [
     "pfp",
     "join_fact",
     "image_poll",
+    "hangman",
     "connect4",
     "tictactoe",
     "games",
@@ -63,14 +65,17 @@ def _dedupe_keep_order(values: List[str]) -> List[str]:
 def _int_list(values) -> list[int]:
     if not isinstance(values, list):
         return []
+
     out: list[int] = []
     for value in values:
         try:
             ivalue = int(value)
         except Exception:
             continue
+
         if ivalue and ivalue not in out:
             out.append(ivalue)
+
     return out
 
 
@@ -81,10 +86,10 @@ def _default_feature_keys() -> List[str]:
 class SettingsManager:
     """Per-guild settings manager.
 
-    Settings now live under:
+    Settings live under:
         data/guilds/<guild_id>/settings.json
 
-    Feature keys are global metadata only:
+    Feature keys are global metadata:
         data/global/feature_keys.json
     """
 
@@ -98,20 +103,27 @@ class SettingsManager:
     def _load_feature_keys(self) -> list[str]:
         raw = load_global_json(FEATURE_INDEX_FILENAME, {})
         keys = _default_feature_keys()
+
         if isinstance(raw, dict) and isinstance(raw.get("feature_keys"), list):
-            keys.extend(str(v) for v in raw["feature_keys"])
+            keys.extend(str(value) for value in raw["feature_keys"])
+
         return _dedupe_keep_order(keys)
 
     def _save_feature_keys(self) -> None:
-        save_global_json(FEATURE_INDEX_FILENAME, {"feature_keys": self._feature_keys})
+        save_global_json(
+            FEATURE_INDEX_FILENAME,
+            {"feature_keys": self._feature_keys},
+        )
 
     def _ensure_feature_registered(self, feature: str) -> str:
         feature_key = _normalize_feature(feature)
         if not feature_key:
             return ""
+
         if feature_key not in self._feature_keys:
             self._feature_keys.append(feature_key)
             self._save_feature_keys()
+
         return feature_key
 
     def feature_keys(self) -> list[str]:
@@ -119,9 +131,11 @@ class SettingsManager:
 
     def all_feature_keys(self, guild_id: int | None = None) -> list[str]:
         keys = list(self._feature_keys)
+
         if guild_id:
             gs = self._ensure_guild(guild_id)
             keys.extend(gs.feature_channels.keys())
+
         return _dedupe_keep_order(keys)
 
     # ---------- migration ----------
@@ -134,37 +148,58 @@ class SettingsManager:
         if not isinstance(raw, dict):
             return
 
-        # Old v1.6 shape: {"feature_keys": [...], "guilds": {gid: {...}}}
         if isinstance(raw.get("feature_keys"), list):
-            self._feature_keys = _dedupe_keep_order([*self._feature_keys, *[str(v) for v in raw["feature_keys"]]])
+            self._feature_keys = _dedupe_keep_order(
+                [
+                    *self._feature_keys,
+                    *[str(value) for value in raw["feature_keys"]],
+                ]
+            )
             self._save_feature_keys()
 
         raw_guilds = raw.get("guilds")
         if isinstance(raw_guilds, dict):
-            for gid_raw, blob in raw_guilds.items():
+            for guild_id_raw, blob in raw_guilds.items():
                 try:
-                    gid = int(gid_raw)
+                    guild_id = int(guild_id_raw)
                 except Exception:
                     continue
-                target_data = load_guild_json(gid, SETTINGS_FILENAME, None)
-                if target_data is not None:
+
+                target_data = load_guild_json(
+                    guild_id,
+                    SETTINGS_FILENAME,
+                    None,
+                )
+                if target_data is not None or not isinstance(blob, dict):
                     continue
-                if not isinstance(blob, dict):
-                    continue
-                save_guild_json(gid, SETTINGS_FILENAME, self._normalise_raw_settings(blob))
+
+                save_guild_json(
+                    guild_id,
+                    SETTINGS_FILENAME,
+                    self._normalise_raw_settings(blob),
+                )
             return
 
-        # Very old shape: settings for the one current server. Migrate only to primary.
         primary = primary_data_guild_id(self._defaults)
-        if primary and load_guild_json(primary, SETTINGS_FILENAME, None) is None:
-            save_guild_json(primary, SETTINGS_FILENAME, self._normalise_raw_settings(raw))
+        if (
+            primary
+            and load_guild_json(primary, SETTINGS_FILENAME, None) is None
+        ):
+            save_guild_json(
+                primary,
+                SETTINGS_FILENAME,
+                self._normalise_raw_settings(raw),
+            )
 
     # ---------- per-guild load/save ----------
 
     def _normalise_raw_settings(self, raw: dict | None) -> dict:
         raw = raw or {}
         fc_raw = raw.get("feature_channels") or raw.get("channels") or {}
-        feature_channels: dict[str, list[int]] = {key: [] for key in self._feature_keys}
+        feature_channels: dict[str, list[int]] = {
+            key: [] for key in self._feature_keys
+        }
+
         if isinstance(fc_raw, dict):
             for feature, channel_ids in fc_raw.items():
                 feature_key = self._ensure_feature_registered(str(feature))
@@ -172,23 +207,37 @@ class SettingsManager:
                     feature_channels[feature_key] = _int_list(channel_ids)
 
         return {
-            "topic": raw.get("topic") or self._defaults.get("topic_default", "science"),
-            "pfp_theme": raw.get("pfp_theme") or self._defaults.get("pfp_theme_default", ""),
+            "topic": (
+                raw.get("topic")
+                or self._defaults.get("topic_default", "science")
+            ),
+            "pfp_theme": (
+                raw.get("pfp_theme")
+                or self._defaults.get("pfp_theme_default", "")
+            ),
             "feature_channels": feature_channels,
         }
 
     def _load_guild_raw(self, guild_id: int) -> dict:
         raw = load_guild_json(guild_id, SETTINGS_FILENAME, None)
+
         if raw is None:
             raw = {
                 "topic": self._defaults.get("topic_default", "science"),
-                "pfp_theme": self._defaults.get("pfp_theme_default", ""),
-                "feature_channels": {key: [] for key in self._feature_keys},
+                "pfp_theme": self._defaults.get(
+                    "pfp_theme_default",
+                    "",
+                ),
+                "feature_channels": {
+                    key: [] for key in self._feature_keys
+                },
             }
             save_guild_json(guild_id, SETTINGS_FILENAME, raw)
             return raw
+
         if not isinstance(raw, dict):
             raw = {}
+
         normalised = self._normalise_raw_settings(raw)
         save_guild_json(guild_id, SETTINGS_FILENAME, normalised)
         return normalised
@@ -198,22 +247,44 @@ class SettingsManager:
 
     def _ensure_guild(self, guild_id: int) -> GuildSettings:
         raw = self._load_guild_raw(guild_id)
-        fc = raw.get("feature_channels") if isinstance(raw.get("feature_channels"), dict) else {}
-        for feature_key in self._feature_keys:
-            fc.setdefault(feature_key, [])
-        return GuildSettings(
-            topic=raw.get("topic") or self._defaults.get("topic_default", "science"),
-            pfp_theme=raw.get("pfp_theme") or self._defaults.get("pfp_theme_default", ""),
-            feature_channels={str(k): _int_list(v) for k, v in fc.items()},
+        fc = (
+            raw.get("feature_channels")
+            if isinstance(raw.get("feature_channels"), dict)
+            else {}
         )
 
-    def _save_guild_settings(self, guild_id: int, gs: GuildSettings) -> None:
+        for feature_key in self._feature_keys:
+            fc.setdefault(feature_key, [])
+
+        return GuildSettings(
+            topic=(
+                raw.get("topic")
+                or self._defaults.get("topic_default", "science")
+            ),
+            pfp_theme=(
+                raw.get("pfp_theme")
+                or self._defaults.get("pfp_theme_default", "")
+            ),
+            feature_channels={
+                str(key): _int_list(value)
+                for key, value in fc.items()
+            },
+        )
+
+    def _save_guild_settings(
+        self,
+        guild_id: int,
+        gs: GuildSettings,
+    ) -> None:
         self._save_guild_raw(
             guild_id,
             {
                 "topic": gs.topic,
                 "pfp_theme": gs.pfp_theme,
-                "feature_channels": {k: list(v) for k, v in gs.feature_channels.items()},
+                "feature_channels": {
+                    key: list(value)
+                    for key, value in gs.feature_channels.items()
+                },
             },
         )
 
@@ -235,43 +306,115 @@ class SettingsManager:
         gs.pfp_theme = theme.strip()
         self._save_guild_settings(guild_id, gs)
 
-    def feature_channels(self, guild_id: int, feature: str) -> list[int]:
+    def feature_channels(
+        self,
+        guild_id: int,
+        feature: str,
+    ) -> list[int]:
         feature_key = self._ensure_feature_registered(feature)
         if not feature_key:
             return []
+
         gs = self._ensure_guild(guild_id)
         return list(gs.feature_channels.setdefault(feature_key, []))
 
-    def add_feature_channel(self, guild_id: int, feature: str, channel_id: int):
+    def add_feature_channel(
+        self,
+        guild_id: int,
+        feature: str,
+        channel_id: int,
+    ):
         feature_key = self._ensure_feature_registered(feature)
         if not feature_key:
             warn("Blank feature passed to add_feature_channel")
             return
+
         gs = self._ensure_guild(guild_id)
         channels = gs.feature_channels.setdefault(feature_key, [])
         channel_id = int(channel_id)
+
         if channel_id not in channels:
             channels.append(channel_id)
             self._save_guild_settings(guild_id, gs)
 
-    def remove_feature_channel(self, guild_id: int, feature: str, channel_id: int):
+    def remove_feature_channel(
+        self,
+        guild_id: int,
+        feature: str,
+        channel_id: int,
+    ):
         feature_key = self._ensure_feature_registered(feature)
         if not feature_key:
             warn("Blank feature passed to remove_feature_channel")
             return
+
         gs = self._ensure_guild(guild_id)
         channels = gs.feature_channels.setdefault(feature_key, [])
         channel_id = int(channel_id)
+
         if channel_id in channels:
             channels.remove(channel_id)
             self._save_guild_settings(guild_id, gs)
 
-    def is_feature_allowed(self, guild_id: int | None, channel_id: int | None, feature: str) -> bool:
+    def is_feature_allowed(
+        self,
+        guild_id: int | None,
+        channel_id: int | None,
+        feature: str,
+    ) -> bool:
         if guild_id is None or channel_id is None:
             return False
+
         feature_key = self._ensure_feature_registered(feature)
         if not feature_key:
             return False
+
         gs = self._ensure_guild(int(guild_id))
         allowed = gs.feature_channels.get(feature_key) or []
         return int(channel_id) in allowed
+
+    def available_games(
+        self,
+        guild_id: int | None,
+        channel_id: int | None,
+    ) -> list[str]:
+        """Return only the games enabled in this channel.
+
+        Backwards compatibility:
+        if the old `games` feature is enabled and no individual game has
+        been assigned, all games remain available in that channel.
+        """
+        if guild_id is None or channel_id is None:
+            return []
+
+        explicit = [
+            game
+            for game in GAME_FEATURE_KEYS
+            if self.is_feature_allowed(guild_id, channel_id, game)
+        ]
+        if explicit:
+            return explicit
+
+        if self.is_feature_allowed(guild_id, channel_id, "games"):
+            return list(GAME_FEATURE_KEYS)
+
+        return []
+
+    def is_game_allowed(
+        self,
+        guild_id: int | None,
+        channel_id: int | None,
+        game: str,
+    ) -> bool:
+        game_key = _normalize_feature(game)
+        if game_key not in GAME_FEATURE_KEYS:
+            return False
+
+        return game_key in self.available_games(guild_id, channel_id)
+
+    def is_games_menu_allowed(
+        self,
+        guild_id: int | None,
+        channel_id: int | None,
+    ) -> bool:
+        return bool(self.available_games(guild_id, channel_id))
