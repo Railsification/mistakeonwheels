@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 import asyncio
 import json
 import os
@@ -5,22 +7,24 @@ import time
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Optional, Dict, Any, List, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 
 import discord
 from discord import app_commands
 from discord.ext import commands, tasks
 
-from core.storage import configured_guild_ids, known_guild_dirs, load_guild_json, migrate_legacy_file_to_primary, save_guild_json
-
+from core.command_scope import bind_group_public
+from core.logger import ok, warn
+from core.storage import (
+    configured_guild_ids,
+    known_guild_dirs,
+    load_guild_json,
+    migrate_legacy_file_to_primary,
+    save_guild_json,
+)
 
 FEATURE_KEY = "suggestion_poll"
-DATA_DIR = Path(os.getenv("HOTBOT_DATA_DIR", "."))
-DATA_FILE = DATA_DIR / "suggestion_polls.json"
 SUGGESTION_POLLS_FILENAME = "suggestion_polls.json"
-SETTINGS_FILE = DATA_DIR / "settings.json"
-
-TECH_ROLE_NAMES = {"Tech"}  # change only if your actual hidden/support role is named differently
 MAX_IDEA_LEN = 180
 MAX_VISIBLE_IDEAS = 20
 
@@ -33,10 +37,10 @@ def iso_now() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
-def safe_int(value, default=0) -> int:
+def safe_int(value: object, default: int = 0) -> int:
     try:
         return int(value)
-    except Exception:
+    except (TypeError, ValueError):
         return default
 
 
@@ -60,8 +64,12 @@ class AddIdeaModal(discord.ui.Modal, title="Add WoS PFP idea"):
         self.cog = cog
         self.poll_id = poll_id
 
-    async def on_submit(self, interaction: discord.Interaction):
-        await self.cog.add_idea_from_ui(interaction, self.poll_id, str(self.idea.value))
+    async def on_submit(self, interaction: discord.Interaction) -> None:
+        await self.cog.add_idea_from_ui(
+            interaction,
+            self.poll_id,
+            str(self.idea.value),
+        )
 
 
 class VoteIdeaModal(discord.ui.Modal, title="Vote for an idea"):
@@ -77,8 +85,12 @@ class VoteIdeaModal(discord.ui.Modal, title="Vote for an idea"):
         self.cog = cog
         self.poll_id = poll_id
 
-    async def on_submit(self, interaction: discord.Interaction):
-        await self.cog.vote_from_ui(interaction, self.poll_id, safe_int(str(self.idea_number.value), -1))
+    async def on_submit(self, interaction: discord.Interaction) -> None:
+        await self.cog.vote_from_ui(
+            interaction,
+            self.poll_id,
+            safe_int(str(self.idea_number.value), -1),
+        )
 
 
 class SuggestionPollView(discord.ui.View):
@@ -87,15 +99,31 @@ class SuggestionPollView(discord.ui.View):
         self.cog = cog
         self.poll_id = poll_id
 
+    async def resolve_poll_id(
+        self,
+        interaction: discord.Interaction,
+    ) -> Optional[str]:
+        poll = self.cog.get_poll(self.poll_id)
+        if poll and poll.get("status") == "open":
+            return self.poll_id
+        return await self.cog.poll_id_from_message(interaction)
+
     @discord.ui.button(
         label="Add Idea",
         style=discord.ButtonStyle.primary,
         custom_id="suggestion_poll:add",
     )
-    async def add_idea_button(self, interaction: discord.Interaction, button: discord.ui.Button):
-        poll_id = await self.cog.poll_id_from_message(interaction)
+    async def add_idea_button(
+        self,
+        interaction: discord.Interaction,
+        button: discord.ui.Button,
+    ) -> None:
+        poll_id = await self.resolve_poll_id(interaction)
         if not poll_id:
-            await interaction.response.send_message("Couldn’t find that poll.", ephemeral=True)
+            await interaction.response.send_message(
+                "Couldn’t find that poll.",
+                ephemeral=True,
+            )
             return
         await interaction.response.send_modal(AddIdeaModal(self.cog, poll_id))
 
@@ -104,10 +132,17 @@ class SuggestionPollView(discord.ui.View):
         style=discord.ButtonStyle.success,
         custom_id="suggestion_poll:vote",
     )
-    async def vote_button(self, interaction: discord.Interaction, button: discord.ui.Button):
-        poll_id = await self.cog.poll_id_from_message(interaction)
+    async def vote_button(
+        self,
+        interaction: discord.Interaction,
+        button: discord.ui.Button,
+    ) -> None:
+        poll_id = await self.resolve_poll_id(interaction)
         if not poll_id:
-            await interaction.response.send_message("Couldn’t find that poll.", ephemeral=True)
+            await interaction.response.send_message(
+                "Couldn’t find that poll.",
+                ephemeral=True,
+            )
             return
         await interaction.response.send_modal(VoteIdeaModal(self.cog, poll_id))
 
@@ -116,10 +151,17 @@ class SuggestionPollView(discord.ui.View):
         style=discord.ButtonStyle.secondary,
         custom_id="suggestion_poll:refresh",
     )
-    async def refresh_button(self, interaction: discord.Interaction, button: discord.ui.Button):
-        poll_id = await self.cog.poll_id_from_message(interaction)
+    async def refresh_button(
+        self,
+        interaction: discord.Interaction,
+        button: discord.ui.Button,
+    ) -> None:
+        poll_id = await self.resolve_poll_id(interaction)
         if not poll_id:
-            await interaction.response.send_message("Couldn’t find that poll.", ephemeral=True)
+            await interaction.response.send_message(
+                "Couldn’t find that poll.",
+                ephemeral=True,
+            )
             return
         await self.cog.refresh_from_ui(interaction, poll_id)
 
@@ -129,246 +171,306 @@ class SuggestionPollCog(commands.Cog):
         self.bot = bot
         self.lock = asyncio.Lock()
         self.data: Dict[str, Any] = {"polls": {}}
+        self._persistent_views: Dict[int, SuggestionPollView] = {}
         self.load_data()
 
-    async def cog_load(self):
-        self.poll_watcher.start()
+    async def cog_load(self) -> None:
+        restored = self.restore_persistent_views()
+        ok(f"Restored {restored} open suggestion poll button view(s)")
+        if not self.poll_watcher.is_running():
+            self.poll_watcher.start()
 
-    async def cog_unload(self):
-        self.poll_watcher.cancel()
+    async def cog_unload(self) -> None:
+        if self.poll_watcher.is_running():
+            self.poll_watcher.cancel()
 
-    def _poll_guild_ids(self) -> list[int]:
-        ids = set(configured_guild_ids(self.bot)) | set(known_guild_dirs())
-        legacy = None
-        if DATA_FILE.exists():
+        for message_id, view in list(self._persistent_views.items()):
             try:
-                legacy = json.loads(DATA_FILE.read_text(encoding="utf-8"))
+                self.bot.remove_view(view, message_id=message_id)
             except Exception:
-                legacy = None
-        if isinstance(legacy, dict):
-            for poll in (legacy.get("polls") or {}).values():
-                try:
-                    gid = int(poll.get("guild_id"))
-                except Exception:
-                    continue
-                if gid:
-                    ids.add(gid)
-        return sorted(ids)
+                pass
+        self._persistent_views.clear()
 
-    def load_data(self):
-        DATA_DIR.mkdir(parents=True, exist_ok=True)
-        migrate_legacy_file_to_primary(SUGGESTION_POLLS_FILENAME, self.bot, {"polls": {}})
+    def _poll_guild_ids(self) -> List[int]:
+        return sorted(
+            set(configured_guild_ids(self.bot))
+            | set(known_guild_dirs())
+        )
+
+    @staticmethod
+    def _normalise_poll(poll: Dict[str, Any], guild_id: int) -> Dict[str, Any]:
+        poll["guild_id"] = safe_int(poll.get("guild_id"), guild_id)
+        poll["channel_id"] = safe_int(poll.get("channel_id"))
+        poll["message_id"] = safe_int(poll.get("message_id")) or None
+        poll["created_ts"] = safe_int(poll.get("created_ts"))
+        poll["end_ts"] = safe_int(poll.get("end_ts"))
+        poll["next_idea_no"] = max(1, safe_int(poll.get("next_idea_no"), 1))
+        poll.setdefault("status", "open")
+        poll.setdefault("ideas", {})
+        poll.setdefault("shortlist_size", 3)
+        poll.setdefault("allow_multi_vote", True)
+        return poll
+
+    def _load_legacy_root_files(self) -> Dict[str, Any]:
+        merged: Dict[str, Any] = {"polls": {}}
+        candidates = {
+            Path(SUGGESTION_POLLS_FILENAME),
+            Path("data") / SUGGESTION_POLLS_FILENAME,
+        }
+
+        env_dir = os.getenv("HOTBOT_DATA_DIR")
+        if env_dir:
+            candidates.add(Path(env_dir) / SUGGESTION_POLLS_FILENAME)
+
+        for path in candidates:
+            if not path.exists() or not path.is_file():
+                continue
+            try:
+                loaded = json.loads(path.read_text(encoding="utf-8"))
+            except Exception as exc:
+                warn(f"Could not read legacy suggestion poll file {path}: {exc!r}")
+                continue
+
+            polls = loaded.get("polls") if isinstance(loaded, dict) else None
+            if not isinstance(polls, dict):
+                continue
+
+            for poll_id, poll in polls.items():
+                if isinstance(poll, dict):
+                    merged["polls"].setdefault(str(poll_id), poll)
+
+        return merged
+
+    def load_data(self) -> None:
+        migrate_legacy_file_to_primary(
+            SUGGESTION_POLLS_FILENAME,
+            self.bot,
+            {"polls": {}},
+        )
+
         self.data = {"polls": {}}
 
         for guild_id in self._poll_guild_ids():
-            loaded = load_guild_json(guild_id, SUGGESTION_POLLS_FILENAME, {"polls": {}})
+            loaded = load_guild_json(
+                guild_id,
+                SUGGESTION_POLLS_FILENAME,
+                {"polls": {}},
+            )
             if not isinstance(loaded, dict):
                 continue
-            polls = loaded.get("polls") or {}
-            if isinstance(polls, dict):
-                for poll_id, poll in polls.items():
-                    if isinstance(poll, dict):
-                        poll["guild_id"] = int(poll.get("guild_id") or guild_id)
-                        self.data["polls"][str(poll_id)] = poll
 
-    def save_data(self):
-        DATA_DIR.mkdir(parents=True, exist_ok=True)
-        by_guild: dict[int, dict] = {}
-        for poll_id, poll in (self.data.get("polls") or {}).items():
-            try:
-                guild_id = int(poll.get("guild_id"))
-            except Exception:
+            polls = loaded.get("polls")
+            if not isinstance(polls, dict):
                 continue
+
+            for poll_id, poll in polls.items():
+                if not isinstance(poll, dict):
+                    continue
+                self.data["polls"][str(poll_id)] = self._normalise_poll(
+                    poll,
+                    guild_id,
+                )
+
+        imported_legacy = False
+        legacy = self._load_legacy_root_files()
+        for poll_id, poll in legacy.get("polls", {}).items():
+            if poll_id in self.data["polls"] or not isinstance(poll, dict):
+                continue
+
+            guild_id = safe_int(poll.get("guild_id"))
+            if not guild_id:
+                continue
+
+            self.data["polls"][poll_id] = self._normalise_poll(
+                poll,
+                guild_id,
+            )
+            imported_legacy = True
+
+        if imported_legacy:
+            self.save_data()
+
+    def save_data(self) -> None:
+        by_guild: Dict[int, Dict[str, Any]] = {}
+
+        for poll_id, poll in self.data.get("polls", {}).items():
+            guild_id = safe_int(poll.get("guild_id"))
+            if not guild_id:
+                continue
+
             by_guild.setdefault(guild_id, {"polls": {}})["polls"][str(poll_id)] = poll
 
-        for guild_id in set(self._poll_guild_ids()) | set(by_guild.keys()):
-            save_guild_json(guild_id, SUGGESTION_POLLS_FILENAME, by_guild.get(guild_id, {"polls": {}}))
+        guild_ids = set(self._poll_guild_ids()) | set(by_guild)
+        for guild_id in guild_ids:
+            save_guild_json(
+                guild_id,
+                SUGGESTION_POLLS_FILENAME,
+                by_guild.get(guild_id, {"polls": {}}),
+            )
+
+    def restore_persistent_views(self) -> int:
+        restored = 0
+
+        for poll_id, poll in self.data.get("polls", {}).items():
+            if poll.get("status") != "open":
+                continue
+
+            message_id = safe_int(poll.get("message_id"))
+            if not message_id:
+                continue
+
+            view = SuggestionPollView(self, str(poll_id))
+            try:
+                self.bot.add_view(view, message_id=message_id)
+            except Exception as exc:
+                warn(
+                    f"Could not restore suggestion poll {poll_id} "
+                    f"for message {message_id}: {exc!r}"
+                )
+                continue
+
+            self._persistent_views[message_id] = view
+            restored += 1
+
+        return restored
+
+    def remember_persistent_view(self, poll_id: str, message_id: int) -> None:
+        old_view = self._persistent_views.pop(message_id, None)
+        if old_view is not None:
+            try:
+                self.bot.remove_view(old_view, message_id=message_id)
+            except Exception:
+                pass
+
+        view = SuggestionPollView(self, poll_id)
+        self.bot.add_view(view, message_id=message_id)
+        self._persistent_views[message_id] = view
 
     async def interaction_allowed(self, interaction: discord.Interaction) -> bool:
         if not interaction.guild or not interaction.channel:
             return False
 
-        guild_id = interaction.guild.id
-        channel_id = interaction.channel.id
-
         settings = getattr(self.bot, "settings", None)
-        if settings is not None and hasattr(settings, "is_feature_allowed"):
-            try:
-                return bool(settings.is_feature_allowed(guild_id, channel_id, FEATURE_KEY))
-            except Exception:
-                pass
-
-        possible_helpers = [
-            "feature_allowed",
-            "is_feature_allowed",
-            "feature_channel_allowed",
-            "is_feature_channel",
-            "check_feature_channel",
-        ]
-
-        for helper_name in possible_helpers:
-            helper = getattr(self.bot, helper_name, None)
-            if callable(helper):
-                try:
-                    result = helper(guild_id, channel_id, FEATURE_KEY)
-                    if asyncio.iscoroutine(result):
-                        result = await result
-                    return bool(result)
-                except TypeError:
-                    try:
-                        result = helper(interaction, FEATURE_KEY)
-                        if asyncio.iscoroutine(result):
-                            result = await result
-                        return bool(result)
-                    except Exception:
-                        pass
-                except Exception:
-                    pass
-
-        return self.settings_json_allows(guild_id, channel_id)
-
-    def settings_json_allows(self, guild_id: int, channel_id: int) -> bool:
-        if not SETTINGS_FILE.exists():
+        if settings is None or not hasattr(settings, "is_feature_allowed"):
             return False
 
         try:
-            with SETTINGS_FILE.open("r", encoding="utf-8") as f:
-                settings = json.load(f)
+            return bool(
+                settings.is_feature_allowed(
+                    interaction.guild.id,
+                    interaction.channel.id,
+                    FEATURE_KEY,
+                )
+            )
         except Exception:
             return False
-
-        guild_keys = [str(guild_id), guild_id]
-        guild_settings = None
-
-        for key in guild_keys:
-            if key in settings:
-                guild_settings = settings[key]
-                break
-
-        if guild_settings is None:
-            guild_settings = settings
-
-        possible_paths = [
-            ("feature_channels", FEATURE_KEY),
-            ("features", FEATURE_KEY),
-            ("channels", FEATURE_KEY),
-            ("allowed_channels", FEATURE_KEY),
-        ]
-
-        for section, feature in possible_paths:
-            section_data = guild_settings.get(section, {})
-            if isinstance(section_data, dict):
-                channels = section_data.get(feature, [])
-                if isinstance(channels, dict):
-                    channels = channels.get("channels", [])
-                if str(channel_id) in [str(x) for x in channels]:
-                    return True
-
-        flat = guild_settings.get(FEATURE_KEY)
-        if isinstance(flat, list) and str(channel_id) in [str(x) for x in flat]:
-            return True
-
-        return False
 
     async def require_feature_channel(self, interaction: discord.Interaction) -> bool:
         if await self.interaction_allowed(interaction):
             return True
 
         await interaction.response.send_message(
-            "Suggestion polls are not enabled in this channel yet. Use the existing feature channel setup for `suggestion_poll`.",
+            "Suggestion polls are not enabled in this channel yet. "
+            "Use the existing feature channel setup for `suggestion_poll`.",
             ephemeral=True,
         )
-        return False
-
-    def member_is_tech(self, interaction: discord.Interaction) -> bool:
-        member = interaction.user
-        if not isinstance(member, discord.Member):
-            return False
-
-        member_role_names = {role.name for role in member.roles}
-        return bool(member_role_names & TECH_ROLE_NAMES)
-
-    async def require_tech(self, interaction: discord.Interaction) -> bool:
-        if self.member_is_tech(interaction):
-            return True
-
-        await interaction.response.send_message("Nope. Tech role only.", ephemeral=True)
         return False
 
     def new_poll_id(self) -> str:
         return uuid.uuid4().hex[:8]
 
     def get_poll(self, poll_id: str) -> Optional[Dict[str, Any]]:
-        return self.data.get("polls", {}).get(poll_id)
+        return self.data.get("polls", {}).get(str(poll_id))
 
-    def get_open_poll_for_channel(self, guild_id: int, channel_id: int) -> Optional[Tuple[str, Dict[str, Any]]]:
-        polls = self.data.get("polls", {})
-        matches = []
+    def get_open_poll_for_channel(
+        self,
+        guild_id: int,
+        channel_id: int,
+    ) -> Optional[Tuple[str, Dict[str, Any]]]:
+        matches: List[Tuple[str, Dict[str, Any]]] = []
 
-        for poll_id, poll in polls.items():
+        for poll_id, poll in self.data.get("polls", {}).items():
             if (
-                poll.get("guild_id") == guild_id
-                and poll.get("channel_id") == channel_id
+                safe_int(poll.get("guild_id")) == guild_id
+                and safe_int(poll.get("channel_id")) == channel_id
                 and poll.get("status") == "open"
             ):
-                matches.append((poll_id, poll))
+                matches.append((str(poll_id), poll))
 
         if not matches:
             return None
 
-        matches.sort(key=lambda item: item[1].get("created_ts", 0), reverse=True)
+        matches.sort(
+            key=lambda item: safe_int(item[1].get("created_ts")),
+            reverse=True,
+        )
         return matches[0]
 
-    async def poll_id_from_message(self, interaction: discord.Interaction) -> Optional[str]:
-        message = interaction.message
-        if not message:
+    async def poll_id_from_message(
+        self,
+        interaction: discord.Interaction,
+    ) -> Optional[str]:
+        if not interaction.message:
             return None
 
+        message_id = interaction.message.id
         for poll_id, poll in self.data.get("polls", {}).items():
-            if poll.get("message_id") == message.id:
-                return poll_id
-
+            if safe_int(poll.get("message_id")) == message_id:
+                return str(poll_id)
         return None
 
-    def sorted_ideas(self, poll: Dict[str, Any]) -> List[Tuple[int, Dict[str, Any]]]:
-        ideas = poll.get("ideas", {})
-        rows = []
-
-        for idea_no, idea in ideas.items():
-            rows.append((safe_int(idea_no), idea))
-
+    def sorted_ideas(
+        self,
+        poll: Dict[str, Any],
+    ) -> List[Tuple[int, Dict[str, Any]]]:
+        rows = [
+            (safe_int(idea_no), idea)
+            for idea_no, idea in poll.get("ideas", {}).items()
+            if isinstance(idea, dict)
+        ]
         rows.sort(key=lambda item: item[0])
         return rows
 
-    def ranked_ideas(self, poll: Dict[str, Any]) -> List[Tuple[int, Dict[str, Any], int]]:
-        rows = []
-
-        for idea_no, idea in self.sorted_ideas(poll):
-            voters = idea.get("voters", [])
-            rows.append((idea_no, idea, len(voters)))
-
+    def ranked_ideas(
+        self,
+        poll: Dict[str, Any],
+    ) -> List[Tuple[int, Dict[str, Any], int]]:
+        rows = [
+            (idea_no, idea, len(idea.get("voters", [])))
+            for idea_no, idea in self.sorted_ideas(poll)
+        ]
         rows.sort(key=lambda item: (-item[2], item[0]))
         return rows
 
-    def shortlist(self, poll: Dict[str, Any]) -> List[Tuple[int, Dict[str, Any], int]]:
+    def shortlist(
+        self,
+        poll: Dict[str, Any],
+    ) -> List[Tuple[int, Dict[str, Any], int]]:
         ranked = self.ranked_ideas(poll)
         if not ranked:
             return []
 
         size = max(1, safe_int(poll.get("shortlist_size"), 3))
         base = ranked[:size]
-
         if len(ranked) <= size:
             return base
 
         cutoff_votes = base[-1][2]
-        extra_ties = [row for row in ranked[size:] if row[2] == cutoff_votes and cutoff_votes > 0]
+        extra_ties = [
+            row
+            for row in ranked[size:]
+            if cutoff_votes > 0 and row[2] == cutoff_votes
+        ]
         return base + extra_ties
 
-    def build_embed(self, poll_id: str, poll: Dict[str, Any], final: bool = False) -> discord.Embed:
+    def build_embed(
+        self,
+        poll_id: str,
+        poll: Dict[str, Any],
+        final: bool = False,
+    ) -> discord.Embed:
         status = poll.get("status", "open")
         title = poll.get("title") or "WoS PFP Theme Suggestions"
-        end_ts = poll.get("end_ts", 0)
 
         if final or status == "closed":
             embed_title = f"🏁 Closed: {title}"
@@ -380,16 +482,23 @@ class SuggestionPollCog(commands.Cog):
             embed_title = f"📸 {title}"
             colour = discord.Colour.blurple()
 
-        description = poll.get("description") or "Drop WoS profile picture theme ideas, then vote for the ones you want."
         embed = discord.Embed(
             title=embed_title,
-            description=description,
+            description=(
+                poll.get("description")
+                or "Drop WoS profile picture theme ideas, then vote for the ones you want."
+            ),
             colour=colour,
             timestamp=datetime.now(timezone.utc),
         )
 
         if status == "open":
-            embed.add_field(name="Ends", value=f"<t:{end_ts}:F>\n<t:{end_ts}:R>", inline=True)
+            end_ts = safe_int(poll.get("end_ts"))
+            embed.add_field(
+                name="Ends",
+                value=f"<t:{end_ts}:F>\n<t:{end_ts}:R>",
+                inline=True,
+            )
         else:
             embed.add_field(name="Status", value=status.title(), inline=True)
 
@@ -403,12 +512,14 @@ class SuggestionPollCog(commands.Cog):
                 inline=False,
             )
         else:
-            lines = []
+            lines: List[str] = []
             for idea_no, idea in ideas[:MAX_VISIBLE_IDEAS]:
-                voters = idea.get("voters", [])
-                vote_word = "vote" if len(voters) == 1 else "votes"
-                text = truncate(idea.get("text", ""), 90)
-                lines.append(f"**{idea_no}.** {text} — **{len(voters)}** {vote_word}")
+                votes = len(idea.get("voters", []))
+                vote_word = "vote" if votes == 1 else "votes"
+                lines.append(
+                    f"**{idea_no}.** {truncate(idea.get('text', ''), 90)} "
+                    f"— **{votes}** {vote_word}"
+                )
 
             hidden = len(ideas) - MAX_VISIBLE_IDEAS
             if hidden > 0:
@@ -419,53 +530,80 @@ class SuggestionPollCog(commands.Cog):
         if final or status == "closed":
             top = self.shortlist(poll)
             if not top:
-                embed.add_field(name="Result", value="No ideas were added.", inline=False)
+                embed.add_field(
+                    name="Result",
+                    value="No ideas were added.",
+                    inline=False,
+                )
             else:
                 top_lines = []
                 for idea_no, idea, votes in top:
                     vote_word = "vote" if votes == 1 else "votes"
-                    top_lines.append(f"**{idea_no}.** {truncate(idea.get('text', ''), 120)} — **{votes}** {vote_word}")
-                embed.add_field(name="Winner / Shortlist", value="\n".join(top_lines), inline=False)
+                    top_lines.append(
+                        f"**{idea_no}.** {truncate(idea.get('text', ''), 120)} "
+                        f"— **{votes}** {vote_word}"
+                    )
+                embed.add_field(
+                    name="Winner / Shortlist",
+                    value="\n".join(top_lines),
+                    inline=False,
+                )
 
-        embed.set_footer(text="Use /suggestion add, /suggestion vote, or the buttons below.")
+        embed.set_footer(
+            text="Use /suggestion add, /suggestion vote, or the buttons below."
+        )
         return embed
 
-    async def update_poll_message(self, poll_id: str):
+    async def get_poll_channel(
+        self,
+        poll: Dict[str, Any],
+    ) -> Optional[discord.TextChannel]:
+        guild = self.bot.get_guild(safe_int(poll.get("guild_id")))
+        if guild is None:
+            return None
+
+        channel = guild.get_channel(safe_int(poll.get("channel_id")))
+        if isinstance(channel, discord.TextChannel):
+            return channel
+        return None
+
+    async def update_poll_message(self, poll_id: str) -> None:
         poll = self.get_poll(poll_id)
         if not poll:
             return
 
-        guild = self.bot.get_guild(poll.get("guild_id"))
-        if not guild:
-            return
-
-        channel = guild.get_channel(poll.get("channel_id"))
-        if not isinstance(channel, discord.TextChannel):
-            return
-
-        message_id = poll.get("message_id")
-        if not message_id:
+        channel = await self.get_poll_channel(poll)
+        message_id = safe_int(poll.get("message_id"))
+        if channel is None or not message_id:
             return
 
         try:
             message = await channel.fetch_message(message_id)
-        except Exception:
+        except (discord.NotFound, discord.Forbidden, discord.HTTPException):
             return
 
-        view = None if poll.get("status") != "open" else SuggestionPollView(self, poll_id)
+        view: Optional[discord.ui.View]
+        if poll.get("status") == "open":
+            view = SuggestionPollView(self, poll_id)
+        else:
+            view = None
+            stored_view = self._persistent_views.pop(message_id, None)
+            if stored_view is not None:
+                try:
+                    self.bot.remove_view(stored_view, message_id=message_id)
+                except Exception:
+                    pass
+
         await message.edit(embed=self.build_embed(poll_id, poll), view=view)
 
-    async def post_final_result(self, poll_id: str, poll: Dict[str, Any]):
-        guild = self.bot.get_guild(poll.get("guild_id"))
-        if not guild:
-            return
-
-        channel = guild.get_channel(poll.get("channel_id"))
-        if not isinstance(channel, discord.TextChannel):
-            return
-
-        embed = self.build_embed(poll_id, poll, final=True)
-        await channel.send(embed=embed)
+    async def post_final_result(
+        self,
+        poll_id: str,
+        poll: Dict[str, Any],
+    ) -> None:
+        channel = await self.get_poll_channel(poll)
+        if channel is not None:
+            await channel.send(embed=self.build_embed(poll_id, poll, final=True))
 
     async def close_poll(self, poll_id: str, post_result: bool = True) -> bool:
         async with self.lock:
@@ -478,26 +616,24 @@ class SuggestionPollCog(commands.Cog):
             self.save_data()
 
         await self.update_poll_message(poll_id)
-
         if post_result:
             await self.post_final_result(poll_id, poll)
-
         return True
 
     @tasks.loop(minutes=5)
-    async def poll_watcher(self):
-        await self.bot.wait_until_ready()
-
-        due = []
-        for poll_id, poll in self.data.get("polls", {}).items():
-            if poll.get("status") == "open" and safe_int(poll.get("end_ts")) <= now_ts():
-                due.append(poll_id)
+    async def poll_watcher(self) -> None:
+        due = [
+            poll_id
+            for poll_id, poll in self.data.get("polls", {}).items()
+            if poll.get("status") == "open"
+            and safe_int(poll.get("end_ts")) <= now_ts()
+        ]
 
         for poll_id in due:
-            await self.close_poll(poll_id, post_result=True)
+            await self.close_poll(str(poll_id), post_result=True)
 
     @poll_watcher.before_loop
-    async def before_poll_watcher(self):
+    async def before_poll_watcher(self) -> None:
         await self.bot.wait_until_ready()
 
     async def add_idea_core(
@@ -507,7 +643,6 @@ class SuggestionPollCog(commands.Cog):
         idea_text: str,
     ) -> Tuple[bool, str]:
         idea_text = truncate(idea_text.strip(), MAX_IDEA_LEN)
-
         if not idea_text:
             return False, "Idea cannot be empty."
 
@@ -515,19 +650,18 @@ class SuggestionPollCog(commands.Cog):
             poll = self.get_poll(poll_id)
             if not poll:
                 return False, "Poll not found."
-
             if poll.get("status") != "open":
                 return False, "That poll is closed."
 
-            existing = [
+            existing = {
                 idea.get("text", "").strip().lower()
                 for idea in poll.get("ideas", {}).values()
-            ]
-
+                if isinstance(idea, dict)
+            }
             if idea_text.lower() in existing:
                 return False, "That idea is already in the poll."
 
-            idea_no = str(poll.get("next_idea_no", 1))
+            idea_no = str(max(1, safe_int(poll.get("next_idea_no"), 1)))
             poll.setdefault("ideas", {})[idea_no] = {
                 "text": idea_text,
                 "author_id": user_id,
@@ -553,26 +687,21 @@ class SuggestionPollCog(commands.Cog):
             poll = self.get_poll(poll_id)
             if not poll:
                 return False, "Poll not found."
-
             if poll.get("status") != "open":
                 return False, "That poll is closed."
 
             ideas = poll.get("ideas", {})
             idea_key = str(idea_number)
-
             if idea_key not in ideas:
                 return False, "That idea number does not exist."
 
-            allow_multi = bool(poll.get("allow_multi_vote", True))
-
-            if not allow_multi:
+            if not bool(poll.get("allow_multi_vote", True)):
                 for idea in ideas.values():
                     voters = idea.setdefault("voters", [])
                     if user_id in voters:
                         voters.remove(user_id)
 
             voters = ideas[idea_key].setdefault("voters", [])
-
             if user_id in voters:
                 return False, f"You already voted for idea **{idea_number}**."
 
@@ -595,18 +724,15 @@ class SuggestionPollCog(commands.Cog):
             poll = self.get_poll(poll_id)
             if not poll:
                 return False, "Poll not found."
-
             if poll.get("status") != "open":
                 return False, "That poll is closed."
 
             ideas = poll.get("ideas", {})
             idea_key = str(idea_number)
-
             if idea_key not in ideas:
                 return False, "That idea number does not exist."
 
             voters = ideas[idea_key].setdefault("voters", [])
-
             if user_id not in voters:
                 return False, f"You have not voted for idea **{idea_number}**."
 
@@ -616,25 +742,56 @@ class SuggestionPollCog(commands.Cog):
         await self.update_poll_message(poll_id)
         return True, f"Removed your vote from idea **{idea_number}**."
 
-    async def add_idea_from_ui(self, interaction: discord.Interaction, poll_id: str, idea_text: str):
+    async def add_idea_from_ui(
+        self,
+        interaction: discord.Interaction,
+        poll_id: str,
+        idea_text: str,
+    ) -> None:
         if not await self.interaction_allowed(interaction):
-            await interaction.response.send_message("Suggestion polls are not enabled in this channel.", ephemeral=True)
+            await interaction.response.send_message(
+                "Suggestion polls are not enabled in this channel.",
+                ephemeral=True,
+            )
             return
 
-        ok, message = await self.add_idea_core(poll_id, interaction.user.id, idea_text)
+        _, message = await self.add_idea_core(
+            poll_id,
+            interaction.user.id,
+            idea_text,
+        )
         await interaction.response.send_message(message, ephemeral=True)
 
-    async def vote_from_ui(self, interaction: discord.Interaction, poll_id: str, idea_number: int):
+    async def vote_from_ui(
+        self,
+        interaction: discord.Interaction,
+        poll_id: str,
+        idea_number: int,
+    ) -> None:
         if not await self.interaction_allowed(interaction):
-            await interaction.response.send_message("Suggestion polls are not enabled in this channel.", ephemeral=True)
+            await interaction.response.send_message(
+                "Suggestion polls are not enabled in this channel.",
+                ephemeral=True,
+            )
             return
 
-        ok, message = await self.vote_core(poll_id, interaction.user.id, idea_number)
+        _, message = await self.vote_core(
+            poll_id,
+            interaction.user.id,
+            idea_number,
+        )
         await interaction.response.send_message(message, ephemeral=True)
 
-    async def refresh_from_ui(self, interaction: discord.Interaction, poll_id: str):
+    async def refresh_from_ui(
+        self,
+        interaction: discord.Interaction,
+        poll_id: str,
+    ) -> None:
         if not await self.interaction_allowed(interaction):
-            await interaction.response.send_message("Suggestion polls are not enabled in this channel.", ephemeral=True)
+            await interaction.response.send_message(
+                "Suggestion polls are not enabled in this channel.",
+                ephemeral=True,
+            )
             return
 
         await self.update_poll_message(poll_id)
@@ -647,20 +804,31 @@ suggestion_group = app_commands.Group(
 )
 
 
-@suggestion_group.command(name="help", description="Show how suggestion polls work.")
-async def suggestion_help(interaction: discord.Interaction):
-    cog: SuggestionPollCog = interaction.client.get_cog("SuggestionPollCog")
-    if not cog:
-        await interaction.response.send_message("Suggestion poll cog is not loaded.", ephemeral=True)
-        return
+async def get_suggestion_cog(
+    interaction: discord.Interaction,
+) -> Optional[SuggestionPollCog]:
+    cog = interaction.client.get_cog("SuggestionPollCog")
+    if isinstance(cog, SuggestionPollCog):
+        return cog
 
-    if not await cog.require_feature_channel(interaction):
+    await interaction.response.send_message(
+        "Suggestion poll cog is not loaded.",
+        ephemeral=True,
+    )
+    return None
+
+
+@suggestion_group.command(name="help", description="Show how suggestion polls work.")
+async def suggestion_help(interaction: discord.Interaction) -> None:
+    cog = await get_suggestion_cog(interaction)
+    if not cog or not await cog.require_feature_channel(interaction):
         return
 
     embed = discord.Embed(
         title="📸 WoS PFP Suggestion Polls",
         description=(
-            "Use this to collect profile picture theme ideas, vote on them, then pick a winner or shortlist."
+            "Use this to collect profile picture theme ideas, vote on them, "
+            "then pick a winner or shortlist."
         ),
         colour=discord.Colour.blurple(),
     )
@@ -698,20 +866,22 @@ async def suggestion_start(
     shortlist_size: app_commands.Range[int, 1, 10] = 3,
     allow_multi_vote: bool = True,
     description: Optional[str] = None,
-):
-    cog: SuggestionPollCog = interaction.client.get_cog("SuggestionPollCog")
-    if not cog:
-        await interaction.response.send_message("Suggestion poll cog is not loaded.", ephemeral=True)
+) -> None:
+    cog = await get_suggestion_cog(interaction)
+    if not cog or not await cog.require_feature_channel(interaction):
         return
 
-    if not await cog.require_feature_channel(interaction):
+    if not interaction.guild or not isinstance(interaction.channel, discord.TextChannel):
+        await interaction.response.send_message(
+            "Use this inside a server text channel.",
+            ephemeral=True,
+        )
         return
 
-    if not interaction.guild or not interaction.channel:
-        await interaction.response.send_message("Use this inside a server channel.", ephemeral=True)
-        return
-
-    existing = cog.get_open_poll_for_channel(interaction.guild.id, interaction.channel.id)
+    existing = cog.get_open_poll_for_channel(
+        interaction.guild.id,
+        interaction.channel.id,
+    )
     if existing:
         poll_id, _ = existing
         await interaction.response.send_message(
@@ -721,18 +891,19 @@ async def suggestion_start(
         return
 
     poll_id = cog.new_poll_id()
-    end_ts = now_ts() + int(duration_days) * 86400
-
-    poll = {
+    poll: Dict[str, Any] = {
         "guild_id": interaction.guild.id,
         "channel_id": interaction.channel.id,
         "message_id": None,
         "title": title or "WoS PFP Theme Suggestions",
-        "description": description or "Drop WoS profile picture theme ideas, then vote for the ones you want.",
+        "description": (
+            description
+            or "Drop WoS profile picture theme ideas, then vote for the ones you want."
+        ),
         "created_by": interaction.user.id,
         "created_at": iso_now(),
         "created_ts": now_ts(),
-        "end_ts": end_ts,
+        "end_ts": now_ts() + int(duration_days) * 86400,
         "status": "open",
         "shortlist_size": int(shortlist_size),
         "allow_multi_vote": bool(allow_multi_vote),
@@ -744,114 +915,154 @@ async def suggestion_start(
         cog.data.setdefault("polls", {})[poll_id] = poll
         cog.save_data()
 
-    embed = cog.build_embed(poll_id, poll)
-    view = SuggestionPollView(cog, poll_id)
-
-    await interaction.response.send_message(embed=embed, view=view)
+    await interaction.response.send_message(
+        embed=cog.build_embed(poll_id, poll),
+        view=SuggestionPollView(cog, poll_id),
+    )
     sent = await interaction.original_response()
 
     async with cog.lock:
         poll["message_id"] = sent.id
         cog.save_data()
 
+    cog.remember_persistent_view(poll_id, sent.id)
+
 
 @suggestion_group.command(name="add", description="Add an idea to the open suggestion poll.")
 @app_commands.describe(idea="Your WoS PFP theme idea")
-async def suggestion_add(interaction: discord.Interaction, idea: str):
-    cog: SuggestionPollCog = interaction.client.get_cog("SuggestionPollCog")
-    if not cog:
-        await interaction.response.send_message("Suggestion poll cog is not loaded.", ephemeral=True)
+async def suggestion_add(
+    interaction: discord.Interaction,
+    idea: str,
+) -> None:
+    cog = await get_suggestion_cog(interaction)
+    if not cog or not await cog.require_feature_channel(interaction):
         return
-
-    if not await cog.require_feature_channel(interaction):
-        return
-
     if not interaction.guild or not interaction.channel:
-        await interaction.response.send_message("Use this inside a server channel.", ephemeral=True)
+        await interaction.response.send_message(
+            "Use this inside a server channel.",
+            ephemeral=True,
+        )
         return
 
-    active = cog.get_open_poll_for_channel(interaction.guild.id, interaction.channel.id)
+    active = cog.get_open_poll_for_channel(
+        interaction.guild.id,
+        interaction.channel.id,
+    )
     if not active:
-        await interaction.response.send_message("No open suggestion poll in this channel.", ephemeral=True)
+        await interaction.response.send_message(
+            "No open suggestion poll in this channel.",
+            ephemeral=True,
+        )
         return
 
     poll_id, _ = active
-    ok, message = await cog.add_idea_core(poll_id, interaction.user.id, idea)
+    _, message = await cog.add_idea_core(poll_id, interaction.user.id, idea)
     await interaction.response.send_message(message, ephemeral=True)
 
 
 @suggestion_group.command(name="vote", description="Vote for an idea number.")
 @app_commands.describe(idea_number="The idea number shown on the poll")
-async def suggestion_vote(interaction: discord.Interaction, idea_number: int):
-    cog: SuggestionPollCog = interaction.client.get_cog("SuggestionPollCog")
-    if not cog:
-        await interaction.response.send_message("Suggestion poll cog is not loaded.", ephemeral=True)
+async def suggestion_vote(
+    interaction: discord.Interaction,
+    idea_number: int,
+) -> None:
+    cog = await get_suggestion_cog(interaction)
+    if not cog or not await cog.require_feature_channel(interaction):
         return
-
-    if not await cog.require_feature_channel(interaction):
-        return
-
     if not interaction.guild or not interaction.channel:
-        await interaction.response.send_message("Use this inside a server channel.", ephemeral=True)
+        await interaction.response.send_message(
+            "Use this inside a server channel.",
+            ephemeral=True,
+        )
         return
 
-    active = cog.get_open_poll_for_channel(interaction.guild.id, interaction.channel.id)
+    active = cog.get_open_poll_for_channel(
+        interaction.guild.id,
+        interaction.channel.id,
+    )
     if not active:
-        await interaction.response.send_message("No open suggestion poll in this channel.", ephemeral=True)
+        await interaction.response.send_message(
+            "No open suggestion poll in this channel.",
+            ephemeral=True,
+        )
         return
 
     poll_id, _ = active
-    ok, message = await cog.vote_core(poll_id, interaction.user.id, idea_number)
+    _, message = await cog.vote_core(
+        poll_id,
+        interaction.user.id,
+        idea_number,
+    )
     await interaction.response.send_message(message, ephemeral=True)
 
 
-@suggestion_group.command(name="remove_vote", description="Remove your vote from an idea.")
+@suggestion_group.command(
+    name="remove_vote",
+    description="Remove your vote from an idea.",
+)
 @app_commands.describe(idea_number="The idea number shown on the poll")
-async def suggestion_remove_vote(interaction: discord.Interaction, idea_number: int):
-    cog: SuggestionPollCog = interaction.client.get_cog("SuggestionPollCog")
-    if not cog:
-        await interaction.response.send_message("Suggestion poll cog is not loaded.", ephemeral=True)
+async def suggestion_remove_vote(
+    interaction: discord.Interaction,
+    idea_number: int,
+) -> None:
+    cog = await get_suggestion_cog(interaction)
+    if not cog or not await cog.require_feature_channel(interaction):
         return
-
-    if not await cog.require_feature_channel(interaction):
-        return
-
     if not interaction.guild or not interaction.channel:
-        await interaction.response.send_message("Use this inside a server channel.", ephemeral=True)
+        await interaction.response.send_message(
+            "Use this inside a server channel.",
+            ephemeral=True,
+        )
         return
 
-    active = cog.get_open_poll_for_channel(interaction.guild.id, interaction.channel.id)
+    active = cog.get_open_poll_for_channel(
+        interaction.guild.id,
+        interaction.channel.id,
+    )
     if not active:
-        await interaction.response.send_message("No open suggestion poll in this channel.", ephemeral=True)
+        await interaction.response.send_message(
+            "No open suggestion poll in this channel.",
+            ephemeral=True,
+        )
         return
 
     poll_id, _ = active
-    ok, message = await cog.remove_vote_core(poll_id, interaction.user.id, idea_number)
+    _, message = await cog.remove_vote_core(
+        poll_id,
+        interaction.user.id,
+        idea_number,
+    )
     await interaction.response.send_message(message, ephemeral=True)
 
 
-@suggestion_group.command(name="results", description="Show current suggestion poll results.")
-async def suggestion_results(interaction: discord.Interaction):
-    cog: SuggestionPollCog = interaction.client.get_cog("SuggestionPollCog")
-    if not cog:
-        await interaction.response.send_message("Suggestion poll cog is not loaded.", ephemeral=True)
+@suggestion_group.command(
+    name="results",
+    description="Show current suggestion poll results.",
+)
+async def suggestion_results(interaction: discord.Interaction) -> None:
+    cog = await get_suggestion_cog(interaction)
+    if not cog or not await cog.require_feature_channel(interaction):
         return
-
-    if not await cog.require_feature_channel(interaction):
-        return
-
     if not interaction.guild or not interaction.channel:
-        await interaction.response.send_message("Use this inside a server channel.", ephemeral=True)
+        await interaction.response.send_message(
+            "Use this inside a server channel.",
+            ephemeral=True,
+        )
         return
 
-    active = cog.get_open_poll_for_channel(interaction.guild.id, interaction.channel.id)
+    active = cog.get_open_poll_for_channel(
+        interaction.guild.id,
+        interaction.channel.id,
+    )
     if not active:
-        await interaction.response.send_message("No open suggestion poll in this channel.", ephemeral=True)
+        await interaction.response.send_message(
+            "No open suggestion poll in this channel.",
+            ephemeral=True,
+        )
         return
 
     poll_id, poll = active
     ranked = cog.ranked_ideas(poll)
-
     if not ranked:
         await interaction.response.send_message("No ideas yet.", ephemeral=True)
         return
@@ -859,7 +1070,10 @@ async def suggestion_results(interaction: discord.Interaction):
     lines = []
     for idea_no, idea, votes in ranked[:10]:
         vote_word = "vote" if votes == 1 else "votes"
-        lines.append(f"**{idea_no}.** {truncate(idea.get('text', ''), 100)} — **{votes}** {vote_word}")
+        lines.append(
+            f"**{idea_no}.** {truncate(idea.get('text', ''), 100)} "
+            f"— **{votes}** {vote_word}"
+        )
 
     embed = discord.Embed(
         title="Current Suggestion Results",
@@ -867,119 +1081,10 @@ async def suggestion_results(interaction: discord.Interaction):
         colour=discord.Colour.blurple(),
     )
     embed.set_footer(text=f"Poll ID: {poll_id}")
-
     await interaction.response.send_message(embed=embed, ephemeral=True)
 
 
-council_group = app_commands.Group(
-    name="council",
-    description="Bot council tools",
-)
-
-
-@council_group.command(name="suggestion_help_post", description="Post suggestion poll help into this channel.")
-async def council_suggestion_help_post(interaction: discord.Interaction):
-    cog: SuggestionPollCog = interaction.client.get_cog("SuggestionPollCog")
-    if not cog:
-        await interaction.response.send_message("Suggestion poll cog is not loaded.", ephemeral=True)
-        return
-
-    if not await cog.require_tech(interaction):
-        return
-
-    if not isinstance(interaction.channel, discord.TextChannel):
-        await interaction.response.send_message("Use this in a text channel.", ephemeral=True)
-        return
-
-    embed = discord.Embed(
-        title="📸 WoS PFP Suggestion Polls",
-        description="Add PFP theme ideas, vote on them, then we use the winner or shortlist for the next theme.",
-        colour=discord.Colour.blurple(),
-    )
-    embed.add_field(
-        name="How to use",
-        value=(
-            "`/suggestion add idea:your idea`\n"
-            "`/suggestion vote idea_number:1`\n"
-            "`/suggestion results`"
-        ),
-        inline=False,
-    )
-    embed.add_field(
-        name="Notes",
-        value="Polls usually run for a week. When the poll closes, the bot posts the winner/shortlist.",
-        inline=False,
-    )
-
-    await interaction.channel.send(embed=embed)
-    await interaction.response.send_message("Posted suggestion poll help.", ephemeral=True)
-
-
-@council_group.command(name="suggestion_close", description="Force-close the active suggestion poll in this channel.")
-async def council_suggestion_close(interaction: discord.Interaction):
-    cog: SuggestionPollCog = interaction.client.get_cog("SuggestionPollCog")
-    if not cog:
-        await interaction.response.send_message("Suggestion poll cog is not loaded.", ephemeral=True)
-        return
-
-    if not await cog.require_tech(interaction):
-        return
-
-    if not interaction.guild or not interaction.channel:
-        await interaction.response.send_message("Use this inside a server channel.", ephemeral=True)
-        return
-
-    active = cog.get_open_poll_for_channel(interaction.guild.id, interaction.channel.id)
-    if not active:
-        await interaction.response.send_message("No open suggestion poll in this channel.", ephemeral=True)
-        return
-
-    poll_id, _ = active
-    closed = await cog.close_poll(poll_id, post_result=True)
-
-    if closed:
-        await interaction.response.send_message(f"Closed suggestion poll `{poll_id}`.", ephemeral=True)
-    else:
-        await interaction.response.send_message("Could not close that poll.", ephemeral=True)
-
-
-@council_group.command(name="suggestion_cancel", description="Cancel the active suggestion poll without posting a winner.")
-async def council_suggestion_cancel(interaction: discord.Interaction):
-    cog: SuggestionPollCog = interaction.client.get_cog("SuggestionPollCog")
-    if not cog:
-        await interaction.response.send_message("Suggestion poll cog is not loaded.", ephemeral=True)
-        return
-
-    if not await cog.require_tech(interaction):
-        return
-
-    if not interaction.guild or not interaction.channel:
-        await interaction.response.send_message("Use this inside a server channel.", ephemeral=True)
-        return
-
-    active = cog.get_open_poll_for_channel(interaction.guild.id, interaction.channel.id)
-    if not active:
-        await interaction.response.send_message("No open suggestion poll in this channel.", ephemeral=True)
-        return
-
-    poll_id, poll = active
-
-    async with cog.lock:
-        poll["status"] = "cancelled"
-        poll["cancelled_ts"] = now_ts()
-        cog.save_data()
-
-    await cog.update_poll_message(poll_id)
-    await interaction.response.send_message(f"Cancelled suggestion poll `{poll_id}`.", ephemeral=True)
-
-
-class SuggestionPollBotCog(SuggestionPollCog):
-    pass
-
-
-async def setup(bot: commands.Bot):
-    from core.command_scope import bind_group_public
-
+async def setup(bot: commands.Bot) -> None:
     cog = SuggestionPollCog(bot)
     await bot.add_cog(cog)
 
@@ -988,6 +1093,3 @@ async def setup(bot: commands.Bot):
         bot.tree.add_command(suggestion_group)
     except app_commands.CommandAlreadyRegistered:
         pass
-
-    # Admin controls for suggestions live under /council in cogs/admin.py.
-    # Do not register another /council group here.
