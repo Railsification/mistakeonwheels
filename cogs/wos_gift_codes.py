@@ -28,13 +28,14 @@ API_BASE_URL = "https://wos-giftcode-api.centurygame.com/api"
 GIFT_CODE_ENDPOINT = f"{API_BASE_URL}/gift_code"
 ENCRYPT_KEY = "tB87#kPtkxqOS2"
 API_CONTRACT_DATE = "2026-07-22"
+BUILD_VERSION = "2026-07-29-late-signup-v4"
 
 MAX_ACCOUNTS_PER_USER = 10
 MAX_CODES_PER_MESSAGE = 3
 REQUEST_TIMEOUT_SECONDS = 25
 THROTTLE_RETRY_SECONDS = 5
 MAX_API_ATTEMPTS = 4
-INTER_ACCOUNT_DELAY_SECONDS = 0.35
+INTER_ACCOUNT_DELAY_SECONDS = 3.0
 
 FID_RE = re.compile(r"^[0-9]{5,20}$")
 CODE_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_-]{3,31}$")
@@ -42,16 +43,34 @@ PREFIXED_CODE_RE = re.compile(
     r"(?i)(?:gift\s*code|redeem\s*code|code)\s*[:=\-]\s*([A-Za-z0-9][A-Za-z0-9_-]{3,31})"
 )
 
+# Bare all-letter codes such as OFFICIALSTORE are valid, but ordinary lowercase
+# chat in the dedicated redemption channel must not be treated as a code.
+COMMON_CHAT_WORDS = {
+    "AFTERNOON",
+    "ANYONE",
+    "EVERYONE",
+    "GOODNIGHT",
+    "HELLO",
+    "LATER",
+    "LOL",
+    "MORNING",
+    "NIGHT",
+    "PLEASE",
+    "THANKS",
+    "THANKYOU",
+    "WELCOME",
+}
+
 TERMINAL_ACCOUNT_STATUSES = {
     "success",
     "already_used",
     "usage_limit",
     "too_small",
     "same_type",
-    "kid_mismatch",
 }
 RETRYABLE_ACCOUNT_STATUSES = {
     "failed",
+    "kid_mismatch",
     "throttled",
     "api_error",
     "network_error",
@@ -119,6 +138,43 @@ def _normalise_code(raw: str) -> str:
     return (raw or "").strip().strip("`'\".,;:!?()[]{}<>")
 
 
+def _find_stored_code_key(codes: dict[str, Any], code: str) -> str | None:
+    """Return the existing storage key, tolerating different letter casing."""
+    if code in codes:
+        return code
+
+    folded = code.casefold()
+    for stored_code in codes.keys():
+        if str(stored_code).casefold() == folded:
+            return str(stored_code)
+    return None
+
+
+def _looks_like_bare_code(candidate: str) -> bool:
+    if not CODE_RE.fullmatch(candidate):
+        return False
+
+    # Mixed letters/numbers and codes containing separators are strong code
+    # shapes and can be accepted in either case.
+    has_letter = any(char.isalpha() for char in candidate)
+    has_digit = any(char.isdigit() for char in candidate)
+    if (has_letter and has_digit) or "_" in candidate or "-" in candidate:
+        return True
+
+    # WoS also releases all-letter codes such as OFFICIALSTORE. Accept those
+    # automatically when the whole message is uppercase, while ignoring normal
+    # lowercase conversation and a small set of common uppercase chat words.
+    if candidate.isalpha():
+        upper = candidate.upper()
+        return (
+            candidate == upper
+            and 6 <= len(candidate) <= 32
+            and upper not in COMMON_CHAT_WORDS
+        )
+
+    return False
+
+
 def _extract_codes_from_message(content: str) -> list[str]:
     text = (content or "").strip()
     if not text or len(text) > 300:
@@ -126,6 +182,7 @@ def _extract_codes_from_message(content: str) -> list[str]:
 
     found: list[str] = []
 
+    # An explicit prefix always wins and supports all valid code shapes/casing.
     for match in PREFIXED_CODE_RE.finditer(text):
         code = _normalise_code(match.group(1))
         if CODE_RE.fullmatch(code) and code not in found:
@@ -133,7 +190,7 @@ def _extract_codes_from_message(content: str) -> list[str]:
 
     if not found:
         candidate = _normalise_code(text)
-        if CODE_RE.fullmatch(candidate):
+        if _looks_like_bare_code(candidate):
             found.append(candidate)
 
     return found[:MAX_CODES_PER_MESSAGE]
@@ -238,7 +295,7 @@ class WOSGiftCodesCog(commands.Cog):
             name="hotbot-wos-gift-redemption-worker",
         )
         await self._recover_queued_codes()
-        info("WoS gift-code redeemer loaded")
+        info(f"WoS gift-code redeemer loaded ({BUILD_VERSION})")
 
     def cog_unload(self) -> None:
         if self._worker_task is not None:
@@ -314,24 +371,63 @@ class WOSGiftCodesCog(commands.Cog):
         )
 
     async def _recover_queued_codes(self) -> None:
+        recovered_total = 0
         for guild_id in public_guild_ids(self.bot, include_admin=True):
+            recovered_for_guild: list[str] = []
             async with self._lock_for(guild_id):
                 blob = self._load_blob(guild_id)
                 changed = False
                 codes = blob["codes"]
+                active_fids = [
+                    str(fid)
+                    for fid, account in blob["accounts"].items()
+                    if isinstance(account, dict) and account.get("enabled", True)
+                ]
 
                 for code, entry in codes.items():
                     if not isinstance(entry, dict):
                         continue
+
                     status = str(entry.get("status") or "")
+                    if status in CODE_TERMINAL_STATUSES:
+                        continue
+
                     if status == "processing":
                         entry["status"] = "queued"
                         changed = True
+
+                    results = entry.get("results")
+                    if not isinstance(results, dict):
+                        results = {}
+                        entry["results"] = results
+                        changed = True
+
+                    # A Railway restart/deploy must also catch accounts that were
+                    # registered after this code was originally completed. Only
+                    # genuinely missing results are auto-queued here; explicit
+                    # retryable failures still use repost/retry behaviour.
+                    has_missing_account = any(
+                        not isinstance(results.get(fid), dict)
+                        for fid in active_fids
+                    )
+                    if has_missing_account and entry.get("status") != "queued":
+                        entry["status"] = "queued"
+                        entry["last_requeued_at"] = _utc_now()
+                        entry["requeue_reason"] = "startup_missing_accounts"
+                        changed = True
+
                     if entry.get("status") == "queued":
-                        self._enqueue(guild_id, code)
+                        recovered_for_guild.append(str(code))
 
                 if changed:
                     self._save_blob(guild_id, blob)
+
+            # Queue only after storage has been saved and the guild lock released.
+            for stored_code in recovered_for_guild:
+                self._enqueue(guild_id, stored_code)
+            recovered_total += len(recovered_for_guild)
+
+        info(f"WoS gift-code startup catch-up queued {recovered_total} code(s)")
 
     def _enqueue(self, guild_id: int, code: str) -> None:
         key = (int(guild_id), code)
@@ -357,10 +453,46 @@ class WOSGiftCodesCog(commands.Cog):
         async with self._lock_for(guild_id):
             blob = self._load_blob(guild_id)
             codes = blob["codes"]
+            stored_code_key = _find_stored_code_key(codes, code)
+            if stored_code_key is not None:
+                code = stored_code_key
             existing = codes.get(code)
 
             if isinstance(existing, dict) and not force:
                 status = str(existing.get("status") or "unknown")
+
+                # A code may have been tested before more FIDs were registered.
+                # Reposting it should queue only newly-added or unfinished
+                # accounts while preserving every successful terminal result.
+                if status not in {"queued", "processing"} and status not in CODE_TERMINAL_STATUSES:
+                    results = existing.get("results")
+                    if not isinstance(results, dict):
+                        results = {}
+                        existing["results"] = results
+
+                    pending_fids: list[str] = []
+                    for fid, account in blob["accounts"].items():
+                        if not isinstance(account, dict) or not account.get("enabled", True):
+                            continue
+                        previous = results.get(str(fid))
+                        previous_status = (
+                            str(previous.get("status") or "")
+                            if isinstance(previous, dict)
+                            else ""
+                        )
+                        if previous_status not in TERMINAL_ACCOUNT_STATUSES:
+                            pending_fids.append(str(fid))
+
+                    if pending_fids:
+                        existing["status"] = "queued"
+                        existing["channel_id"] = int(channel_id)
+                        existing["source_message_id"] = int(source_message_id or 0)
+                        existing["last_requeued_at"] = _utc_now()
+                        existing["last_requeued_by"] = int(submitter_id)
+                        existing["pending_account_count"] = len(pending_fids)
+                        self._save_blob(guild_id, blob)
+                        return True, "queued", existing
+
                 return False, status, existing
 
             if not isinstance(existing, dict):
@@ -384,6 +516,71 @@ class WOSGiftCodesCog(commands.Cog):
             self._save_blob(guild_id, blob)
 
         return True, "queued", existing
+
+    async def _queue_existing_codes_for_account(
+        self,
+        *,
+        guild_id: int,
+        fid: str,
+        channel_id: int,
+        submitter_id: int,
+    ) -> list[str]:
+        """Queue every still-usable stored code that has no terminal result for this FID."""
+        queued_codes: list[str] = []
+
+        async with self._lock_for(guild_id):
+            blob = self._load_blob(guild_id)
+            codes = blob["codes"]
+            changed = False
+
+            for stored_code, entry in codes.items():
+                if not isinstance(entry, dict):
+                    continue
+
+                status = str(entry.get("status") or "unknown")
+                if status in CODE_TERMINAL_STATUSES:
+                    continue
+
+                results = entry.get("results")
+                if not isinstance(results, dict):
+                    results = {}
+                    entry["results"] = results
+
+                previous = results.get(str(fid))
+                previous_status = (
+                    str(previous.get("status") or "")
+                    if isinstance(previous, dict)
+                    else ""
+                )
+                if previous_status in TERMINAL_ACCOUNT_STATUSES:
+                    continue
+
+                entry["status"] = "queued"
+                entry["channel_id"] = int(channel_id)
+                entry["last_requeued_at"] = _utc_now()
+                entry["last_requeued_by"] = int(submitter_id)
+                entry["late_registration_fid"] = str(fid)
+                queued_codes.append(str(stored_code))
+                changed = True
+
+            if changed:
+                self._save_blob(guild_id, blob)
+
+        # Queue first so a missing/deleted progress message can never prevent
+        # the actual redemption worker from running.
+        for stored_code in queued_codes:
+            self._enqueue(guild_id, stored_code)
+
+        for stored_code in queued_codes:
+            await self._publish_progress(guild_id, stored_code)
+
+        if queued_codes:
+            info(
+                f"WoS gift-code late signup: queued {len(queued_codes)} "
+                f"stored code(s) for FID {fid} in guild {guild_id}"
+            )
+
+        return queued_codes
 
     async def _set_status_message(
         self,
@@ -772,7 +969,7 @@ class WOSGiftCodesCog(commands.Cog):
         source_message_id: int = 0,
         force: bool = False,
     ) -> tuple[bool, str]:
-        accepted, reason, _entry = await self._create_or_queue_code(
+        accepted, reason, entry = await self._create_or_queue_code(
             guild_id=guild_id,
             code=code,
             submitter_id=submitter_id,
@@ -783,8 +980,10 @@ class WOSGiftCodesCog(commands.Cog):
         if not accepted:
             return False, reason
 
-        await self._publish_progress(guild_id, code)
-        self._enqueue(guild_id, code)
+        stored_code = str(entry.get("code") or code)
+        # Queue first. Progress-message failures must not block redemption.
+        self._enqueue(guild_id, stored_code)
+        await self._publish_progress(guild_id, stored_code)
         return True, "queued"
 
     # ---------- message auto-detection ----------
@@ -855,10 +1054,13 @@ class WOSGiftCodesCog(commands.Cog):
         guild_id = int(interaction.guild_id or 0)
         user_id = int(interaction.user.id)
 
+        was_new_account = False
+
         async with self._lock_for(guild_id):
             blob = self._load_blob(guild_id)
             accounts = blob["accounts"]
             existing = accounts.get(clean_fid)
+            was_new_account = not isinstance(existing, dict)
 
             if isinstance(existing, dict):
                 owner_id = int(existing.get("discord_user_id") or 0)
@@ -898,10 +1100,31 @@ class WOSGiftCodesCog(commands.Cog):
             }
             self._save_blob(guild_id, blob)
 
+        queued_codes = await self._queue_existing_codes_for_account(
+            guild_id=guild_id,
+            fid=clean_fid,
+            channel_id=int(interaction.channel_id or 0),
+            submitter_id=user_id,
+        )
+
         label_text = f" ({label.strip()})" if label else ""
+        if queued_codes:
+            existing_text = (
+                f"\n🎁 Automatically queued **{len(queued_codes)}** existing gift "
+                f"code{'s' if len(queued_codes) != 1 else ''} for this FID."
+            )
+        elif was_new_account:
+            existing_text = "\nThere were no stored redeemable codes waiting for this FID."
+        else:
+            existing_text = (
+                "\nThis existing FID was updated. Any missing or retryable saved "
+                "redemptions were checked automatically."
+            )
+
         await interaction.followup.send(
             f"✅ Registered FID `{clean_fid}`{label_text} in **State {int(state)}**.\n"
-            "Future gift codes posted in this channel will be redeemed automatically.",
+            "Future gift codes posted in this channel will be redeemed automatically."
+            f"{existing_text}",
             ephemeral=True,
         )
 
@@ -1037,8 +1260,8 @@ class WOSGiftCodesCog(commands.Cog):
 
             if code:
                 clean_code = _normalise_code(code)
-                entry = codes.get(clean_code)
-                selected_code = clean_code
+                selected_code = _find_stored_code_key(codes, clean_code) or clean_code
+                entry = codes.get(selected_code)
             else:
                 entries = [
                     (stored_code, entry)
@@ -1094,6 +1317,9 @@ class WOSGiftCodesCog(commands.Cog):
 
         async with self._lock_for(guild_id):
             blob = self._load_blob(guild_id)
+            stored_code_key = _find_stored_code_key(blob["codes"], clean_code)
+            if stored_code_key is not None:
+                clean_code = stored_code_key
             existing = blob["codes"].get(clean_code)
             if not isinstance(existing, dict):
                 await interaction.followup.send(
@@ -1191,6 +1417,13 @@ class WOSGiftCodesCog(commands.Cog):
 async def setup(bot: commands.Bot) -> None:
     if not hasattr(bot, "settings"):
         bot.settings = SettingsManager(bot.hot_config)
+
+    # Be defensive if an older duplicate redeemer file is still in cogs/. The
+    # canonical cogs/wos_gift_codes.py version replaces it instead of failing
+    # the whole extension load with "Cog named WOSGiftCodesCog already loaded".
+    if bot.get_cog("WOSGiftCodesCog") is not None:
+        warn("Replacing an already-loaded WOSGiftCodesCog; remove the duplicate cog file from cogs/.")
+        await bot.remove_cog("WOSGiftCodesCog")
 
     cog = WOSGiftCodesCog(bot)
     bind_public_cog(cog, bot, include_admin=True)
