@@ -28,7 +28,7 @@ API_BASE_URL = "https://wos-giftcode-api.centurygame.com/api"
 GIFT_CODE_ENDPOINT = f"{API_BASE_URL}/gift_code"
 ENCRYPT_KEY = "tB87#kPtkxqOS2"
 API_CONTRACT_DATE = "2026-07-22"
-BUILD_VERSION = "2026-07-29-late-signup-v5"
+BUILD_VERSION = "2026-07-29-account-details-v6"
 
 MAX_ACCOUNTS_PER_USER = 10
 MAX_CODES_PER_MESSAGE = 3
@@ -1396,6 +1396,145 @@ class WOSGiftCodesCog(commands.Cog):
 
         embed = self._progress_embed(selected_code, entry, total_accounts)
         await interaction.followup.send(embed=embed, ephemeral=True)
+
+    @gift.command(
+        name="details",
+        description="Show each account result for a stored gift code (Manage Server).",
+    )
+    @app_commands.describe(code="Gift code; leave blank to show the latest code")
+    async def details(
+        self,
+        interaction: discord.Interaction,
+        code: str | None = None,
+    ) -> None:
+        log_cmd("gift details", interaction)
+        if not await self._require_feature_channel(interaction):
+            return
+        if not self._can_manage_guild(interaction):
+            await interaction.response.send_message(
+                "❌ Manage Server permission is required.",
+                ephemeral=True,
+            )
+            return
+        await ensure_deferred(interaction, ephemeral=True)
+
+        guild_id = int(interaction.guild_id or 0)
+        async with self._lock_for(guild_id):
+            blob = self._load_blob(guild_id)
+            codes = blob["codes"]
+
+            if code:
+                clean_code = _normalise_code(code)
+                selected_code = _find_stored_code_key(codes, clean_code) or clean_code
+                entry = codes.get(selected_code)
+            else:
+                entries = [
+                    (stored_code, stored_entry)
+                    for stored_code, stored_entry in codes.items()
+                    if isinstance(stored_entry, dict)
+                ]
+                entries.sort(
+                    key=lambda item: str(item[1].get("submitted_at") or ""),
+                    reverse=True,
+                )
+                if entries:
+                    selected_code, entry = entries[0]
+                else:
+                    selected_code, entry = "", None
+
+            accounts = {
+                str(fid): account
+                for fid, account in blob["accounts"].items()
+                if isinstance(account, dict)
+            }
+
+            if isinstance(entry, dict):
+                raw_results = entry.get("results")
+                results = dict(raw_results) if isinstance(raw_results, dict) else {}
+            else:
+                results = {}
+
+        if not isinstance(entry, dict):
+            await interaction.followup.send(
+                "No saved gift-code result was found.",
+                ephemeral=True,
+            )
+            return
+
+        icon_by_status = {
+            "success": "✅",
+            "already_used": "📬",
+            "usage_limit": "⚠️",
+            "too_small": "⚠️",
+            "same_type": "⚠️",
+            "kid_mismatch": "❌",
+            "failed": "❌",
+            "throttled": "⏳",
+            "api_error": "❌",
+            "network_error": "❌",
+            "invalid": "❌",
+            "expired": "⌛",
+            "limit_reached": "🚫",
+            "api_changed": "🛠️",
+        }
+
+        all_fids = sorted(
+            set(accounts) | set(str(fid) for fid in results),
+            key=lambda fid: (
+                str(accounts.get(fid, {}).get("label") or "").lower(),
+                fid,
+            ),
+        )
+
+        lines: list[str] = []
+        for fid in all_fids:
+            account = accounts.get(fid, {})
+            result = results.get(fid)
+            label = str(account.get("label") or "").strip()
+            owner_id = int(account.get("discord_user_id") or 0)
+            state = int(account.get("kid") or 0)
+            account_name = label or "Unlabelled account"
+
+            if isinstance(result, dict):
+                status = str(result.get("status") or "failed")
+                icon = icon_by_status.get(status, "•")
+                err_code = result.get("err_code")
+                message = str(result.get("message") or "No WoS message returned.").strip()
+                err_text = f" / error `{err_code}`" if err_code not in (None, "") else ""
+                result_text = status.replace("_", " ")
+            else:
+                icon = "⏳"
+                result_text = "pending"
+                err_text = ""
+                message = "This account has not been processed for this code yet."
+
+            owner_text = f" / owner <@{owner_id}>" if owner_id else ""
+            lines.append(
+                f"{icon} **{account_name}** — FID `{fid}` / State `{state}`{owner_text}\n"
+                f"`{result_text}`{err_text} — {message[:500]}"
+            )
+
+        if not lines:
+            lines.append("No account results are stored for this code.")
+
+        chunks: list[str] = []
+        current = f"**Gift-code account details — `{selected_code}`**\n"
+        for line in lines:
+            addition = ("\n\n" if current else "") + line
+            if len(current) + len(addition) > 1900:
+                chunks.append(current)
+                current = line
+            else:
+                current += addition
+        if current:
+            chunks.append(current)
+
+        for chunk in chunks:
+            await interaction.followup.send(
+                chunk,
+                ephemeral=True,
+                allowed_mentions=discord.AllowedMentions.none(),
+            )
 
     @gift.command(name="retry", description="Retry failed accounts for a stored gift code (Manage Server).")
     @app_commands.describe(code="The saved gift code to retry")
