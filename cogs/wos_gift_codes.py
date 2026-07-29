@@ -28,7 +28,7 @@ API_BASE_URL = "https://wos-giftcode-api.centurygame.com/api"
 GIFT_CODE_ENDPOINT = f"{API_BASE_URL}/gift_code"
 ENCRYPT_KEY = "tB87#kPtkxqOS2"
 API_CONTRACT_DATE = "2026-07-22"
-BUILD_VERSION = "2026-07-29-late-signup-v4"
+BUILD_VERSION = "2026-07-29-late-signup-v5"
 
 MAX_ACCOUNTS_PER_USER = 10
 MAX_CODES_PER_MESSAGE = 3
@@ -281,6 +281,8 @@ class WOSGiftCodesCog(commands.Cog):
         self._storage_locks: dict[int, asyncio.Lock] = {}
         self._queue: asyncio.Queue[tuple[int, str]] = asyncio.Queue()
         self._queued_keys: set[tuple[int, str]] = set()
+        self._progress_locks: dict[tuple[int, str], asyncio.Lock] = {}
+        self._progress_cleanup_done: set[tuple[int, str]] = set()
         self._worker_task: asyncio.Task[None] | None = None
         self._session: aiohttp.ClientSession | None = None
 
@@ -374,6 +376,7 @@ class WOSGiftCodesCog(commands.Cog):
         recovered_total = 0
         for guild_id in public_guild_ids(self.bot, include_admin=True):
             recovered_for_guild: list[str] = []
+            refresh_for_guild: list[str] = []
             async with self._lock_for(guild_id):
                 blob = self._load_blob(guild_id)
                 changed = False
@@ -387,6 +390,12 @@ class WOSGiftCodesCog(commands.Cog):
                 for code, entry in codes.items():
                     if not isinstance(entry, dict):
                         continue
+
+                    # Refresh recently-used/saved panels once on startup. Besides
+                    # correcting stale counts after a restart, v5 uses this pass
+                    # to remove duplicate panels produced by older builds.
+                    if entry.get("status_message_id") or entry.get("last_requeued_at"):
+                        refresh_for_guild.append(str(code))
 
                     status = str(entry.get("status") or "")
                     if status in CODE_TERMINAL_STATUSES:
@@ -425,6 +434,12 @@ class WOSGiftCodesCog(commands.Cog):
             # Queue only after storage has been saved and the guild lock released.
             for stored_code in recovered_for_guild:
                 self._enqueue(guild_id, stored_code)
+
+            # Limit startup housekeeping to the 25 most recently inserted saved
+            # panels so large servers are not flooded with history lookups.
+            for stored_code in refresh_for_guild[-25:]:
+                await self._publish_progress(guild_id, stored_code)
+
             recovered_total += len(recovered_for_guild)
 
         info(f"WoS gift-code startup catch-up queued {recovered_total} code(s)")
@@ -435,6 +450,59 @@ class WOSGiftCodesCog(commands.Cog):
             return
         self._queued_keys.add(key)
         self._queue.put_nowait(key)
+
+    def _progress_lock_for(self, guild_id: int, code: str) -> asyncio.Lock:
+        key = (int(guild_id), str(code))
+        lock = self._progress_locks.get(key)
+        if lock is None:
+            lock = asyncio.Lock()
+            self._progress_locks[key] = lock
+        return lock
+
+    async def _find_progress_messages(
+        self,
+        channel: discord.TextChannel | discord.Thread,
+        code: str,
+        *,
+        limit: int = 50,
+    ) -> list[discord.Message]:
+        bot_user = self.bot.user
+        if bot_user is None:
+            return []
+
+        expected_title = f"🎁 WoS Gift Code — {code}"
+        matches: list[discord.Message] = []
+        try:
+            async for candidate in channel.history(limit=limit):
+                if candidate.author.id != bot_user.id or not candidate.embeds:
+                    continue
+                if candidate.embeds[0].title == expected_title:
+                    matches.append(candidate)
+        except (discord.Forbidden, discord.HTTPException):
+            return []
+        return matches
+
+    async def _remove_duplicate_progress_messages(
+        self,
+        channel: discord.TextChannel | discord.Thread,
+        code: str,
+        *,
+        keep_message_id: int,
+    ) -> None:
+        key = (int(channel.guild.id), str(code))
+        if key in self._progress_cleanup_done:
+            return
+
+        matches = await self._find_progress_messages(channel, code)
+        for candidate in matches:
+            if candidate.id == int(keep_message_id):
+                continue
+            try:
+                await candidate.delete()
+            except (discord.NotFound, discord.Forbidden, discord.HTTPException):
+                pass
+
+        self._progress_cleanup_done.add(key)
 
     async def _create_or_queue_code(
         self,
@@ -922,42 +990,78 @@ class WOSGiftCodesCog(commands.Cog):
             )
 
         embed.set_footer(
-            text=f"WoS signed gift-code API contract checked {API_CONTRACT_DATE}"
+            text=f"WoS gift-code API last verified: {API_CONTRACT_DATE}"
         )
         return embed
 
     async def _publish_progress(self, guild_id: int, code: str) -> None:
-        entry = await self._entry_snapshot(guild_id, code)
-        if entry is None:
-            return
-        accounts = await self._account_snapshot(guild_id)
-        embed = self._progress_embed(code, entry, len(accounts))
-
-        channel_id = int(entry.get("channel_id") or 0)
-        message_id = int(entry.get("status_message_id") or 0)
-        channel = self.bot.get_channel(channel_id)
-
-        if channel is None or not isinstance(
-            channel,
-            (discord.TextChannel, discord.Thread),
-        ):
-            return
-
-        if message_id:
-            try:
-                message = await channel.fetch_message(message_id)
-                await message.edit(embed=embed)
+        # Registration and the worker can request a progress update at the same
+        # time. Serialising per guild/code prevents both paths from seeing a
+        # blank status_message_id and creating duplicate panels.
+        async with self._progress_lock_for(guild_id, code):
+            entry = await self._entry_snapshot(guild_id, code)
+            if entry is None:
                 return
-            except (discord.NotFound, discord.Forbidden, discord.HTTPException):
-                pass
 
-        try:
-            message = await channel.send(embed=embed)
-        except (discord.Forbidden, discord.HTTPException) as exc:
-            warn(f"Could not publish WoS gift-code progress in guild {guild_id}: {exc!r}")
-            return
+            accounts = await self._account_snapshot(guild_id)
+            embed = self._progress_embed(code, entry, len(accounts))
 
-        await self._set_status_message(guild_id, code, channel.id, message.id)
+            channel_id = int(entry.get("channel_id") or 0)
+            message_id = int(entry.get("status_message_id") or 0)
+            channel = self.bot.get_channel(channel_id)
+
+            if channel is None or not isinstance(
+                channel,
+                (discord.TextChannel, discord.Thread),
+            ):
+                return
+
+            message: discord.Message | None = None
+            if message_id:
+                try:
+                    message = await channel.fetch_message(message_id)
+                except (discord.NotFound, discord.Forbidden, discord.HTTPException):
+                    message = None
+
+            # Recover an existing panel when old data has no saved message ID.
+            # This also avoids generating another panel after a migration.
+            if message is None:
+                matches = await self._find_progress_messages(channel, code)
+                if matches:
+                    message = matches[0]  # channel history is newest first
+                    await self._set_status_message(guild_id, code, channel.id, message.id)
+
+            if message is None:
+                try:
+                    message = await channel.send(embed=embed)
+                except (discord.Forbidden, discord.HTTPException) as exc:
+                    warn(
+                        f"Could not publish WoS gift-code progress in guild "
+                        f"{guild_id}: {exc!r}"
+                    )
+                    return
+                await self._set_status_message(guild_id, code, channel.id, message.id)
+            else:
+                try:
+                    await message.edit(embed=embed)
+                except (discord.NotFound, discord.Forbidden, discord.HTTPException):
+                    try:
+                        message = await channel.send(embed=embed)
+                    except (discord.Forbidden, discord.HTTPException) as exc:
+                        warn(
+                            f"Could not republish WoS gift-code progress in guild "
+                            f"{guild_id}: {exc!r}"
+                        )
+                        return
+                    await self._set_status_message(guild_id, code, channel.id, message.id)
+
+            # Clean up the stale duplicate produced by the older race-prone
+            # builds. This runs once per code for the life of the bot process.
+            await self._remove_duplicate_progress_messages(
+                channel,
+                code,
+                keep_message_id=message.id,
+            )
 
     async def _queue_and_publish(
         self,
