@@ -1,3 +1,4 @@
+# cogs/suggestion_poll.py
 from __future__ import annotations
 
 import asyncio
@@ -27,6 +28,8 @@ FEATURE_KEY = "suggestion_poll"
 SUGGESTION_POLLS_FILENAME = "suggestion_polls.json"
 MAX_IDEA_LEN = 180
 MAX_VISIBLE_IDEAS = 20
+TIEBREAK_DURATION_SECONDS = 24 * 60 * 60
+RECOVER_CLOSED_POLLS_WITHIN_SECONDS = 7 * 24 * 60 * 60
 
 
 def now_ts() -> int:
@@ -166,17 +169,102 @@ class SuggestionPollView(discord.ui.View):
         await self.cog.refresh_from_ui(interaction, poll_id)
 
 
+class TieBreakVoteModal(discord.ui.Modal, title="Vote in the tie-break"):
+    idea_number = discord.ui.TextInput(
+        label="Idea number",
+        placeholder="Enter one of the tie-break idea numbers",
+        max_length=5,
+        required=True,
+    )
+
+    def __init__(self, cog: "SuggestionPollCog", poll_id: str):
+        super().__init__(timeout=180)
+        self.cog = cog
+        self.poll_id = poll_id
+
+    async def on_submit(self, interaction: discord.Interaction) -> None:
+        await self.cog.tiebreak_vote_from_ui(
+            interaction,
+            self.poll_id,
+            safe_int(str(self.idea_number.value), -1),
+        )
+
+
+class TieBreakView(discord.ui.View):
+    def __init__(self, cog: "SuggestionPollCog", poll_id: str):
+        super().__init__(timeout=None)
+        self.cog = cog
+        self.poll_id = poll_id
+
+    async def resolve_poll_id(
+        self,
+        interaction: discord.Interaction,
+    ) -> Optional[str]:
+        poll = self.cog.get_poll(self.poll_id)
+        tiebreak = poll.get("tiebreak") if isinstance(poll, dict) else None
+        if (
+            poll
+            and poll.get("status") == "tiebreak"
+            and isinstance(tiebreak, dict)
+            and tiebreak.get("status") == "open"
+        ):
+            return self.poll_id
+        return await self.cog.tiebreak_poll_id_from_message(interaction)
+
+    @discord.ui.button(
+        label="Vote",
+        style=discord.ButtonStyle.success,
+        custom_id="suggestion_tiebreak:vote",
+    )
+    async def vote_button(
+        self,
+        interaction: discord.Interaction,
+        button: discord.ui.Button,
+    ) -> None:
+        poll_id = await self.resolve_poll_id(interaction)
+        if not poll_id:
+            await interaction.response.send_message(
+                "Couldn’t find that tie-break.",
+                ephemeral=True,
+            )
+            return
+        await interaction.response.send_modal(TieBreakVoteModal(self.cog, poll_id))
+
+    @discord.ui.button(
+        label="Refresh",
+        style=discord.ButtonStyle.secondary,
+        custom_id="suggestion_tiebreak:refresh",
+    )
+    async def refresh_button(
+        self,
+        interaction: discord.Interaction,
+        button: discord.ui.Button,
+    ) -> None:
+        poll_id = await self.resolve_poll_id(interaction)
+        if not poll_id:
+            await interaction.response.send_message(
+                "Couldn’t find that tie-break.",
+                ephemeral=True,
+            )
+            return
+        await self.cog.refresh_tiebreak_from_ui(interaction, poll_id)
+
+
 class SuggestionPollCog(commands.Cog):
     def __init__(self, bot: commands.Bot):
         self.bot = bot
         self.lock = asyncio.Lock()
         self.data: Dict[str, Any] = {"polls": {}}
         self._persistent_views: Dict[int, SuggestionPollView] = {}
+        self._tiebreak_views: Dict[int, TieBreakView] = {}
+        self._recovery_complete = False
         self.load_data()
 
     async def cog_load(self) -> None:
         restored = self.restore_persistent_views()
+        tiebreak_restored = self.restore_tiebreak_views()
         ok(f"Restored {restored} open suggestion poll button view(s)")
+        ok(f"Restored {tiebreak_restored} open suggestion tie-break view(s)")
         if not self.poll_watcher.is_running():
             self.poll_watcher.start()
 
@@ -190,6 +278,13 @@ class SuggestionPollCog(commands.Cog):
             except Exception:
                 pass
         self._persistent_views.clear()
+
+        for message_id, view in list(self._tiebreak_views.items()):
+            try:
+                self.bot.remove_view(view, message_id=message_id)
+            except Exception:
+                pass
+        self._tiebreak_views.clear()
 
     def _poll_guild_ids(self) -> List[int]:
         return sorted(
@@ -209,6 +304,45 @@ class SuggestionPollCog(commands.Cog):
         poll.setdefault("ideas", {})
         poll.setdefault("shortlist_size", 3)
         poll.setdefault("allow_multi_vote", True)
+
+        final_shortlist = poll.get("final_shortlist")
+        if isinstance(final_shortlist, list):
+            poll["final_shortlist"] = [
+                safe_int(idea_no)
+                for idea_no in final_shortlist
+                if safe_int(idea_no) > 0
+            ]
+
+        tiebreak = poll.get("tiebreak")
+        if isinstance(tiebreak, dict):
+            tiebreak.setdefault("status", "open")
+            tiebreak["round"] = max(1, safe_int(tiebreak.get("round"), 1))
+            tiebreak["slots_remaining"] = max(1, safe_int(tiebreak.get("slots_remaining"), 1))
+            tiebreak["end_ts"] = safe_int(tiebreak.get("end_ts"))
+            tiebreak["message_id"] = safe_int(tiebreak.get("message_id")) or None
+            tiebreak["locked_idea_nos"] = [
+                safe_int(idea_no)
+                for idea_no in tiebreak.get("locked_idea_nos", [])
+                if safe_int(idea_no) > 0
+            ]
+            tiebreak["candidate_idea_nos"] = [
+                safe_int(idea_no)
+                for idea_no in tiebreak.get("candidate_idea_nos", [])
+                if safe_int(idea_no) > 0
+            ]
+            votes = tiebreak.get("votes")
+            if not isinstance(votes, dict):
+                votes = {}
+            tiebreak["votes"] = {
+                str(safe_int(idea_no)): [
+                    safe_int(user_id)
+                    for user_id in voters
+                    if safe_int(user_id) > 0
+                ]
+                for idea_no, voters in votes.items()
+                if safe_int(idea_no) > 0 and isinstance(voters, list)
+            }
+
         return poll
 
     def _load_legacy_root_files(self) -> Dict[str, Any]:
@@ -346,6 +480,49 @@ class SuggestionPollCog(commands.Cog):
         self.bot.add_view(view, message_id=message_id)
         self._persistent_views[message_id] = view
 
+    def restore_tiebreak_views(self) -> int:
+        restored = 0
+
+        for poll_id, poll in self.data.get("polls", {}).items():
+            tiebreak = poll.get("tiebreak")
+            if (
+                poll.get("status") != "tiebreak"
+                or not isinstance(tiebreak, dict)
+                or tiebreak.get("status") != "open"
+            ):
+                continue
+
+            message_id = safe_int(tiebreak.get("message_id"))
+            if not message_id:
+                continue
+
+            view = TieBreakView(self, str(poll_id))
+            try:
+                self.bot.add_view(view, message_id=message_id)
+            except Exception as exc:
+                warn(
+                    f"Could not restore suggestion tie-break {poll_id} "
+                    f"for message {message_id}: {exc!r}"
+                )
+                continue
+
+            self._tiebreak_views[message_id] = view
+            restored += 1
+
+        return restored
+
+    def remember_tiebreak_view(self, poll_id: str, message_id: int) -> None:
+        old_view = self._tiebreak_views.pop(message_id, None)
+        if old_view is not None:
+            try:
+                self.bot.remove_view(old_view, message_id=message_id)
+            except Exception:
+                pass
+
+        view = TieBreakView(self, poll_id)
+        self.bot.add_view(view, message_id=message_id)
+        self._tiebreak_views[message_id] = view
+
     async def interaction_allowed(self, interaction: discord.Interaction) -> bool:
         if not interaction.guild or not interaction.channel:
             return False
@@ -406,6 +583,30 @@ class SuggestionPollCog(commands.Cog):
         )
         return matches[0]
 
+    def get_active_poll_for_channel(
+        self,
+        guild_id: int,
+        channel_id: int,
+    ) -> Optional[Tuple[str, Dict[str, Any]]]:
+        matches: List[Tuple[str, Dict[str, Any]]] = []
+
+        for poll_id, poll in self.data.get("polls", {}).items():
+            if (
+                safe_int(poll.get("guild_id")) == guild_id
+                and safe_int(poll.get("channel_id")) == channel_id
+                and poll.get("status") in {"open", "tiebreak"}
+            ):
+                matches.append((str(poll_id), poll))
+
+        if not matches:
+            return None
+
+        matches.sort(
+            key=lambda item: safe_int(item[1].get("created_ts")),
+            reverse=True,
+        )
+        return matches[0]
+
     async def poll_id_from_message(
         self,
         interaction: discord.Interaction,
@@ -416,6 +617,23 @@ class SuggestionPollCog(commands.Cog):
         message_id = interaction.message.id
         for poll_id, poll in self.data.get("polls", {}).items():
             if safe_int(poll.get("message_id")) == message_id:
+                return str(poll_id)
+        return None
+
+    async def tiebreak_poll_id_from_message(
+        self,
+        interaction: discord.Interaction,
+    ) -> Optional[str]:
+        if not interaction.message:
+            return None
+
+        message_id = interaction.message.id
+        for poll_id, poll in self.data.get("polls", {}).items():
+            tiebreak = poll.get("tiebreak")
+            if (
+                isinstance(tiebreak, dict)
+                and safe_int(tiebreak.get("message_id")) == message_id
+            ):
                 return str(poll_id)
         return None
 
@@ -447,21 +665,90 @@ class SuggestionPollCog(commands.Cog):
         poll: Dict[str, Any],
     ) -> List[Tuple[int, Dict[str, Any], int]]:
         ranked = self.ranked_ideas(poll)
-        if not ranked:
-            return []
+        by_number = {row[0]: row for row in ranked}
+
+        final_shortlist = poll.get("final_shortlist")
+        if isinstance(final_shortlist, list):
+            return [
+                by_number[idea_no]
+                for idea_no in final_shortlist
+                if idea_no in by_number
+            ]
 
         size = max(1, safe_int(poll.get("shortlist_size"), 3))
-        base = ranked[:size]
-        if len(ranked) <= size:
-            return base
+        positive = [row for row in ranked if row[2] > 0]
+        return positive[:size]
 
-        cutoff_votes = base[-1][2]
-        extra_ties = [
-            row
-            for row in ranked[size:]
-            if cutoff_votes > 0 and row[2] == cutoff_votes
-        ]
-        return base + extra_ties
+    def shortlist_plan(self, poll: Dict[str, Any]) -> Dict[str, Any]:
+        size = max(1, safe_int(poll.get("shortlist_size"), 3))
+        positive = [row for row in self.ranked_ideas(poll) if row[2] > 0]
+        target_size = min(size, len(positive))
+
+        if target_size == 0:
+            return {
+                "needs_tiebreak": False,
+                "final_idea_nos": [],
+                "locked_idea_nos": [],
+                "candidate_idea_nos": [],
+                "slots_remaining": 0,
+            }
+
+        if len(positive) <= target_size:
+            return {
+                "needs_tiebreak": False,
+                "final_idea_nos": [row[0] for row in positive],
+                "locked_idea_nos": [row[0] for row in positive],
+                "candidate_idea_nos": [],
+                "slots_remaining": 0,
+            }
+
+        cutoff_votes = positive[target_size - 1][2]
+        locked = [row[0] for row in positive if row[2] > cutoff_votes]
+        tied = [row[0] for row in positive if row[2] == cutoff_votes]
+        slots_remaining = target_size - len(locked)
+
+        if len(tied) <= slots_remaining:
+            final_idea_nos = [row[0] for row in positive[:target_size]]
+            return {
+                "needs_tiebreak": False,
+                "final_idea_nos": final_idea_nos,
+                "locked_idea_nos": final_idea_nos,
+                "candidate_idea_nos": [],
+                "slots_remaining": 0,
+            }
+
+        return {
+            "needs_tiebreak": True,
+            "final_idea_nos": [],
+            "locked_idea_nos": locked,
+            "candidate_idea_nos": tied,
+            "slots_remaining": slots_remaining,
+        }
+
+    def prepare_poll_finalisation(self, poll: Dict[str, Any]) -> bool:
+        plan = self.shortlist_plan(poll)
+        if not plan["needs_tiebreak"]:
+            poll["status"] = "closed"
+            poll["final_shortlist"] = plan["final_idea_nos"]
+            poll["finalized_ts"] = now_ts()
+            poll.pop("tiebreak", None)
+            return False
+
+        candidates = plan["candidate_idea_nos"]
+        poll["status"] = "tiebreak"
+        poll.pop("final_shortlist", None)
+        poll.pop("final_message_id", None)
+        poll["tiebreak"] = {
+            "status": "open",
+            "round": 1,
+            "slots_remaining": plan["slots_remaining"],
+            "locked_idea_nos": plan["locked_idea_nos"],
+            "candidate_idea_nos": candidates,
+            "votes": {str(idea_no): [] for idea_no in candidates},
+            "end_ts": now_ts() + TIEBREAK_DURATION_SECONDS,
+            "message_id": None,
+        }
+        return True
 
     def build_embed(
         self,
@@ -475,6 +762,9 @@ class SuggestionPollCog(commands.Cog):
         if final or status == "closed":
             embed_title = f"🏁 Closed: {title}"
             colour = discord.Colour.gold()
+        elif status == "tiebreak":
+            embed_title = f"⚖️ Tie-break: {title}"
+            colour = discord.Colour.orange()
         elif status == "cancelled":
             embed_title = f"Cancelled: {title}"
             colour = discord.Colour.dark_grey()
@@ -499,6 +789,8 @@ class SuggestionPollCog(commands.Cog):
                 value=f"<t:{end_ts}:F>\n<t:{end_ts}:R>",
                 inline=True,
             )
+        elif status == "tiebreak":
+            embed.add_field(name="Status", value="Tie-break in progress", inline=True)
         else:
             embed.add_field(name="Status", value=status.title(), inline=True)
 
@@ -527,6 +819,45 @@ class SuggestionPollCog(commands.Cog):
 
             embed.add_field(name="Ideas", value="\n".join(lines), inline=False)
 
+        if status == "tiebreak":
+            tiebreak = poll.get("tiebreak", {})
+            locked_numbers = tiebreak.get("locked_idea_nos", [])
+            candidates = tiebreak.get("candidate_idea_nos", [])
+            by_number = {row[0]: row for row in self.ranked_ideas(poll)}
+
+            locked_lines = []
+            for idea_no in locked_numbers:
+                row = by_number.get(safe_int(idea_no))
+                if row:
+                    locked_lines.append(
+                        f"**{row[0]}.** {truncate(row[1].get('text', ''), 120)} "
+                        f"— **{row[2]}** {'vote' if row[2] == 1 else 'votes'}"
+                    )
+
+            candidate_lines = []
+            for idea_no in candidates:
+                row = by_number.get(safe_int(idea_no))
+                if row:
+                    candidate_lines.append(
+                        f"**{row[0]}.** {truncate(row[1].get('text', ''), 120)}"
+                    )
+
+            if locked_lines:
+                embed.add_field(
+                    name="Locked In",
+                    value="\n".join(locked_lines),
+                    inline=False,
+                )
+            embed.add_field(
+                name="Tie-break Required",
+                value=(
+                    "\n".join(candidate_lines)
+                    + f"\n\n**{safe_int(tiebreak.get('slots_remaining'), 1)} "
+                    "shortlist spot(s) remain.** Vote in the tie-break message."
+                ),
+                inline=False,
+            )
+
         if final or status == "closed":
             top = self.shortlist(poll)
             if not top:
@@ -549,9 +880,117 @@ class SuggestionPollCog(commands.Cog):
                     inline=False,
                 )
 
-        embed.set_footer(
-            text="Use /suggestion add, /suggestion vote, or the buttons below."
+        if status == "tiebreak":
+            embed.set_footer(text="Use the tie-break message to fill the remaining shortlist spot(s).")
+        elif status == "closed" or final:
+            embed.set_footer(text="Final shortlist complete.")
+        else:
+            embed.set_footer(
+                text="Use /suggestion add, /suggestion vote, or the buttons below."
+            )
+        return embed
+
+    def build_tiebreak_embed(
+        self,
+        poll_id: str,
+        poll: Dict[str, Any],
+    ) -> discord.Embed:
+        tiebreak = poll.get("tiebreak")
+        if not isinstance(tiebreak, dict):
+            return discord.Embed(
+                title="Tie-break unavailable",
+                description="This tie-break could not be loaded.",
+                colour=discord.Colour.dark_grey(),
+            )
+
+        round_no = max(1, safe_int(tiebreak.get("round"), 1))
+        slots_remaining = max(1, safe_int(tiebreak.get("slots_remaining"), 1))
+        is_open = poll.get("status") == "tiebreak" and tiebreak.get("status") == "open"
+        title = poll.get("title") or "WoS PFP Theme Suggestions"
+
+        embed = discord.Embed(
+            title=(
+                f"⚖️ Tie-break Round {round_no}: {title}"
+                if is_open
+                else f"🏁 Tie-break Complete: {title}"
+            ),
+            description=(
+                "The main vote tied at the shortlist cutoff. "
+                "Each person gets one tie-break vote and may change it before the round closes."
+                if is_open
+                else "This tie-break round has finished."
+            ),
+            colour=discord.Colour.orange() if is_open else discord.Colour.gold(),
+            timestamp=datetime.now(timezone.utc),
         )
+
+        by_number = {row[0]: row for row in self.ranked_ideas(poll)}
+
+        if not is_open:
+            final_lines = []
+            for idea_no in poll.get("final_shortlist", []):
+                row = by_number.get(safe_int(idea_no))
+                if row:
+                    final_lines.append(
+                        f"**{row[0]}.** {truncate(row[1].get('text', ''), 110)}"
+                    )
+            embed.add_field(
+                name="Final Shortlist",
+                value="\n".join(final_lines) or "No positive-vote ideas qualified.",
+                inline=False,
+            )
+            embed.set_footer(text=f"Poll ID: {poll_id} • Final shortlist complete")
+            return embed
+
+        locked_lines = []
+        for idea_no in tiebreak.get("locked_idea_nos", []):
+            row = by_number.get(safe_int(idea_no))
+            if row:
+                locked_lines.append(
+                    f"**{row[0]}.** {truncate(row[1].get('text', ''), 100)}"
+                )
+        if locked_lines:
+            embed.add_field(
+                name="Already Locked In",
+                value="\n".join(locked_lines),
+                inline=False,
+            )
+
+        votes = tiebreak.get("votes") if isinstance(tiebreak.get("votes"), dict) else {}
+        candidate_rows = []
+        for idea_no in tiebreak.get("candidate_idea_nos", []):
+            idea_no = safe_int(idea_no)
+            row = by_number.get(idea_no)
+            if not row:
+                continue
+            vote_count = len(votes.get(str(idea_no), []))
+            candidate_rows.append((idea_no, row[1], vote_count))
+        candidate_rows.sort(key=lambda item: (-item[2], item[0]))
+
+        candidate_lines = []
+        for idea_no, idea, vote_count in candidate_rows:
+            vote_word = "vote" if vote_count == 1 else "votes"
+            candidate_lines.append(
+                f"**{idea_no}.** {truncate(idea.get('text', ''), 110)} "
+                f"— **{vote_count}** {vote_word}"
+            )
+
+        embed.add_field(
+            name=f"Candidates — {slots_remaining} spot(s) available",
+            value="\n".join(candidate_lines) or "No eligible candidates.",
+            inline=False,
+        )
+
+        end_ts = safe_int(tiebreak.get("end_ts"))
+        embed.add_field(
+            name="Ends",
+            value=f"<t:{end_ts}:F>\n<t:{end_ts}:R>",
+            inline=False,
+        )
+        embed.set_footer(
+            text=f"Poll ID: {poll_id} • One vote per person • Use the Vote button"
+        )
+
         return embed
 
     async def get_poll_channel(
@@ -602,8 +1041,94 @@ class SuggestionPollCog(commands.Cog):
         poll: Dict[str, Any],
     ) -> None:
         channel = await self.get_poll_channel(poll)
-        if channel is not None:
-            await channel.send(embed=self.build_embed(poll_id, poll, final=True))
+        if channel is None:
+            return
+
+        final_message_id = safe_int(poll.get("final_message_id"))
+        if final_message_id:
+            try:
+                message = await channel.fetch_message(final_message_id)
+                await message.edit(embed=self.build_embed(poll_id, poll, final=True), view=None)
+                return
+            except (discord.NotFound, discord.Forbidden, discord.HTTPException):
+                pass
+
+        sent = await channel.send(embed=self.build_embed(poll_id, poll, final=True))
+        async with self.lock:
+            current = self.get_poll(poll_id)
+            if current is not None:
+                current["final_message_id"] = sent.id
+                self.save_data()
+
+    async def post_tiebreak_message(
+        self,
+        poll_id: str,
+        poll: Dict[str, Any],
+    ) -> None:
+        channel = await self.get_poll_channel(poll)
+        tiebreak = poll.get("tiebreak")
+        if channel is None or not isinstance(tiebreak, dict):
+            return
+
+        message_id = safe_int(tiebreak.get("message_id"))
+        if message_id:
+            try:
+                message = await channel.fetch_message(message_id)
+                await message.edit(
+                    embed=self.build_tiebreak_embed(poll_id, poll),
+                    view=TieBreakView(self, poll_id),
+                )
+                self.remember_tiebreak_view(poll_id, message.id)
+                return
+            except (discord.NotFound, discord.Forbidden, discord.HTTPException):
+                pass
+
+        sent = await channel.send(
+            embed=self.build_tiebreak_embed(poll_id, poll),
+            view=TieBreakView(self, poll_id),
+        )
+        async with self.lock:
+            current = self.get_poll(poll_id)
+            if current is not None:
+                current_tiebreak = current.get("tiebreak")
+                if isinstance(current_tiebreak, dict):
+                    current_tiebreak["message_id"] = sent.id
+                    self.save_data()
+        self.remember_tiebreak_view(poll_id, sent.id)
+
+    async def update_tiebreak_message(self, poll_id: str) -> None:
+        poll = self.get_poll(poll_id)
+        if not poll:
+            return
+
+        tiebreak = poll.get("tiebreak")
+        if not isinstance(tiebreak, dict):
+            return
+
+        channel = await self.get_poll_channel(poll)
+        message_id = safe_int(tiebreak.get("message_id"))
+        if channel is None or not message_id:
+            return
+
+        try:
+            message = await channel.fetch_message(message_id)
+        except (discord.NotFound, discord.Forbidden, discord.HTTPException):
+            return
+
+        is_open = poll.get("status") == "tiebreak" and tiebreak.get("status") == "open"
+        view: Optional[discord.ui.View] = TieBreakView(self, poll_id) if is_open else None
+
+        if not is_open:
+            stored_view = self._tiebreak_views.pop(message_id, None)
+            if stored_view is not None:
+                try:
+                    self.bot.remove_view(stored_view, message_id=message_id)
+                except Exception:
+                    pass
+
+        await message.edit(embed=self.build_tiebreak_embed(poll_id, poll), view=view)
+        if is_open:
+            self.remember_tiebreak_view(poll_id, message_id)
 
     async def close_poll(self, poll_id: str, post_result: bool = True) -> bool:
         async with self.lock:
@@ -611,30 +1136,262 @@ class SuggestionPollCog(commands.Cog):
             if not poll or poll.get("status") != "open":
                 return False
 
-            poll["status"] = "closed"
             poll["closed_ts"] = now_ts()
+            needs_tiebreak = self.prepare_poll_finalisation(poll)
             self.save_data()
 
         await self.update_poll_message(poll_id)
-        if post_result:
+        if needs_tiebreak:
+            await self.post_tiebreak_message(poll_id, poll)
+        elif post_result:
             await self.post_final_result(poll_id, poll)
         return True
 
+    async def tiebreak_vote_core(
+        self,
+        poll_id: str,
+        user_id: int,
+        idea_number: int,
+    ) -> Tuple[bool, str]:
+        if idea_number <= 0:
+            return False, "Use one of the idea numbers shown in the tie-break."
+
+        async with self.lock:
+            poll = self.get_poll(poll_id)
+            if not poll or poll.get("status") != "tiebreak":
+                return False, "That tie-break is closed."
+
+            tiebreak = poll.get("tiebreak")
+            if not isinstance(tiebreak, dict) or tiebreak.get("status") != "open":
+                return False, "That tie-break is closed."
+
+            candidates = [safe_int(value) for value in tiebreak.get("candidate_idea_nos", [])]
+            if idea_number not in candidates:
+                return False, "That idea is not in the current tie-break round."
+
+            votes = tiebreak.setdefault("votes", {})
+            for candidate in candidates:
+                voters = votes.setdefault(str(candidate), [])
+                if user_id in voters:
+                    voters.remove(user_id)
+
+            votes.setdefault(str(idea_number), []).append(user_id)
+            self.save_data()
+
+        await self.update_tiebreak_message(poll_id)
+        return True, f"Your tie-break vote is now on idea **{idea_number}**."
+
+    async def tiebreak_vote_from_ui(
+        self,
+        interaction: discord.Interaction,
+        poll_id: str,
+        idea_number: int,
+    ) -> None:
+        if not await self.interaction_allowed(interaction):
+            await interaction.response.send_message(
+                "Suggestion polls are not enabled in this channel.",
+                ephemeral=True,
+            )
+            return
+
+        _, message = await self.tiebreak_vote_core(
+            poll_id,
+            interaction.user.id,
+            idea_number,
+        )
+        await interaction.response.send_message(message, ephemeral=True)
+
+    async def refresh_tiebreak_from_ui(
+        self,
+        interaction: discord.Interaction,
+        poll_id: str,
+    ) -> None:
+        if not await self.interaction_allowed(interaction):
+            await interaction.response.send_message(
+                "Suggestion polls are not enabled in this channel.",
+                ephemeral=True,
+            )
+            return
+
+        await self.update_tiebreak_message(poll_id)
+        await interaction.response.send_message("Tie-break refreshed.", ephemeral=True)
+
+    async def resolve_tiebreak(self, poll_id: str) -> bool:
+        async with self.lock:
+            poll = self.get_poll(poll_id)
+            if not poll or poll.get("status") != "tiebreak":
+                return False
+
+            tiebreak = poll.get("tiebreak")
+            if not isinstance(tiebreak, dict) or tiebreak.get("status") != "open":
+                return False
+
+            candidates = [
+                safe_int(value)
+                for value in tiebreak.get("candidate_idea_nos", [])
+                if safe_int(value) > 0
+            ]
+            slots_remaining = max(1, safe_int(tiebreak.get("slots_remaining"), 1))
+            votes = tiebreak.get("votes") if isinstance(tiebreak.get("votes"), dict) else {}
+            ranked = sorted(
+                (
+                    (idea_no, len(votes.get(str(idea_no), [])))
+                    for idea_no in candidates
+                ),
+                key=lambda item: (-item[1], item[0]),
+            )
+
+            locked = [
+                safe_int(value)
+                for value in tiebreak.get("locked_idea_nos", [])
+                if safe_int(value) > 0
+            ]
+
+            if len(ranked) <= slots_remaining:
+                selected = [idea_no for idea_no, _ in ranked]
+                poll["final_shortlist"] = locked + selected
+                poll["status"] = "closed"
+                poll["finalized_ts"] = now_ts()
+                tiebreak["status"] = "closed"
+                finished = True
+            else:
+                cutoff_votes = ranked[slots_remaining - 1][1]
+                definite = [idea_no for idea_no, count in ranked if count > cutoff_votes]
+                tied = [idea_no for idea_no, count in ranked if count == cutoff_votes]
+                remaining_after_definite = slots_remaining - len(definite)
+                locked.extend(definite)
+
+                if len(tied) <= remaining_after_definite:
+                    poll["final_shortlist"] = locked + tied
+                    poll["status"] = "closed"
+                    poll["finalized_ts"] = now_ts()
+                    tiebreak["locked_idea_nos"] = locked + tied
+                    tiebreak["status"] = "closed"
+                    finished = True
+                else:
+                    tiebreak["round"] = max(1, safe_int(tiebreak.get("round"), 1)) + 1
+                    tiebreak["slots_remaining"] = remaining_after_definite
+                    tiebreak["locked_idea_nos"] = locked
+                    tiebreak["candidate_idea_nos"] = tied
+                    tiebreak["votes"] = {str(idea_no): [] for idea_no in tied}
+                    tiebreak["end_ts"] = now_ts() + TIEBREAK_DURATION_SECONDS
+                    tiebreak["status"] = "open"
+                    finished = False
+
+            self.save_data()
+
+        await self.update_poll_message(poll_id)
+        await self.update_tiebreak_message(poll_id)
+        if finished:
+            await self.post_final_result(poll_id, poll)
+        return True
+
+    async def remove_untracked_final_result(
+        self,
+        poll_id: str,
+        poll: Dict[str, Any],
+    ) -> None:
+        channel = await self.get_poll_channel(poll)
+        if channel is None or self.bot.user is None:
+            return
+
+        original_message_id = safe_int(poll.get("message_id"))
+        expected_title = f"🏁 Closed: {poll.get('title') or 'WoS PFP Theme Suggestions'}"
+        expected_poll_id = f"`{poll_id}`"
+
+        try:
+            async for message in channel.history(limit=50):
+                if message.id == original_message_id:
+                    continue
+                if message.author.id != self.bot.user.id:
+                    continue
+
+                for embed in message.embeds:
+                    if embed.title != expected_title:
+                        continue
+                    has_poll_id = any(
+                        field.name == "Poll ID" and field.value == expected_poll_id
+                        for field in embed.fields
+                    )
+                    if not has_poll_id:
+                        continue
+                    try:
+                        await message.delete()
+                    except (discord.NotFound, discord.Forbidden, discord.HTTPException):
+                        pass
+                    break
+        except (discord.Forbidden, discord.HTTPException):
+            return
+
+    async def recover_recent_unresolved_polls(self) -> None:
+        to_update: List[Tuple[str, Dict[str, Any], bool]] = []
+        cutoff = now_ts() - RECOVER_CLOSED_POLLS_WITHIN_SECONDS
+
+        async with self.lock:
+            changed = False
+            for poll_id, poll in self.data.get("polls", {}).items():
+                if poll.get("status") != "closed":
+                    continue
+                if isinstance(poll.get("final_shortlist"), list):
+                    continue
+                if isinstance(poll.get("tiebreak"), dict):
+                    continue
+                if safe_int(poll.get("closed_ts")) < cutoff:
+                    continue
+
+                needs_tiebreak = self.prepare_poll_finalisation(poll)
+                to_update.append((str(poll_id), poll, needs_tiebreak))
+                changed = True
+
+            if changed:
+                self.save_data()
+
+        for poll_id, poll, needs_tiebreak in to_update:
+            if needs_tiebreak:
+                await self.remove_untracked_final_result(poll_id, poll)
+            await self.update_poll_message(poll_id)
+            if needs_tiebreak:
+                await self.post_tiebreak_message(poll_id, poll)
+
+
     @tasks.loop(minutes=5)
     async def poll_watcher(self) -> None:
-        due = [
+        due_polls = [
             poll_id
             for poll_id, poll in self.data.get("polls", {}).items()
             if poll.get("status") == "open"
             and safe_int(poll.get("end_ts")) <= now_ts()
         ]
+        due_tiebreaks = [
+            poll_id
+            for poll_id, poll in self.data.get("polls", {}).items()
+            if poll.get("status") == "tiebreak"
+            and isinstance(poll.get("tiebreak"), dict)
+            and poll["tiebreak"].get("status") == "open"
+            and safe_int(poll["tiebreak"].get("end_ts")) <= now_ts()
+        ]
+        missing_tiebreak_messages = [
+            (str(poll_id), poll)
+            for poll_id, poll in self.data.get("polls", {}).items()
+            if poll.get("status") == "tiebreak"
+            and isinstance(poll.get("tiebreak"), dict)
+            and poll["tiebreak"].get("status") == "open"
+            and not safe_int(poll["tiebreak"].get("message_id"))
+        ]
 
-        for poll_id in due:
+        for poll_id in due_polls:
             await self.close_poll(str(poll_id), post_result=True)
+        for poll_id in due_tiebreaks:
+            await self.resolve_tiebreak(str(poll_id))
+        for poll_id, poll in missing_tiebreak_messages:
+            await self.post_tiebreak_message(poll_id, poll)
 
     @poll_watcher.before_loop
     async def before_poll_watcher(self) -> None:
         await self.bot.wait_until_ready()
+        if not self._recovery_complete:
+            await self.recover_recent_unresolved_polls()
+            self._recovery_complete = True
 
     async def add_idea_core(
         self,
@@ -878,14 +1635,14 @@ async def suggestion_start(
         )
         return
 
-    existing = cog.get_open_poll_for_channel(
+    existing = cog.get_active_poll_for_channel(
         interaction.guild.id,
         interaction.channel.id,
     )
     if existing:
         poll_id, _ = existing
         await interaction.response.send_message(
-            f"There is already an open suggestion poll in this channel: `{poll_id}`.",
+            f"There is already an active suggestion poll or tie-break in this channel: `{poll_id}`.",
             ephemeral=True,
         )
         return
