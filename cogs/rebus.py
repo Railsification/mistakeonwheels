@@ -23,6 +23,7 @@ GAMES_FILENAME = "rebus_games.json"
 CYCLE_FILENAME = "rebus_puzzle_cycle.json"
 SKIP_VOTES_REQUIRED = 3
 FUZZY_MATCH_CUTOFF = 0.91
+MAX_GUESSES_SHOWN = 10
 
 # Puzzle text is deliberately plain-text/monospace so it renders consistently on
 # mobile Discord without needing image files or a media-vault setup.
@@ -820,6 +821,28 @@ def _safe_int_list(value: Any) -> list[int]:
     return output
 
 
+def _safe_guess_list(value: Any) -> list[str]:
+    if not isinstance(value, list):
+        return []
+
+    output: list[str] = []
+    seen: set[str] = set()
+    for item in value:
+        display = re.sub(r"\s+", " ", str(item or "")).strip()
+        normalised = _normalise_guess(display)
+        if not display or not normalised or normalised in seen:
+            continue
+        seen.add(normalised)
+        output.append(display[:100])
+    return output
+
+
+def _format_guess(value: str) -> str:
+    # Keep user-entered guesses readable without allowing them to break the
+    # inline-code formatting used in the puzzle embed.
+    return str(value or "").replace("`", "'").strip()
+
+
 def _validate_puzzles() -> None:
     seen: set[str] = set()
     for puzzle in DEFAULT_PUZZLES:
@@ -1172,9 +1195,28 @@ class RebusService:
                 ),
                 inline=False,
             )
-            wrong_guesses = max(0, int(game.get("wrong_guesses") or 0))
+            guesses = _safe_guess_list(game.get("guesses"))
+            wrong_guesses = max(len(guesses), int(game.get("wrong_guesses") or 0))
+            visible_guesses = guesses[-MAX_GUESSES_SHOWN:]
+            hidden_count = max(0, len(guesses) - len(visible_guesses))
+
+            if visible_guesses:
+                guess_lines = [f"• `{_format_guess(item)}`" for item in visible_guesses]
+                if hidden_count:
+                    guess_lines.insert(0, f"*…and {hidden_count} earlier guess{'es' if hidden_count != 1 else ''}*.")
+                guesses_value = "\n".join(guess_lines)
+            elif wrong_guesses:
+                guesses_value = "Earlier guesses were not saved by the previous Rebus version."
+            else:
+                guesses_value = "No guesses yet."
+
+            embed.add_field(
+                name=f"Guesses tried ({wrong_guesses})",
+                value=guesses_value,
+                inline=False,
+            )
+
             skip_votes = len(_safe_int_list(game.get("skip_votes")))
-            embed.add_field(name="Wrong guesses", value=str(wrong_guesses), inline=True)
             embed.add_field(
                 name="Skip votes",
                 value=f"{skip_votes} / {SKIP_VOTES_REQUIRED}",
@@ -1262,6 +1304,7 @@ class RebusService:
                 "hints": list(puzzle.get("hints") or []),
                 "hint_count": 0,
                 "wrong_guesses": 0,
+                "guesses": [],
                 "skip_votes": [],
                 "started_by": interaction.user.id,
                 "guild_id": guild.id,
@@ -1311,6 +1354,17 @@ class RebusService:
                 await interaction.followup.send("🎉 Correct — you solved it!", ephemeral=True)
                 return
 
+            guesses = _safe_guess_list(game.get("guesses"))
+            if any(_normalise_guess(item) == guess for item in guesses):
+                await interaction.followup.send(
+                    "That answer has already been tried.",
+                    ephemeral=True,
+                )
+                return
+
+            display_guess = re.sub(r"\s+", " ", str(raw_guess or "")).strip()[:100]
+            guesses.append(display_guess)
+            game["guesses"] = guesses
             game["wrong_guesses"] = max(0, int(game.get("wrong_guesses") or 0)) + 1
             self._set_game(guild_id, channel_id, game)
             await self._edit_game_message(game)
@@ -1478,4 +1532,3 @@ async def setup(bot: commands.Bot) -> None:
     cog = RebusCog(bot, service)
     bind_public_cog(cog, bot, include_admin=True)
     await bot.add_cog(cog)
-
