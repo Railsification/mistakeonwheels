@@ -1478,3 +1478,4 @@ async def setup(bot: commands.Bot) -> None:
     cog = RebusCog(bot, service)
     bind_public_cog(cog, bot, include_admin=True)
     await bot.add_cog(cog)
+
