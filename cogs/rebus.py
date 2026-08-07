@@ -22,7 +22,7 @@ from core.utils import ensure_deferred
 GAMES_FILENAME = "rebus_games.json"
 CYCLE_FILENAME = "rebus_puzzle_cycle.json"
 SKIP_VOTES_REQUIRED = 3
-FUZZY_MATCH_CUTOFF = 0.91
+FUZZY_MATCH_CUTOFF = 0.86
 MAX_GUESSES_SHOWN = 10
 
 # Puzzle text is deliberately plain-text/monospace so it renders consistently on
@@ -800,11 +800,78 @@ def _utc_now() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
+_NUMBER_EQUIVALENTS: dict[str, str] = {
+    "zero": "0",
+    "one": "1",
+    "two": "2",
+    "three": "3",
+    "four": "4",
+    "five": "5",
+    "six": "6",
+    "seven": "7",
+    "eight": "8",
+    "nine": "9",
+    "ten": "10",
+    "eleven": "11",
+    "twelve": "12",
+    "thirteen": "13",
+    "fourteen": "14",
+    "fifteen": "15",
+    "sixteen": "16",
+    "seventeen": "17",
+    "eighteen": "18",
+    "nineteen": "19",
+    "twenty": "20",
+    "first": "1",
+    "second": "2",
+    "third": "3",
+    "fourth": "4",
+    "fifth": "5",
+    "sixth": "6",
+    "seventh": "7",
+    "eighth": "8",
+    "ninth": "9",
+    "tenth": "10",
+}
+
+
+def _normalise_number_token(token: str) -> str:
+    mapped = _NUMBER_EQUIVALENTS.get(token)
+    if mapped is not None:
+        return mapped
+
+    ordinal = re.fullmatch(r"(\d+)(?:st|nd|rd|th)", token)
+    if ordinal:
+        return ordinal.group(1)
+
+    return token
+
+
 def _normalise_guess(value: str) -> str:
     text = str(value or "").lower().replace("&", " and ")
     text = re.sub(r"[^a-z0-9]+", " ", text)
-    tokens = [token for token in text.split() if token not in {"a", "an", "the"}]
+    tokens = [
+        _normalise_number_token(token)
+        for token in text.split()
+        if token not in {"a", "an", "the"}
+    ]
     return " ".join(tokens)
+
+
+def _token_overlap_ratio(left: str, right: str) -> float:
+    left_tokens = left.split()
+    right_tokens = right.split()
+    if not left_tokens or not right_tokens:
+        return 0.0
+
+    remaining = list(right_tokens)
+    matches = 0
+    for token in left_tokens:
+        if token in remaining:
+            matches += 1
+            remaining.remove(token)
+
+    return matches / max(len(left_tokens), len(right_tokens))
 
 
 def _safe_int_list(value: Any) -> list[int]:
@@ -1086,15 +1153,24 @@ class RebusService:
         if guess in accepted:
             return True
 
-        # Fuzzy matching is intentionally conservative. It catches small spelling
-        # errors but does not hand out a win for merely related wording.
+        # Number words and digits are normalised before this point, so answers such
+        # as "Back to square one" and "Back to square 1" are equivalent. Fuzzy
+        # matching then allows a small typo or one harmless missing word without
+        # accepting a merely related phrase.
         if len(guess.replace(" ", "")) < 6:
             return False
 
-        return any(
-            SequenceMatcher(None, guess, answer).ratio() >= FUZZY_MATCH_CUTOFF
-            for answer in accepted
-        )
+        for answer in accepted:
+            ratio = SequenceMatcher(None, guess, answer).ratio()
+            overlap = _token_overlap_ratio(guess, answer)
+
+            if ratio >= 0.93:
+                return True
+
+            if ratio >= FUZZY_MATCH_CUTOFF and overlap >= 0.60:
+                return True
+
+        return False
 
     def _can_control(self, interaction: discord.Interaction, game: dict[str, Any]) -> bool:
         if interaction.user.id == int(game.get("started_by") or 0):
