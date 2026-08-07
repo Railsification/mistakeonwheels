@@ -1,3 +1,4 @@
+# core/settings.py
 from __future__ import annotations
 
 from dataclasses import dataclass, field
@@ -16,8 +17,10 @@ from .storage import (
 )
 from .utils import load_json
 
+# Kept for backwards compatibility with any existing imports. The live game list
+# is now discovered dynamically from core.game_stats instead of being limited to
+# this original tuple.
 GAME_FEATURE_KEYS = ("hangman", "connect4", "tictactoe")
-
 FEATURE_KEYS = [
     "speech",
     "tag_image",
@@ -83,9 +86,28 @@ def _default_feature_keys() -> List[str]:
     return list(FEATURE_KEYS)
 
 
+def game_feature_keys() -> list[str]:
+    """Return the currently registered games without hardcoding new cogs here.
+
+    GAME_FEATURE_KEYS remains available for old imports, but all live game checks
+    use the shared game catalog. A new game cog only needs to register itself via
+    register_game/GAME_META and it becomes a configurable game feature.
+    """
+    keys = list(GAME_FEATURE_KEYS)
+
+    try:
+        # Local import avoids coupling settings initialisation to cog load order.
+        from .game_stats import get_game_catalog
+
+        keys.extend(str(key) for key in get_game_catalog().keys())
+    except Exception as exc:
+        warn(f"Could not discover dynamic game feature keys: {exc!r}")
+
+    return _dedupe_keep_order(keys)
+
+
 class SettingsManager:
     """Per-guild settings manager.
-
     Settings live under:
         data/guilds/<guild_id>/settings.json
 
@@ -99,7 +121,6 @@ class SettingsManager:
         self._migrate_legacy_settings_once()
 
     # ---------- feature key index ----------
-
     def _load_feature_keys(self) -> list[str]:
         raw = load_global_json(FEATURE_INDEX_FILENAME, {})
         keys = _default_feature_keys()
@@ -126,10 +147,26 @@ class SettingsManager:
 
         return feature_key
 
+    def _refresh_dynamic_game_features(self) -> list[str]:
+        games = game_feature_keys()
+        changed = False
+
+        for game in games:
+            if game not in self._feature_keys:
+                self._feature_keys.append(game)
+                changed = True
+
+        if changed:
+            self._save_feature_keys()
+
+        return games
+
     def feature_keys(self) -> list[str]:
+        self._refresh_dynamic_game_features()
         return list(self._feature_keys)
 
     def all_feature_keys(self, guild_id: int | None = None) -> list[str]:
+        self._refresh_dynamic_game_features()
         keys = list(self._feature_keys)
 
         if guild_id:
@@ -143,7 +180,6 @@ class SettingsManager:
     def _migrate_legacy_settings_once(self) -> None:
         if not LEGACY_SETTINGS_FILE.exists():
             return
-
         raw = load_json(LEGACY_SETTINGS_FILE, {})
         if not isinstance(raw, dict):
             return
@@ -192,7 +228,6 @@ class SettingsManager:
             )
 
     # ---------- per-guild load/save ----------
-
     def _normalise_raw_settings(self, raw: dict | None) -> dict:
         raw = raw or {}
         fc_raw = raw.get("feature_channels") or raw.get("channels") or {}
@@ -220,7 +255,6 @@ class SettingsManager:
 
     def _load_guild_raw(self, guild_id: int) -> dict:
         raw = load_guild_json(guild_id, SETTINGS_FILENAME, None)
-
         if raw is None:
             raw = {
                 "topic": self._defaults.get("topic_default", "science"),
@@ -289,7 +323,6 @@ class SettingsManager:
         )
 
     # ---------- public API ----------
-
     def get_topic(self, guild_id: int) -> str:
         return self._ensure_guild(guild_id).topic
 
@@ -380,23 +413,28 @@ class SettingsManager:
     ) -> list[str]:
         """Return only the games enabled in this channel.
 
+        New games are discovered from the shared game catalog automatically.
+
         Backwards compatibility:
         if the old `games` feature is enabled and no individual game has
-        been assigned, all games remain available in that channel.
+        been assigned, every currently registered game remains available in
+        that channel.
         """
         if guild_id is None or channel_id is None:
             return []
 
+        current_games = self._refresh_dynamic_game_features()
         explicit = [
             game
-            for game in GAME_FEATURE_KEYS
+            for game in current_games
             if self.is_feature_allowed(guild_id, channel_id, game)
         ]
+
         if explicit:
             return explicit
 
         if self.is_feature_allowed(guild_id, channel_id, "games"):
-            return list(GAME_FEATURE_KEYS)
+            return list(current_games)
 
         return []
 
@@ -407,7 +445,9 @@ class SettingsManager:
         game: str,
     ) -> bool:
         game_key = _normalize_feature(game)
-        if game_key not in GAME_FEATURE_KEYS:
+        current_games = self._refresh_dynamic_game_features()
+
+        if game_key not in current_games:
             return False
 
         return game_key in self.available_games(guild_id, channel_id)
