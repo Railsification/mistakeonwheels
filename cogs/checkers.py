@@ -343,6 +343,55 @@ def render_board(board: list[list[str]]) -> str:
     return "\n".join(lines)
 
 
+def render_picker_board(
+    board: list[list[str]],
+    hints: set[tuple[int, int]] | None = None,
+) -> str:
+    """Render the board with legal landing squares marked by * for the picker UI."""
+    hints = hints or set()
+    lines = ["    a b c d e f g h"]
+    for row in range(8):
+        cells: list[str] = []
+        for col in range(8):
+            if (row, col) in hints:
+                cells.append("*")
+                continue
+            piece = board[row][col]
+            if piece != ".":
+                cells.append(PIECE_SYMBOLS[piece])
+            else:
+                cells.append("·" if (row + col) % 2 == 0 else "_")
+        rank = 8 - row
+        lines.append(f"{rank}   " + " ".join(cells) + f"   {rank}")
+    lines.append("    a b c d e f g h")
+    return "\n".join(lines)
+
+
+def _moves_with_prefix(
+    moves: list[CheckersMove],
+    prefix: tuple[tuple[int, int], ...],
+) -> list[CheckersMove]:
+    if not prefix:
+        return list(moves)
+    return [
+        move
+        for move in moves
+        if len(move.path) >= len(prefix) and move.path[: len(prefix)] == prefix
+    ]
+
+
+def _next_squares(
+    moves: list[CheckersMove],
+    prefix: tuple[tuple[int, int], ...],
+) -> list[tuple[int, int]]:
+    choices = {
+        move.path[len(prefix)]
+        for move in _moves_with_prefix(moves, prefix)
+        if len(move.path) > len(prefix)
+    }
+    return sorted(choices, key=lambda rc: rc_to_square(*rc))
+
+
 def _player_label(game: dict[str, Any], side: str) -> str:
     player_id = int(game["p1_id"] if side == RED else game["p2_id"])
     if bool(game.get("computer")) and side == WHITE:
@@ -368,8 +417,9 @@ def active_content(game: dict[str, Any]) -> str:
         f"Red: {_player_label(game, RED)}  •  White: {_player_label(game, WHITE)}\n"
         f"{status}{last_line}\n"
         f"```\n{render_board(board)}\n```"
-        "`●/○` = man, `◆/◇` = king. Press **Move** and enter `b6-a5`; "
-        "for multiple jumps enter the whole chain, e.g. `c3-e5-g7`."
+        "`●/○` = man, `◆/◇` = king. Press **Move**, choose one of your movable "
+        "pieces, then choose one of the legal landing squares shown. Forced multi-jumps "
+        "are stepped through automatically."
     )
 
 
@@ -436,19 +486,190 @@ class CheckersMoveButton(discord.ui.Button):
         self.cog = cog
 
     async def callback(self, interaction: discord.Interaction) -> None:
-        if interaction.guild_id is None or interaction.channel_id is None or interaction.message is None:
+        await self.cog.open_move_picker(interaction)
+
+
+class CheckersPickerSelect(discord.ui.Select):
+    def __init__(
+        self,
+        picker: "CheckersMovePickerView",
+        *,
+        mode: str,
+        options: list[discord.SelectOption],
+    ):
+        placeholder = "Choose a piece to move…" if mode == "piece" else "Choose a landing square…"
+        super().__init__(
+            placeholder=placeholder,
+            min_values=1,
+            max_values=1,
+            options=options,
+        )
+        self.picker = picker
+        self.mode = mode
+
+    async def callback(self, interaction: discord.Interaction) -> None:
+        if interaction.user.id != self.picker.user_id:
             await interaction.response.send_message(
-                "This Checkers game is no longer active.", ephemeral=True
+                "❌ This move picker belongs to the player whose turn it is.",
+                ephemeral=True,
             )
             return
-        await interaction.response.send_modal(
-            CheckersMoveModal(
-                self.cog,
-                interaction.guild_id,
-                interaction.channel_id,
-                interaction.message.id,
+        try:
+            chosen = square_to_rc(self.values[0])
+        except ValueError:
+            await interaction.response.send_message(
+                "That square is no longer available. Open **Move** again.",
+                ephemeral=True,
             )
+            return
+        await self.picker.cog.handle_picker_choice(
+            interaction,
+            guild_id=self.picker.guild_id,
+            channel_id=self.picker.channel_id,
+            message_id=self.picker.message_id,
+            prefix=self.picker.prefix,
+            chosen=chosen,
+            mode=self.mode,
+            user_id=self.picker.user_id,
         )
+
+
+class CheckersPickerBackButton(discord.ui.Button):
+    def __init__(self, picker: "CheckersMovePickerView"):
+        super().__init__(label="Back", emoji="↩️", style=discord.ButtonStyle.secondary)
+        self.picker = picker
+
+    async def callback(self, interaction: discord.Interaction) -> None:
+        if interaction.user.id != self.picker.user_id:
+            await interaction.response.send_message(
+                "❌ This move picker belongs to the player whose turn it is.",
+                ephemeral=True,
+            )
+            return
+        await self.picker.cog.refresh_move_picker(
+            interaction,
+            guild_id=self.picker.guild_id,
+            channel_id=self.picker.channel_id,
+            message_id=self.picker.message_id,
+            prefix=(),
+            user_id=self.picker.user_id,
+        )
+
+
+class CheckersPickerCancelButton(discord.ui.Button):
+    def __init__(self, picker: "CheckersMovePickerView"):
+        super().__init__(label="Cancel", style=discord.ButtonStyle.secondary)
+        self.picker = picker
+
+    async def callback(self, interaction: discord.Interaction) -> None:
+        if interaction.user.id != self.picker.user_id:
+            await interaction.response.send_message(
+                "❌ This move picker belongs to the player whose turn it is.",
+                ephemeral=True,
+            )
+            return
+        await interaction.response.edit_message(content="Move selection cancelled.", view=None)
+
+
+class CheckersMovePickerView(discord.ui.View):
+    def __init__(
+        self,
+        cog: "CheckersCog",
+        *,
+        guild_id: int,
+        channel_id: int,
+        message_id: int,
+        user_id: int,
+        board: list[list[str]],
+        moves: list[CheckersMove],
+        prefix: tuple[tuple[int, int], ...] = (),
+    ):
+        super().__init__(timeout=180)
+        self.cog = cog
+        self.guild_id = int(guild_id)
+        self.channel_id = int(channel_id)
+        self.message_id = int(message_id)
+        self.user_id = int(user_id)
+        self.board = valid_board(board)
+        self.moves = list(moves)
+        self.prefix = tuple(prefix)
+
+        if not self.prefix:
+            starts = sorted(
+                {move.path[0] for move in self.moves},
+                key=lambda rc: rc_to_square(*rc),
+            )
+            options: list[discord.SelectOption] = []
+            for rc in starts:
+                square = rc_to_square(*rc)
+                piece = self.board[rc[0]][rc[1]]
+                branch_count = sum(1 for move in self.moves if move.path[0] == rc)
+                capture_count = max(
+                    (len(move.captures) for move in self.moves if move.path[0] == rc),
+                    default=0,
+                )
+                kind = "king" if piece.isupper() else "man"
+                if capture_count:
+                    description = f"{kind} • jump available"
+                else:
+                    description = f"{kind} • {branch_count} legal move{'s' if branch_count != 1 else ''}"
+                options.append(
+                    discord.SelectOption(
+                        label=square.upper(),
+                        value=square,
+                        description=description[:100],
+                    )
+                )
+            if options:
+                self.add_item(CheckersPickerSelect(self, mode="piece", options=options[:25]))
+        else:
+            options = []
+            current_moves = _moves_with_prefix(self.moves, self.prefix)
+            for rc in _next_squares(self.moves, self.prefix):
+                square = rc_to_square(*rc)
+                extended = self.prefix + (rc,)
+                branches = _moves_with_prefix(current_moves, extended)
+                continues = any(len(move.path) > len(extended) for move in branches)
+                total_captures = max((len(move.captures) for move in branches), default=0)
+                description = "continue jump" if continues else "finish move"
+                if total_captures:
+                    description += f" • {total_captures} capture{'s' if total_captures != 1 else ''}"
+                options.append(
+                    discord.SelectOption(
+                        label=square.upper(),
+                        value=square,
+                        description=description[:100],
+                    )
+                )
+            if options:
+                self.add_item(CheckersPickerSelect(self, mode="landing", options=options[:25]))
+            self.add_item(CheckersPickerBackButton(self))
+
+        self.add_item(CheckersPickerCancelButton(self))
+
+    def content(self) -> str:
+        jump_required = bool(self.moves and self.moves[0].captures)
+        if not self.prefix:
+            hints: set[tuple[int, int]] = set()
+            instruction = "Choose one of your movable pieces below."
+            if jump_required:
+                instruction += " **A capture is compulsory**, so only pieces that can jump are listed."
+        else:
+            hints = set(_next_squares(self.moves, self.prefix))
+            path_text = " → ".join(rc_to_square(*rc).upper() for rc in self.prefix)
+            instruction = (
+                f"Selected: **{path_text}**\n"
+                "Choose one of the `*` landing squares below."
+            )
+            if jump_required:
+                instruction += " If another jump is required, the picker will continue automatically."
+        text = (
+            f"🔴 **Choose your Checkers move**\n{instruction}\n"
+            f"```\n{render_picker_board(self.board, hints)}\n```"
+        )
+        if self.prefix:
+            text += "`*` = available landing square"
+        return text
 
 
 class CheckersResignButton(discord.ui.Button):
@@ -504,9 +725,9 @@ class CheckersCog(commands.Cog):
         "summary": "Persistent English/American Checkers for PvP or Computer mode.",
         "details": (
             "Use /checkers and optionally choose an opponent. Leave opponent blank for "
-            "Computer mode. Press Move and enter coordinates such as b6-a5. Captures "
-            "are compulsory, and multiple jumps must be entered as a complete chain, "
-            "for example c3-e5-g7."
+            "Computer mode. Press Move, choose one of your movable pieces, then choose "
+            "one of its legal landing squares. Captures are compulsory and forced "
+            "multi-jumps are stepped through automatically."
         ),
     }
 
@@ -704,6 +925,160 @@ class CheckersCog(commands.Cog):
             )
             return
         await self._start(interaction, p2_id=int(bot_user.id), computer=True)
+
+    def _picker_game_state(
+        self,
+        guild_id: int,
+        channel_id: int,
+        message_id: int,
+        user_id: int,
+    ) -> tuple[dict[str, Any] | None, list[CheckersMove], str | None]:
+        game = self._get_game(guild_id, channel_id)
+        if not game or int(game.get("message_id") or 0) != int(message_id):
+            return None, [], "This Checkers game is no longer active."
+
+        turn = str(game.get("turn") or RED)
+        p1_id = int(game["p1_id"])
+        p2_id = int(game["p2_id"])
+        computer = bool(game.get("computer"))
+        allowed = (p1_id,) if computer else (p1_id, p2_id)
+        expected_id = p1_id if turn == RED else p2_id
+        if int(user_id) not in allowed:
+            return None, [], "❌ You aren’t playing this game."
+        if int(user_id) != expected_id:
+            return None, [], "⏳ Not your turn."
+
+        board = valid_board(game.get("board"))
+        moves = legal_moves(board, turn)
+        if not moves:
+            return game, [], "There are no legal moves available."
+        return game, moves, None
+
+    async def open_move_picker(self, interaction: discord.Interaction) -> None:
+        if interaction.guild_id is None or interaction.channel_id is None or interaction.message is None:
+            await interaction.response.send_message(
+                "This Checkers game is no longer active.",
+                ephemeral=True,
+            )
+            return
+
+        game, moves, error = self._picker_game_state(
+            interaction.guild_id,
+            interaction.channel_id,
+            interaction.message.id,
+            interaction.user.id,
+        )
+        if error or game is None:
+            await interaction.response.send_message(error or "This Checkers game is no longer active.", ephemeral=True)
+            return
+
+        view = CheckersMovePickerView(
+            self,
+            guild_id=interaction.guild_id,
+            channel_id=interaction.channel_id,
+            message_id=interaction.message.id,
+            user_id=interaction.user.id,
+            board=valid_board(game.get("board")),
+            moves=moves,
+        )
+        await interaction.response.send_message(view.content(), view=view, ephemeral=True)
+
+    async def refresh_move_picker(
+        self,
+        interaction: discord.Interaction,
+        *,
+        guild_id: int,
+        channel_id: int,
+        message_id: int,
+        prefix: tuple[tuple[int, int], ...],
+        user_id: int,
+    ) -> None:
+        game, moves, error = self._picker_game_state(
+            guild_id, channel_id, message_id, user_id
+        )
+        if error or game is None:
+            await interaction.response.edit_message(
+                content=error or "This Checkers game is no longer active.",
+                view=None,
+            )
+            return
+
+        if prefix and not _moves_with_prefix(moves, prefix):
+            prefix = ()
+        view = CheckersMovePickerView(
+            self,
+            guild_id=guild_id,
+            channel_id=channel_id,
+            message_id=message_id,
+            user_id=user_id,
+            board=valid_board(game.get("board")),
+            moves=moves,
+            prefix=prefix,
+        )
+        await interaction.response.edit_message(content=view.content(), view=view)
+
+    async def handle_picker_choice(
+        self,
+        interaction: discord.Interaction,
+        *,
+        guild_id: int,
+        channel_id: int,
+        message_id: int,
+        prefix: tuple[tuple[int, int], ...],
+        chosen: tuple[int, int],
+        mode: str,
+        user_id: int,
+    ) -> None:
+        game, moves, error = self._picker_game_state(
+            guild_id, channel_id, message_id, user_id
+        )
+        if error or game is None:
+            await interaction.response.edit_message(
+                content=error or "This Checkers game is no longer active.",
+                view=None,
+            )
+            return
+
+        if mode == "piece":
+            new_prefix = (chosen,)
+        else:
+            new_prefix = tuple(prefix) + (chosen,)
+
+        matching = _moves_with_prefix(moves, new_prefix)
+        if not matching:
+            await interaction.response.edit_message(
+                content="That option is no longer legal. Press **Move** again to refresh your choices.",
+                view=None,
+            )
+            return
+
+        completed = next((move for move in matching if move.path == new_prefix), None)
+        has_continuation = any(len(move.path) > len(new_prefix) for move in matching)
+        if completed is not None and not has_continuation:
+            await self.handle_move(
+                interaction,
+                completed.notation(),
+                guild_id,
+                channel_id,
+                message_id,
+            )
+            try:
+                await interaction.delete_original_response()
+            except Exception:
+                pass
+            return
+
+        view = CheckersMovePickerView(
+            self,
+            guild_id=guild_id,
+            channel_id=channel_id,
+            message_id=message_id,
+            user_id=user_id,
+            board=valid_board(game.get("board")),
+            moves=moves,
+            prefix=new_prefix,
+        )
+        await interaction.response.edit_message(content=view.content(), view=view)
 
     def _state_after_move(self, game: dict[str, Any], move: CheckersMove, side: str) -> None:
         board = valid_board(game.get("board"))
