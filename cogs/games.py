@@ -50,9 +50,40 @@ def game_label(key: str | None) -> str:
     return wanted
 
 
+def _computer_launcher(entry: dict[str, Any] | None):
+    if not isinstance(entry, dict):
+        return None
+
+    cog = entry.get("cog")
+    launcher = getattr(cog, "start_computer_game", None)
+    if callable(launcher):
+        return launcher
+
+    service = getattr(cog, "service", None)
+    launcher = getattr(service, "start_computer_game", None)
+    if callable(launcher):
+        return launcher
+
+    return None
+
+
+def _supports_computer(entry: dict[str, Any] | None) -> bool:
+    return callable(_computer_launcher(entry))
+
+
 class GameSelect(discord.ui.Select):
-    def __init__(self, bot: commands.Bot):
+    def __init__(
+        self,
+        bot: commands.Bot,
+        allowed_keys: set[str] | None = None,
+    ):
         registry = _refresh_compatibility_constants(bot)
+        if allowed_keys is not None:
+            registry = {
+                key: details
+                for key, details in registry.items()
+                if key in allowed_keys
+            }
         options: list[discord.SelectOption] = []
 
         for key, details in registry.items():
@@ -89,6 +120,8 @@ class GameSelect(discord.ui.Select):
         await interaction.response.defer(ephemeral=True)
         selected = self.values[0]
         view.selected_game = None if selected == "__none__" else selected
+        view.opponent_id = None
+        view.computer_mode = False
         view.sync_controls()
         await view.refresh(interaction)
 
@@ -107,28 +140,89 @@ class OpponentSelect(discord.ui.UserSelect):
         view: GamesView = self.view  # type: ignore[assignment]
         await interaction.response.defer(ephemeral=True)
         view.opponent_id = self.values[0].id
+        view.computer_mode = False
+        view.sync_controls()
+        await view.refresh(interaction)
+
+
+class ComputerButton(discord.ui.Button):
+    def __init__(self):
+        super().__init__(
+            label="Computer",
+            emoji="🤖",
+            style=discord.ButtonStyle.primary,
+            row=2,
+            disabled=True,
+        )
+
+    async def callback(self, interaction: discord.Interaction) -> None:
+        view: GamesView = self.view  # type: ignore[assignment]
+        await interaction.response.defer(ephemeral=True)
+
+        entry = view.selected_entry()
+        if not entry or not bool(entry.get("requires_opponent")):
+            await interaction.followup.send(
+                "❌ Choose a two-player game first.",
+                ephemeral=True,
+            )
+            return
+
+        if not _supports_computer(entry):
+            await interaction.followup.send(
+                "❌ Computer mode is not available for that game yet.",
+                ephemeral=True,
+            )
+            return
+
+        view.computer_mode = not view.computer_mode
+        if view.computer_mode:
+            view.opponent_id = None
+        view.sync_controls()
         await view.refresh(interaction)
 
 
 class GamesView(discord.ui.View):
-    def __init__(self, bot: commands.Bot, author_id: int):
+    def __init__(
+        self,
+        bot: commands.Bot,
+        author_id: int,
+        guild_id: int | None = None,
+        channel_id: int | None = None,
+    ):
         # The private picker expires; started games control their own lifetime.
         super().__init__(timeout=300)
         self.bot = bot
         self.author_id = int(author_id)
+        self.guild_id = int(guild_id) if guild_id is not None else None
+        self.channel_id = int(channel_id) if channel_id is not None else None
         self.selected_game: str | None = None
         self.opponent_id: int | None = None
-        self.registry = _refresh_compatibility_constants(bot)
-        self.add_item(GameSelect(bot))
+        self.computer_mode = False
+
+        all_games = _refresh_compatibility_constants(bot)
+        settings = getattr(bot, "settings", None)
+        if settings is not None and self.guild_id is not None and self.channel_id is not None:
+            allowed_keys = set(settings.available_games(self.guild_id, self.channel_id))
+            self.registry = {
+                key: details
+                for key, details in all_games.items()
+                if key in allowed_keys
+            }
+        else:
+            allowed_keys = set(all_games)
+            self.registry = all_games
+
+        self.add_item(GameSelect(bot, allowed_keys))
         self.add_item(OpponentSelect())
+        self.add_item(ComputerButton())
         self.add_item(StartButton())
         self.add_item(CloseButton())
         self.sync_controls()
 
     def selected_entry(self) -> dict[str, Any] | None:
-        if not self.selected_game:
+        if not self.selected_game or self.selected_game not in self.registry:
             return None
-        entry = get_game_entry(self.bot, self.selected_game)
+        entry = get_game_entry(self.bot, self.selected_game, self.guild_id)
         if entry is not None:
             self.registry[self.selected_game] = entry
         return entry
@@ -136,18 +230,33 @@ class GamesView(discord.ui.View):
     def sync_controls(self) -> None:
         entry = self.registry.get(str(self.selected_game or ""))
         needs_opponent = bool(entry and entry.get("requires_opponent"))
+        supports_computer = needs_opponent and _supports_computer(entry)
+
+        if self.computer_mode and not supports_computer:
+            self.computer_mode = False
 
         for child in self.children:
             if isinstance(child, OpponentSelect):
-                child.disabled = not needs_opponent
-                child.placeholder = (
-                    "Pick an opponent..."
-                    if needs_opponent
-                    else "No opponent needed for this game"
+                child.disabled = not needs_opponent or self.computer_mode
+                if not needs_opponent:
+                    child.placeholder = "No opponent needed for this game"
+                elif self.computer_mode:
+                    child.placeholder = "Computer opponent selected"
+                else:
+                    child.placeholder = "Pick an opponent..."
+
+            elif isinstance(child, ComputerButton):
+                child.disabled = not supports_computer
+                child.style = (
+                    discord.ButtonStyle.success
+                    if self.computer_mode
+                    else discord.ButtonStyle.primary
                 )
+                child.label = "Computer ✓" if self.computer_mode else "Computer"
 
         if not needs_opponent:
             self.opponent_id = None
+            self.computer_mode = False
 
     def disable_all(self) -> None:
         for child in self.children:
@@ -164,10 +273,21 @@ class GamesView(discord.ui.View):
 
         label = str(entry.get("label") or game_label(self.selected_game))
         if bool(entry.get("requires_opponent")):
-            opponent = f"<@{self.opponent_id}>" if self.opponent_id else "_(none)_"
-            ready = self.opponent_id is not None
-            opponent_line = f"Opponent: {opponent}"
-            instruction = "ready." if ready else "pick an opponent."
+            supports_computer = _supports_computer(entry)
+            if self.computer_mode and supports_computer:
+                ready = True
+                opponent_line = "Opponent: 🤖 **Computer**"
+                instruction = "ready."
+            else:
+                opponent = f"<@{self.opponent_id}>" if self.opponent_id else "_(none)_"
+                ready = self.opponent_id is not None
+                opponent_line = f"Opponent: {opponent}"
+                if ready:
+                    instruction = "ready."
+                elif supports_computer:
+                    instruction = "pick a player or choose **Computer**."
+                else:
+                    instruction = "pick an opponent."
         else:
             ready = True
             opponent_line = "Opponent: _not needed — the whole channel can play_"
@@ -175,7 +295,7 @@ class GamesView(discord.ui.View):
 
         return (
             "🎮 **Games Menu**\n"
-            "Pick a game, then press **Start**.\n"
+            "Pick a game, choose who you want to play, then press **Start**.\n"
             f"{opponent_line}\n\n"
             f"{'✅' if ready else '❌'} **{label}** — {instruction}"
         )
@@ -231,28 +351,6 @@ class StartButton(discord.ui.Button):
             )
             return
 
-        opponent: discord.Member | None = None
-        if bool(entry.get("requires_opponent")):
-            if not view.opponent_id:
-                await interaction.followup.send(
-                    "❌ Pick an opponent first.",
-                    ephemeral=True,
-                )
-                return
-
-            opponent = interaction.guild.get_member(view.opponent_id)
-            if opponent is None:
-                try:
-                    opponent = await interaction.guild.fetch_member(view.opponent_id)
-                except Exception:
-                    opponent = None
-            if opponent is None:
-                await interaction.followup.send(
-                    "❌ Couldn’t resolve that opponent.",
-                    ephemeral=True,
-                )
-                return
-
         launcher = entry.get("launcher")
         if not callable(launcher):
             await interaction.followup.send(
@@ -261,11 +359,46 @@ class StartButton(discord.ui.Button):
             )
             return
 
+        opponent: discord.Member | None = None
+        computer_launcher = None
+
+        if bool(entry.get("requires_opponent")):
+            if view.computer_mode:
+                computer_launcher = _computer_launcher(entry)
+                if not callable(computer_launcher):
+                    await interaction.followup.send(
+                        "❌ Computer mode is not available for that game yet.",
+                        ephemeral=True,
+                    )
+                    return
+            else:
+                if not view.opponent_id:
+                    await interaction.followup.send(
+                        "❌ Pick an opponent or choose Computer first.",
+                        ephemeral=True,
+                    )
+                    return
+
+                opponent = interaction.guild.get_member(view.opponent_id)
+                if opponent is None:
+                    try:
+                        opponent = await interaction.guild.fetch_member(view.opponent_id)
+                    except Exception:
+                        opponent = None
+                if opponent is None:
+                    await interaction.followup.send(
+                        "❌ Couldn’t resolve that opponent.",
+                        ephemeral=True,
+                    )
+                    return
+
         view.disable_all()
         await view.refresh(interaction)
 
         try:
-            if bool(entry.get("requires_opponent")):
+            if callable(computer_launcher):
+                await computer_launcher(interaction)
+            elif bool(entry.get("requires_opponent")):
                 await launcher(interaction, opponent)
             else:
                 await launcher(interaction)
@@ -294,7 +427,10 @@ class GamesCog(commands.Cog):
     HELP_META = {
         "title": "Games Menu",
         "summary": "Automatically lists every loaded game cog in one menu.",
-        "details": "Use /games, choose a game, select an opponent when required, then press Start.",
+        "details": (
+            "Use /games, choose a game, then pick another player or Computer "
+            "when the selected game supports solo play."
+        ),
     }
 
     def __init__(self, bot: commands.Bot):
@@ -307,19 +443,23 @@ class GamesCog(commands.Cog):
     )
     async def games(self, interaction: discord.Interaction) -> None:
         log_cmd("games", interaction)
-        if not self.settings.is_feature_allowed(
+        if not self.settings.is_games_menu_allowed(
             interaction.guild_id,
             interaction.channel_id,
-            "games",
         ):
             await interaction.response.send_message(
-                "❌ `/games` can only be used in the configured game channel(s).",
+                "❌ `/games` can only be used in a configured games/game channel.",
                 ephemeral=True,
             )
             return
 
         await ensure_deferred(interaction, ephemeral=True)
-        view = GamesView(self.bot, author_id=interaction.user.id)
+        view = GamesView(
+            self.bot,
+            author_id=interaction.user.id,
+            guild_id=interaction.guild_id,
+            channel_id=interaction.channel_id,
+        )
         await interaction.followup.send(
             content=view.render_content(),
             view=view,
