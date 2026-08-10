@@ -227,8 +227,6 @@ def choose_computer_shot(
     if not available:
         raise RuntimeError("Computer has no Battleships shots remaining")
 
-    # Finish a ship once the computer has found it. If multiple hits establish
-    # an orientation, extend that line before trying side squares.
     target_candidates: list[str] = []
     for _name, cells in human_fleet.items():
         ship_cells = set(cells)
@@ -269,8 +267,6 @@ def choose_computer_shot(
     if target_candidates:
         return random.choice(list(dict.fromkeys(target_candidates)))
 
-    # Hunt on a checkerboard first. Every ship has length >= 2, so parity hunting
-    # finds targets faster without making the computer omniscient.
     parity = [
         coord
         for coord in available
@@ -278,6 +274,7 @@ def choose_computer_shot(
     ]
     if parity:
         return random.choice(parity)
+
     return random.choice(list(available))
 
 
@@ -295,6 +292,24 @@ def _shot_result_text(
     return f"{shooter} fired at **{coord}** — 🌊 miss."
 
 
+def _placement_cells(
+    start_coord: str,
+    size: int,
+    orientation: str,
+) -> list[str] | None:
+    row, col = coord_to_rc(start_coord)
+    horizontal = str(orientation).upper().startswith("H")
+    cells: list[str] = []
+    for offset in range(size):
+        rr = row if horizontal else row + offset
+        cc = col + offset if horizontal else col
+        if not (0 <= rr < BOARD_SIZE and 0 <= cc < BOARD_SIZE):
+            return None
+        cells.append(rc_to_coord(rr, cc))
+    return cells
+
+
+# Kept for backwards compatibility with the previous Battleships cog.
 class FireModal(discord.ui.Modal, title="Fire at a coordinate"):
     coordinate = discord.ui.TextInput(
         label="Coordinate",
@@ -317,6 +332,380 @@ class FireModal(discord.ui.Modal, title="Fire at a coordinate"):
         )
 
 
+class TargetRowSelect(discord.ui.Select):
+    def __init__(self, view: "TargetingView") -> None:
+        self.target_view = view
+        options = [
+            discord.SelectOption(label=f"Row {row}", value=str(row))
+            for row in range(1, BOARD_SIZE + 1)
+        ]
+        super().__init__(
+            placeholder="1️⃣ Pick a row",
+            min_values=1,
+            max_values=1,
+            options=options,
+            row=0,
+        )
+
+    async def callback(self, interaction: discord.Interaction) -> None:
+        self.target_view.selected_row = int(self.values[0])
+        self.target_view.selected_col = None
+        self.target_view.refresh_columns()
+        await self.target_view.refresh(interaction)
+
+
+class TargetColumnSelect(discord.ui.Select):
+    def __init__(self, view: "TargetingView") -> None:
+        self.target_view = view
+        super().__init__(
+            placeholder="2️⃣ Pick an available column",
+            min_values=1,
+            max_values=1,
+            options=[discord.SelectOption(label="Choose a row first", value="none")],
+            disabled=True,
+            row=1,
+        )
+
+    async def callback(self, interaction: discord.Interaction) -> None:
+        if self.values[0] == "none":
+            await interaction.response.defer()
+            return
+        self.target_view.selected_col = self.values[0]
+        await self.target_view.refresh(interaction)
+
+
+class ConfirmFireButton(discord.ui.Button):
+    def __init__(self, view: "TargetingView") -> None:
+        self.target_view = view
+        super().__init__(
+            label="Fire",
+            emoji="🎯",
+            style=discord.ButtonStyle.danger,
+            disabled=True,
+            row=2,
+        )
+
+    async def callback(self, interaction: discord.Interaction) -> None:
+        row = self.target_view.selected_row
+        col = self.target_view.selected_col
+        if row is None or col is None:
+            await interaction.response.send_message(
+                "Pick a row and column first.",
+                ephemeral=True,
+            )
+            return
+        await self.target_view.service.handle_fire(
+            interaction,
+            f"{col}{row}",
+            source_message_id=self.target_view.source_message_id,
+            close_picker=True,
+        )
+
+
+class ClosePickerButton(discord.ui.Button):
+    def __init__(self) -> None:
+        super().__init__(
+            label="Close",
+            emoji="✖️",
+            style=discord.ButtonStyle.secondary,
+            row=2,
+        )
+
+    async def callback(self, interaction: discord.Interaction) -> None:
+        await interaction.response.edit_message(
+            content="Target picker closed.",
+            embed=None,
+            view=None,
+        )
+
+
+class TargetingView(discord.ui.View):
+    def __init__(
+        self,
+        service: "BattleshipsService",
+        *,
+        source_message_id: int,
+        shooter_slot: int,
+        shots: set[str],
+    ) -> None:
+        super().__init__(timeout=300)
+        self.service = service
+        self.source_message_id = int(source_message_id)
+        self.shooter_slot = int(shooter_slot)
+        self.shots = set(shots)
+        self.selected_row: int | None = None
+        self.selected_col: str | None = None
+
+        self.row_select = TargetRowSelect(self)
+        self.column_select = TargetColumnSelect(self)
+        self.fire_button = ConfirmFireButton(self)
+        self.add_item(self.row_select)
+        self.add_item(self.column_select)
+        self.add_item(self.fire_button)
+        self.add_item(ClosePickerButton())
+
+    def refresh_columns(self) -> None:
+        if self.selected_row is None:
+            self.column_select.options = [
+                discord.SelectOption(label="Choose a row first", value="none")
+            ]
+            self.column_select.disabled = True
+            self.fire_button.disabled = True
+            return
+
+        available = [
+            col
+            for col in COL_LABELS
+            if f"{col}{self.selected_row}" not in self.shots
+        ]
+        if not available:
+            self.column_select.options = [
+                discord.SelectOption(label="No targets left in this row", value="none")
+            ]
+            self.column_select.disabled = True
+            self.fire_button.disabled = True
+            return
+
+        self.column_select.options = [
+            discord.SelectOption(
+                label=f"Column {col}",
+                value=col,
+                description=f"Fire at {col}{self.selected_row}",
+            )
+            for col in available
+        ]
+        self.column_select.disabled = False
+        self.fire_button.disabled = self.selected_col is None
+
+    async def refresh(self, interaction: discord.Interaction) -> None:
+        self.refresh_columns()
+        self.fire_button.disabled = self.selected_row is None or self.selected_col is None
+        game = self.service._get_game(interaction.guild_id or 0, interaction.channel_id or 0)
+        if not game:
+            await interaction.response.edit_message(
+                content="That Battleships game is no longer available.",
+                embed=None,
+                view=None,
+            )
+            return
+        await interaction.response.edit_message(
+            embed=self.service._target_picker_embed(
+                game,
+                self.shooter_slot,
+                self.selected_row,
+                self.selected_col,
+            ),
+            view=self,
+        )
+
+
+class PlacementShipSelect(discord.ui.Select):
+    def __init__(self, view: "FleetPlacementView") -> None:
+        self.placement_view = view
+        super().__init__(
+            placeholder="1️⃣ Ship",
+            min_values=1,
+            max_values=1,
+            options=[
+                discord.SelectOption(
+                    label=name,
+                    value=name,
+                    description=f"{size} spaces",
+                    default=name == view.ship_name,
+                )
+                for name, size in FLEET_SPEC
+            ],
+            row=0,
+        )
+
+    async def callback(self, interaction: discord.Interaction) -> None:
+        self.placement_view.ship_name = self.values[0]
+        await self.placement_view.refresh(interaction)
+
+
+class PlacementRowSelect(discord.ui.Select):
+    def __init__(self, view: "FleetPlacementView") -> None:
+        self.placement_view = view
+        super().__init__(
+            placeholder="2️⃣ Start row",
+            min_values=1,
+            max_values=1,
+            options=[
+                discord.SelectOption(
+                    label=f"Row {row}",
+                    value=str(row),
+                    default=row == view.row_number,
+                )
+                for row in range(1, BOARD_SIZE + 1)
+            ],
+            row=1,
+        )
+
+    async def callback(self, interaction: discord.Interaction) -> None:
+        self.placement_view.row_number = int(self.values[0])
+        await self.placement_view.refresh(interaction)
+
+
+class PlacementColumnSelect(discord.ui.Select):
+    def __init__(self, view: "FleetPlacementView") -> None:
+        self.placement_view = view
+        super().__init__(
+            placeholder="3️⃣ Start column",
+            min_values=1,
+            max_values=1,
+            options=[
+                discord.SelectOption(
+                    label=f"Column {col}",
+                    value=col,
+                    default=col == view.col_label,
+                )
+                for col in COL_LABELS
+            ],
+            row=2,
+        )
+
+    async def callback(self, interaction: discord.Interaction) -> None:
+        self.placement_view.col_label = self.values[0]
+        await self.placement_view.refresh(interaction)
+
+
+class PlacementOrientationSelect(discord.ui.Select):
+    def __init__(self, view: "FleetPlacementView") -> None:
+        self.placement_view = view
+        super().__init__(
+            placeholder="4️⃣ Direction",
+            min_values=1,
+            max_values=1,
+            options=[
+                discord.SelectOption(
+                    label="Horizontal →",
+                    value="H",
+                    default=view.orientation == "H",
+                ),
+                discord.SelectOption(
+                    label="Vertical ↓",
+                    value="V",
+                    default=view.orientation == "V",
+                ),
+            ],
+            row=3,
+        )
+
+    async def callback(self, interaction: discord.Interaction) -> None:
+        self.placement_view.orientation = self.values[0]
+        await self.placement_view.refresh(interaction)
+
+
+class PlaceShipButton(discord.ui.Button):
+    def __init__(self, view: "FleetPlacementView") -> None:
+        self.placement_view = view
+        super().__init__(
+            label="Place Ship",
+            emoji="🚢",
+            style=discord.ButtonStyle.primary,
+            row=4,
+        )
+
+    async def callback(self, interaction: discord.Interaction) -> None:
+        await self.placement_view.service.place_ship(
+            interaction,
+            source_message_id=self.placement_view.source_message_id,
+            slot=self.placement_view.slot,
+            ship_name=self.placement_view.ship_name,
+            start_coord=f"{self.placement_view.col_label}{self.placement_view.row_number}",
+            orientation=self.placement_view.orientation,
+            placement_view=self.placement_view,
+        )
+
+
+class PlacementRandomButton(discord.ui.Button):
+    def __init__(self, view: "FleetPlacementView") -> None:
+        self.placement_view = view
+        super().__init__(
+            label="Randomise",
+            emoji="🎲",
+            style=discord.ButtonStyle.secondary,
+            row=4,
+        )
+
+    async def callback(self, interaction: discord.Interaction) -> None:
+        await self.placement_view.service.randomize_fleet(
+            interaction,
+            source_message_id=self.placement_view.source_message_id,
+            slot=self.placement_view.slot,
+            placement_view=self.placement_view,
+        )
+
+
+class PlacementReadyButton(discord.ui.Button):
+    def __init__(self, view: "FleetPlacementView") -> None:
+        self.placement_view = view
+        super().__init__(
+            label="Ready",
+            emoji="✅",
+            style=discord.ButtonStyle.success,
+            row=4,
+        )
+
+    async def callback(self, interaction: discord.Interaction) -> None:
+        await self.placement_view.service.mark_ready(
+            interaction,
+            source_message_id=self.placement_view.source_message_id,
+            slot=self.placement_view.slot,
+            placement_view=self.placement_view,
+        )
+
+
+class FleetPlacementView(discord.ui.View):
+    def __init__(
+        self,
+        service: "BattleshipsService",
+        *,
+        source_message_id: int,
+        slot: int,
+    ) -> None:
+        super().__init__(timeout=600)
+        self.service = service
+        self.source_message_id = int(source_message_id)
+        self.slot = int(slot)
+        self.ship_name = FLEET_SPEC[0][0]
+        self.row_number = 1
+        self.col_label = "A"
+        self.orientation = "H"
+        self.rebuild_controls()
+
+    def rebuild_controls(self) -> None:
+        self.clear_items()
+        self.add_item(PlacementShipSelect(self))
+        self.add_item(PlacementRowSelect(self))
+        self.add_item(PlacementColumnSelect(self))
+        self.add_item(PlacementOrientationSelect(self))
+        self.add_item(PlaceShipButton(self))
+        self.add_item(PlacementRandomButton(self))
+        self.add_item(PlacementReadyButton(self))
+
+    async def refresh(
+        self,
+        interaction: discord.Interaction,
+        *,
+        notice: str | None = None,
+    ) -> None:
+        self.rebuild_controls()
+        game = self.service._get_game(interaction.guild_id or 0, interaction.channel_id or 0)
+        if not game:
+            await interaction.response.edit_message(
+                content="That Battleships setup is no longer available.",
+                embed=None,
+                view=None,
+            )
+            return
+        await interaction.response.edit_message(
+            content=notice,
+            embed=self.service._placement_embed(game, self.slot, self),
+            view=self,
+        )
+
+
 class FireButton(discord.ui.Button):
     def __init__(self, service: "BattleshipsService") -> None:
         super().__init__(
@@ -329,15 +718,7 @@ class FireButton(discord.ui.Button):
         self.service = service
 
     async def callback(self, interaction: discord.Interaction) -> None:
-        if interaction.message is None:
-            await interaction.response.send_message(
-                "That Battleships game is no longer available.",
-                ephemeral=True,
-            )
-            return
-        await interaction.response.send_modal(
-            FireModal(self.service, interaction.message.id)
-        )
+        await self.service.open_target_picker(interaction)
 
 
 class FleetButton(discord.ui.Button):
@@ -385,6 +766,51 @@ class CancelButton(discord.ui.Button):
         await self.service.cancel(interaction)
 
 
+class SetupFleetButton(discord.ui.Button):
+    def __init__(self, service: "BattleshipsService") -> None:
+        super().__init__(
+            label="Set Fleet",
+            emoji="🚢",
+            style=discord.ButtonStyle.primary,
+            custom_id="hotbot:battleships:setup_fleet:v1",
+            row=0,
+        )
+        self.service = service
+
+    async def callback(self, interaction: discord.Interaction) -> None:
+        await self.service.open_fleet_setup(interaction)
+
+
+class SetupRandomButton(discord.ui.Button):
+    def __init__(self, service: "BattleshipsService") -> None:
+        super().__init__(
+            label="Random Fleet",
+            emoji="🎲",
+            style=discord.ButtonStyle.secondary,
+            custom_id="hotbot:battleships:setup_random:v1",
+            row=0,
+        )
+        self.service = service
+
+    async def callback(self, interaction: discord.Interaction) -> None:
+        await self.service.randomize_from_public_setup(interaction)
+
+
+class SetupReadyButton(discord.ui.Button):
+    def __init__(self, service: "BattleshipsService") -> None:
+        super().__init__(
+            label="Ready",
+            emoji="✅",
+            style=discord.ButtonStyle.success,
+            custom_id="hotbot:battleships:setup_ready:v1",
+            row=0,
+        )
+        self.service = service
+
+    async def callback(self, interaction: discord.Interaction) -> None:
+        await self.service.mark_ready_from_public_setup(interaction)
+
+
 class BattleshipsView(discord.ui.View):
     def __init__(
         self,
@@ -397,6 +823,25 @@ class BattleshipsView(discord.ui.View):
         self.add_item(FireButton(service))
         self.add_item(FleetButton(service))
         self.add_item(ResignButton(service))
+        self.add_item(CancelButton(service))
+
+        if disabled:
+            for child in self.children:
+                child.disabled = True
+
+
+class BattleshipsSetupView(discord.ui.View):
+    def __init__(
+        self,
+        service: "BattleshipsService",
+        *,
+        disabled: bool = False,
+    ) -> None:
+        super().__init__(timeout=None)
+        self.service = service
+        self.add_item(SetupFleetButton(service))
+        self.add_item(SetupRandomButton(service))
+        self.add_item(SetupReadyButton(service))
         self.add_item(CancelButton(service))
 
         if disabled:
@@ -457,6 +902,23 @@ class BattleshipsService:
         game["shots"] = clean_shots
         game["turn"] = 2 if int(game.get("turn") or 1) == 2 else 1
         game["computer"] = bool(game.get("computer"))
+        phase = str(game.get("phase") or "active").lower()
+        game["phase"] = "setup" if phase == "setup" else "active"
+
+        ready = game.get("ready")
+        if not isinstance(ready, dict):
+            ready = {"1": True, "2": True}
+        game["ready"] = {
+            "1": bool(ready.get("1", game["phase"] == "active")),
+            "2": bool(ready.get("2", game["phase"] == "active")),
+        }
+        if game["computer"]:
+            game["ready"]["2"] = True
+
+        for slot in (1, 2):
+            key = f"p{slot}_name"
+            if not str(game.get(key) or "").strip():
+                game[key] = self._resolve_player_name(game, slot)
         return game
 
     def _get_game(self, guild_id: int, channel_id: int) -> dict[str, Any] | None:
@@ -495,14 +957,50 @@ class BattleshipsService:
             return 2
         return None
 
+    def _resolve_player_name(self, game: dict[str, Any], slot: int) -> str:
+        if slot == 2 and bool(game.get("computer")):
+            return "Computer"
+
+        user_id = self._player_id(game, slot)
+        guild_id = int(game.get("guild_id") or 0)
+        guild = self.bot.get_guild(guild_id) if guild_id else None
+        if guild is not None and user_id:
+            member = guild.get_member(user_id)
+            if member is not None:
+                return member.display_name
+
+        user = self.bot.get_user(user_id) if user_id else None
+        if user is not None:
+            return getattr(user, "display_name", None) or user.name
+
+        return f"Player {slot}"
+
+    def _slot_name(self, game: dict[str, Any], slot: int) -> str:
+        if slot == 2 and bool(game.get("computer")):
+            return "Computer"
+        stored = str(game.get(f"p{slot}_name") or "").strip()
+        return stored or self._resolve_player_name(game, slot)
+
     def _slot_label(self, game: dict[str, Any], slot: int) -> str:
         if slot == 2 and bool(game.get("computer")):
             return "🤖 **Computer**"
-        return f"<@{self._player_id(game, slot)}>"
+        return f"🎮 **{self._slot_name(game, slot)}**"
 
     def _fleet(self, game: dict[str, Any], slot: int) -> dict[str, list[str]]:
         fleets = game.get("fleets") if isinstance(game.get("fleets"), dict) else {}
         return _normalise_fleet(fleets.get(str(slot)))
+
+    def _set_fleet(
+        self,
+        game: dict[str, Any],
+        slot: int,
+        fleet: dict[str, list[str]],
+    ) -> None:
+        fleets = game.get("fleets")
+        if not isinstance(fleets, dict):
+            fleets = {}
+            game["fleets"] = fleets
+        fleets[str(slot)] = fleet
 
     def _shots(self, game: dict[str, Any], slot: int) -> set[str]:
         shots = game.get("shots") if isinstance(game.get("shots"), dict) else {}
@@ -520,6 +1018,17 @@ class BattleshipsService:
             game["shots"] = raw
         raw[str(slot)] = sorted(shots, key=lambda coord: coord_to_rc(coord))
 
+    def _is_ready(self, game: dict[str, Any], slot: int) -> bool:
+        ready = game.get("ready")
+        return bool(ready.get(str(slot))) if isinstance(ready, dict) else False
+
+    def _set_ready(self, game: dict[str, Any], slot: int, value: bool) -> None:
+        ready = game.get("ready")
+        if not isinstance(ready, dict):
+            ready = {"1": False, "2": bool(game.get("computer"))}
+            game["ready"] = ready
+        ready[str(slot)] = bool(value)
+
     def _build_embed(
         self,
         game: dict[str, Any],
@@ -529,6 +1038,39 @@ class BattleshipsService:
         resigned_slot: int | None = None,
         cancelled_by: int | None = None,
     ) -> discord.Embed:
+        phase = str(game.get("phase") or "active")
+
+        if status == "active" and phase == "setup":
+            embed = discord.Embed(
+                title="🚢 Battleships — Fleet Setup",
+                description=(
+                    "Set your ships **privately**, or keep a random fleet. "
+                    "When you're happy with the layout, press **Ready**."
+                ),
+            )
+            embed.add_field(
+                name="Players",
+                value=(
+                    f"{self._slot_label(game, 1)}\n"
+                    f"{self._slot_label(game, 2)}"
+                ),
+                inline=False,
+            )
+            embed.add_field(
+                name="Fleet Status",
+                value=(
+                    f"{self._slot_name(game, 1)} — "
+                    f"{'✅ Ready' if self._is_ready(game, 1) else '🛠️ Setting up'}\n"
+                    f"{self._slot_name(game, 2)} — "
+                    f"{'✅ Ready' if self._is_ready(game, 2) else '🛠️ Setting up'}"
+                ),
+                inline=False,
+            )
+            embed.set_footer(
+                text="Fleet layouts are private. Set Fleet lets you place every ship yourself."
+            )
+            return embed
+
         fleet1 = self._fleet(game, 1)
         fleet2 = self._fleet(game, 2)
         shots1 = self._shots(game, 1)
@@ -541,18 +1083,18 @@ class BattleshipsService:
         embed = discord.Embed(
             title=title,
             description=(
-                "Use **Fire**, enter a coordinate from **A1 to J10**, and sink all "
-                "five enemy ships before yours are destroyed."
+                "Press **Fire**, choose a row, then choose one of the available columns. "
+                "Sink all five enemy ships before yours are destroyed."
             ),
         )
 
         embed.add_field(
-            name=f"{self._slot_label(game, 1)} — Target Board",
+            name=f"🎯 {self._slot_name(game, 1)} — Target Board",
             value=f"```text\n{render_target_board(fleet2, shots1)}\n```",
             inline=False,
         )
         embed.add_field(
-            name=f"{self._slot_label(game, 2)} — Target Board",
+            name=f"🎯 {self._slot_name(game, 2)} — Target Board",
             value=f"```text\n{render_target_board(fleet1, shots2)}\n```",
             inline=False,
         )
@@ -584,7 +1126,7 @@ class BattleshipsService:
                 )
             embed.set_footer(
                 text=(
-                    "Target board: X = hit, o = miss, . = unknown. "
+                    "Target board: X = hit, o = miss, . = untried. "
                     "My Fleet privately shows S = your ship. No timeout."
                 )
             )
@@ -608,9 +1150,15 @@ class BattleshipsService:
             if bool(game.get("computer")):
                 embed.set_footer(text="Computer games are practice and do not affect the leaderboard.")
         elif status == "cancelled":
+            cancelled_name = "Game starter"
+            if cancelled_by:
+                for slot in (1, 2):
+                    if self._player_id(game, slot) == int(cancelled_by):
+                        cancelled_name = self._slot_name(game, slot)
+                        break
             embed.add_field(
                 name="Result",
-                value=f"🛑 Game cancelled by <@{int(cancelled_by or 0)}>. No result recorded.",
+                value=f"🛑 Game cancelled by **{cancelled_name}**. No result recorded.",
                 inline=False,
             )
 
@@ -622,7 +1170,7 @@ class BattleshipsService:
         sunk = sunk_ships(fleet, opponent_shots)
 
         embed = discord.Embed(
-            title="🚢 Your Battleships Fleet",
+            title=f"🚢 {self._slot_name(game, slot)} — Your Fleet",
             description=f"```text\n{render_own_board(fleet, opponent_shots)}\n```",
         )
         status_lines = []
@@ -635,6 +1183,75 @@ class BattleshipsService:
             inline=False,
         )
         embed.set_footer(text="S = ship • X = hit • o = enemy miss • . = water")
+        return embed
+
+    def _placement_embed(
+        self,
+        game: dict[str, Any],
+        slot: int,
+        placement_view: FleetPlacementView | None = None,
+    ) -> discord.Embed:
+        fleet = self._fleet(game, slot)
+        embed = discord.Embed(
+            title=f"🚢 {self._slot_name(game, slot)} — Fleet Setup",
+            description=(
+                f"```text\n{render_own_board(fleet, set())}\n```\n"
+                "Pick a ship, its starting square and direction, then press **Place Ship**. "
+                "Ships cannot overlap or run off the board."
+            ),
+        )
+        lines = [f"**{name}** — {size} spaces — `{', '.join(fleet[name])}`" for name, size in FLEET_SPEC]
+        embed.add_field(name="Current Layout", value="\n".join(lines), inline=False)
+        if placement_view is not None:
+            size = dict(FLEET_SPEC)[placement_view.ship_name]
+            start = f"{placement_view.col_label}{placement_view.row_number}"
+            direction = "Horizontal →" if placement_view.orientation == "H" else "Vertical ↓"
+            preview = _placement_cells(start, size, placement_view.orientation)
+            preview_text = ", ".join(preview) if preview else "❌ Runs off the board"
+            embed.add_field(
+                name="Placement Preview",
+                value=(
+                    f"**{placement_view.ship_name}** from **{start}** — {direction}\n"
+                    f"{preview_text}"
+                ),
+                inline=False,
+            )
+        embed.set_footer(text="Only you can see this setup screen. Press Ready when finished.")
+        return embed
+
+    def _target_picker_embed(
+        self,
+        game: dict[str, Any],
+        shooter_slot: int,
+        selected_row: int | None,
+        selected_col: str | None,
+    ) -> discord.Embed:
+        target_slot = self._other_slot(shooter_slot)
+        shots = self._shots(game, shooter_slot)
+        target_fleet = self._fleet(game, target_slot)
+        embed = discord.Embed(
+            title=f"🎯 {self._slot_name(game, shooter_slot)} — Choose Your Shot",
+            description=(
+                f"```text\n{render_target_board(target_fleet, shots)}\n```\n"
+                "Choose a **row first**. The second menu then shows the columns you **haven't fired at** in that row."
+            ),
+        )
+        if selected_row is None:
+            selected = "No target selected yet."
+        elif selected_col is None:
+            remaining = [
+                f"{col}{selected_row}"
+                for col in COL_LABELS
+                if f"{col}{selected_row}" not in shots
+            ]
+            selected = (
+                f"Row **{selected_row}** selected. Available: "
+                + (", ".join(remaining) if remaining else "none")
+            )
+        else:
+            selected = f"Ready to fire at **{selected_col}{selected_row}**."
+        embed.add_field(name="Target", value=selected, inline=False)
+        embed.set_footer(text="X = hit • o = miss • . = available target")
         return embed
 
     async def _resolve_message(
@@ -677,6 +1294,11 @@ class BattleshipsService:
         if message is None:
             return
 
+        if status == "active" and str(game.get("phase") or "active") == "setup":
+            view: discord.ui.View = BattleshipsSetupView(self)
+        else:
+            view = BattleshipsView(self, disabled=status != "active")
+
         try:
             await message.edit(
                 embed=self._build_embed(
@@ -686,7 +1308,7 @@ class BattleshipsService:
                     resigned_slot=resigned_slot,
                     cancelled_by=cancelled_by,
                 ),
-                view=BattleshipsView(self, disabled=status != "active"),
+                view=view,
             )
         except Exception as exc:
             warn(f"Battleships message edit failed: {exc!r}")
@@ -724,6 +1346,7 @@ class BattleshipsService:
         interaction: discord.Interaction,
         *,
         p2_id: int,
+        p2_name: str,
         computer: bool,
     ) -> None:
         guild = interaction.guild
@@ -757,14 +1380,19 @@ class BattleshipsService:
                 await interaction.followup.send(text, ephemeral=True)
                 return
 
+            p1_name = getattr(interaction.user, "display_name", None) or interaction.user.name
             game: dict[str, Any] = {
                 "game_id": uuid.uuid4().hex,
                 "guild_id": guild.id,
                 "channel_id": channel_id,
                 "message_id": 0,
                 "p1_id": interaction.user.id,
+                "p1_name": str(p1_name),
                 "p2_id": int(p2_id),
+                "p2_name": "Computer" if computer else str(p2_name),
                 "computer": bool(computer),
+                "phase": "setup",
+                "ready": {"1": False, "2": bool(computer)},
                 "turn": 1,
                 "fleets": {
                     "1": generate_fleet(),
@@ -777,7 +1405,7 @@ class BattleshipsService:
 
             message = await interaction.followup.send(
                 embed=self._build_embed(game),
-                view=BattleshipsView(self),
+                view=BattleshipsSetupView(self),
                 ephemeral=False,
                 wait=True,
             )
@@ -795,7 +1423,12 @@ class BattleshipsService:
                 ephemeral=True,
             )
             return
-        await self._start(interaction, p2_id=opponent.id, computer=False)
+        await self._start(
+            interaction,
+            p2_id=opponent.id,
+            p2_name=opponent.display_name,
+            computer=False,
+        )
 
     async def start_computer_game(self, interaction: discord.Interaction) -> None:
         bot_user = self.bot.user or interaction.client.user
@@ -805,7 +1438,308 @@ class BattleshipsService:
                 ephemeral=True,
             )
             return
-        await self._start(interaction, p2_id=int(bot_user.id), computer=True)
+        await self._start(
+            interaction,
+            p2_id=int(bot_user.id),
+            p2_name="Computer",
+            computer=True,
+        )
+
+    async def open_fleet_setup(self, interaction: discord.Interaction) -> None:
+        if interaction.guild_id is None or interaction.channel_id is None or interaction.message is None:
+            await interaction.response.send_message(
+                "That Battleships setup is no longer available.",
+                ephemeral=True,
+            )
+            return
+
+        game = self._get_game(interaction.guild_id, interaction.channel_id)
+        if not game or int(game.get("message_id") or 0) != interaction.message.id:
+            await interaction.response.send_message(
+                "That is not the current Battleships game in this channel.",
+                ephemeral=True,
+            )
+            return
+
+        if str(game.get("phase") or "active") != "setup":
+            await interaction.response.send_message(
+                "The game has already started, so fleet positions are locked.",
+                ephemeral=True,
+            )
+            return
+
+        slot = self._slot_for_user(game, interaction.user.id)
+        if slot is None:
+            await interaction.response.send_message(
+                "You are not playing this Battleships game.",
+                ephemeral=True,
+            )
+            return
+
+        if self._is_ready(game, slot):
+            await interaction.response.send_message(
+                "✅ Your fleet is already locked in and ready.",
+                ephemeral=True,
+            )
+            return
+
+        view = FleetPlacementView(
+            self,
+            source_message_id=interaction.message.id,
+            slot=slot,
+        )
+        await interaction.response.send_message(
+            embed=self._placement_embed(game, slot, view),
+            view=view,
+            ephemeral=True,
+        )
+
+    async def randomize_from_public_setup(self, interaction: discord.Interaction) -> None:
+        if interaction.guild_id is None or interaction.channel_id is None or interaction.message is None:
+            await interaction.response.send_message("That setup is no longer available.", ephemeral=True)
+            return
+        game = self._get_game(interaction.guild_id, interaction.channel_id)
+        if not game or int(game.get("message_id") or 0) != interaction.message.id:
+            await interaction.response.send_message("That is not the current Battleships game.", ephemeral=True)
+            return
+        slot = self._slot_for_user(game, interaction.user.id)
+        if slot is None:
+            await interaction.response.send_message("You are not playing this game.", ephemeral=True)
+            return
+        if str(game.get("phase") or "active") != "setup" or self._is_ready(game, slot):
+            await interaction.response.send_message("Your fleet is already locked.", ephemeral=True)
+            return
+
+        async with self._lock_for(interaction.guild_id, interaction.channel_id):
+            game = self._get_game(interaction.guild_id, interaction.channel_id)
+            if not game:
+                await interaction.response.send_message("That setup is no longer available.", ephemeral=True)
+                return
+            self._set_fleet(game, slot, generate_fleet())
+            self._set_game(interaction.guild_id, interaction.channel_id, game)
+        await interaction.response.send_message(
+            content="🎲 New random fleet generated.",
+            embed=self._fleet_embed(game, slot),
+            ephemeral=True,
+        )
+
+    async def randomize_fleet(
+        self,
+        interaction: discord.Interaction,
+        *,
+        source_message_id: int,
+        slot: int,
+        placement_view: FleetPlacementView,
+    ) -> None:
+        if interaction.guild_id is None or interaction.channel_id is None:
+            await interaction.response.send_message("That setup is no longer available.", ephemeral=True)
+            return
+
+        async with self._lock_for(interaction.guild_id, interaction.channel_id):
+            game = self._get_game(interaction.guild_id, interaction.channel_id)
+            if not game or int(game.get("message_id") or 0) != int(source_message_id):
+                await interaction.response.send_message("That setup is no longer available.", ephemeral=True)
+                return
+            if self._slot_for_user(game, interaction.user.id) != slot:
+                await interaction.response.send_message("That isn't your fleet.", ephemeral=True)
+                return
+            if str(game.get("phase") or "active") != "setup" or self._is_ready(game, slot):
+                await interaction.response.send_message("Your fleet is already locked.", ephemeral=True)
+                return
+            self._set_fleet(game, slot, generate_fleet())
+            self._set_game(interaction.guild_id, interaction.channel_id, game)
+
+        await placement_view.refresh(interaction, notice="🎲 Fleet randomised.")
+
+    async def place_ship(
+        self,
+        interaction: discord.Interaction,
+        *,
+        source_message_id: int,
+        slot: int,
+        ship_name: str,
+        start_coord: str,
+        orientation: str,
+        placement_view: FleetPlacementView,
+    ) -> None:
+        if interaction.guild_id is None or interaction.channel_id is None:
+            await interaction.response.send_message("That setup is no longer available.", ephemeral=True)
+            return
+
+        size_map = dict(FLEET_SPEC)
+        if ship_name not in size_map:
+            await interaction.response.send_message("Unknown ship.", ephemeral=True)
+            return
+
+        new_cells = _placement_cells(start_coord, size_map[ship_name], orientation)
+        if new_cells is None:
+            await placement_view.refresh(
+                interaction,
+                notice="❌ That ship would run off the board. Pick another start square or direction.",
+            )
+            return
+
+        async with self._lock_for(interaction.guild_id, interaction.channel_id):
+            game = self._get_game(interaction.guild_id, interaction.channel_id)
+            if not game or int(game.get("message_id") or 0) != int(source_message_id):
+                await interaction.response.send_message("That setup is no longer available.", ephemeral=True)
+                return
+            if self._slot_for_user(game, interaction.user.id) != slot:
+                await interaction.response.send_message("That isn't your fleet.", ephemeral=True)
+                return
+            if str(game.get("phase") or "active") != "setup" or self._is_ready(game, slot):
+                await interaction.response.send_message("Your fleet is already locked.", ephemeral=True)
+                return
+
+            fleet = self._fleet(game, slot)
+            occupied_elsewhere = {
+                cell
+                for name, cells in fleet.items()
+                if name != ship_name
+                for cell in cells
+            }
+            overlap = sorted(set(new_cells) & occupied_elsewhere, key=coord_to_rc)
+            if overlap:
+                await placement_view.refresh(
+                    interaction,
+                    notice=(
+                        "❌ That placement overlaps another ship at "
+                        + ", ".join(f"**{coord}**" for coord in overlap)
+                        + "."
+                    ),
+                )
+                return
+
+            fleet[ship_name] = new_cells
+            self._set_fleet(game, slot, fleet)
+            self._set_game(interaction.guild_id, interaction.channel_id, game)
+
+        await placement_view.refresh(
+            interaction,
+            notice=f"✅ **{ship_name}** placed at {', '.join(new_cells)}.",
+        )
+
+    async def mark_ready_from_public_setup(self, interaction: discord.Interaction) -> None:
+        if interaction.guild_id is None or interaction.channel_id is None or interaction.message is None:
+            await interaction.response.send_message("That setup is no longer available.", ephemeral=True)
+            return
+        game = self._get_game(interaction.guild_id, interaction.channel_id)
+        if not game or int(game.get("message_id") or 0) != interaction.message.id:
+            await interaction.response.send_message("That is not the current Battleships game.", ephemeral=True)
+            return
+        slot = self._slot_for_user(game, interaction.user.id)
+        if slot is None:
+            await interaction.response.send_message("You are not playing this game.", ephemeral=True)
+            return
+        await self.mark_ready(
+            interaction,
+            source_message_id=interaction.message.id,
+            slot=slot,
+            placement_view=None,
+        )
+
+    async def mark_ready(
+        self,
+        interaction: discord.Interaction,
+        *,
+        source_message_id: int,
+        slot: int,
+        placement_view: FleetPlacementView | None,
+    ) -> None:
+        if interaction.guild_id is None or interaction.channel_id is None:
+            if interaction.response.is_done():
+                await interaction.followup.send("That setup is no longer available.", ephemeral=True)
+            else:
+                await interaction.response.send_message("That setup is no longer available.", ephemeral=True)
+            return
+
+        guild_id = interaction.guild_id
+        channel_id = interaction.channel_id
+        await interaction.response.defer()
+
+        async with self._lock_for(guild_id, channel_id):
+            game = self._get_game(guild_id, channel_id)
+            if not game or int(game.get("message_id") or 0) != int(source_message_id):
+                await interaction.followup.send("That setup is no longer available.", ephemeral=True)
+                return
+            if self._slot_for_user(game, interaction.user.id) != slot:
+                await interaction.followup.send("That isn't your fleet.", ephemeral=True)
+                return
+            if str(game.get("phase") or "active") != "setup":
+                await interaction.followup.send("The game has already started.", ephemeral=True)
+                return
+
+            self._set_ready(game, slot, True)
+            if self._is_ready(game, 1) and self._is_ready(game, 2):
+                game["phase"] = "active"
+                game["turn"] = 1
+                game["last_action"] = ""
+            self._set_game(guild_id, channel_id, game)
+            await self._edit_message(interaction, game)
+
+        if placement_view is not None:
+            await interaction.edit_original_response(
+                content="✅ Fleet locked in. " + (
+                    "Battle started!" if str(game.get("phase")) == "active" else "Waiting for the other player."
+                ),
+                embed=self._fleet_embed(game, slot),
+                view=None,
+            )
+        else:
+            await interaction.followup.send(
+                "✅ Fleet locked in. " + (
+                    "Battle started!" if str(game.get("phase")) == "active" else "Waiting for the other player."
+                ),
+                ephemeral=True,
+            )
+
+    async def open_target_picker(self, interaction: discord.Interaction) -> None:
+        if interaction.guild_id is None or interaction.channel_id is None or interaction.message is None:
+            await interaction.response.send_message(
+                "That Battleships game is no longer available.",
+                ephemeral=True,
+            )
+            return
+
+        game = self._get_game(interaction.guild_id, interaction.channel_id)
+        if not game or int(game.get("message_id") or 0) != interaction.message.id:
+            await interaction.response.send_message(
+                "That is not the current Battleships game in this channel.",
+                ephemeral=True,
+            )
+            return
+
+        if str(game.get("phase") or "active") != "active":
+            await interaction.response.send_message(
+                "Both fleets need to be ready before firing starts.",
+                ephemeral=True,
+            )
+            return
+
+        slot = self._slot_for_user(game, interaction.user.id)
+        if slot is None:
+            await interaction.response.send_message(
+                "You are not playing this Battleships game.",
+                ephemeral=True,
+            )
+            return
+
+        if int(game.get("turn") or 1) != slot:
+            await interaction.response.send_message("⏳ Not your turn.", ephemeral=True)
+            return
+
+        shots = self._shots(game, slot)
+        view = TargetingView(
+            self,
+            source_message_id=interaction.message.id,
+            shooter_slot=slot,
+            shots=shots,
+        )
+        await interaction.response.send_message(
+            embed=self._target_picker_embed(game, slot, None, None),
+            view=view,
+            ephemeral=True,
+        )
 
     async def show_fleet(self, interaction: discord.Interaction) -> None:
         if interaction.guild_id is None or interaction.channel_id is None:
@@ -846,6 +1780,7 @@ class BattleshipsService:
         raw_coordinate: str,
         *,
         source_message_id: int,
+        close_picker: bool = False,
     ) -> None:
         await interaction.response.defer()
 
@@ -866,11 +1801,19 @@ class BattleshipsService:
 
         guild_id = interaction.guild_id
         channel_id = interaction.channel_id
+        confirmation = ""
         async with self._lock_for(guild_id, channel_id):
             game = self._get_game(guild_id, channel_id)
             if not game or int(game.get("message_id") or 0) != int(source_message_id):
                 await interaction.followup.send(
                     "That is not the current Battleships game in this channel.",
+                    ephemeral=True,
+                )
+                return
+
+            if str(game.get("phase") or "active") != "active":
+                await interaction.followup.send(
+                    "Both fleets need to be ready before firing starts.",
                     ephemeral=True,
                 )
                 return
@@ -913,6 +1856,7 @@ class BattleshipsService:
                 hit=hit_ship is not None,
                 sunk_ship=newly_sunk[0] if newly_sunk else None,
             )
+            confirmation = f"🎯 Fired at **{coord}** — " + ("💥 HIT!" if hit_ship else "🌊 miss.")
 
             if fleet_destroyed(target_fleet, shots):
                 game["last_action"] = action
@@ -924,6 +1868,8 @@ class BattleshipsService:
                     status="finished",
                     winner_slot=slot,
                 )
+                if close_picker:
+                    await interaction.edit_original_response(content=confirmation, embed=None, view=None)
                 return
 
             if bool(game.get("computer")):
@@ -953,17 +1899,24 @@ class BattleshipsService:
                         status="finished",
                         winner_slot=2,
                     )
+                    if close_picker:
+                        await interaction.edit_original_response(content=confirmation, embed=None, view=None)
                     return
 
                 game["turn"] = 1
                 self._set_game(guild_id, channel_id, game)
                 await self._edit_message(interaction, game)
+                if close_picker:
+                    await interaction.edit_original_response(content=confirmation, embed=None, view=None)
                 return
 
             game["last_action"] = action
             game["turn"] = target_slot
             self._set_game(guild_id, channel_id, game)
             await self._edit_message(interaction, game)
+
+        if close_picker:
+            await interaction.edit_original_response(content=confirmation, embed=None, view=None)
 
     async def resign(self, interaction: discord.Interaction) -> None:
         await interaction.response.defer()
@@ -986,6 +1939,13 @@ class BattleshipsService:
             if not game or int(game.get("message_id") or 0) != interaction.message.id:
                 await interaction.followup.send(
                     "That is not the current Battleships game in this channel.",
+                    ephemeral=True,
+                )
+                return
+
+            if str(game.get("phase") or "active") != "active":
+                await interaction.followup.send(
+                    "The battle hasn't started yet. The game starter can use Cancel instead.",
                     ephemeral=True,
                 )
                 return
@@ -1066,9 +2026,10 @@ class BattleshipsCog(commands.Cog):
         "summary": "Persistent Battleships for two players or one player vs Computer.",
         "details": (
             "Use /battleships and optionally choose an opponent. Leave the opponent blank "
-            "for Computer mode, or choose Battleships from /games. Press Fire and enter "
-            "A1-J10. My Fleet privately shows your ships. Games have no timeout and survive "
-            "normal Railway restarts."
+            "for Computer mode, or choose Battleships from /games. Each player privately "
+            "sets or randomises their fleet and presses Ready. During play, Fire opens a "
+            "private target picker: choose a row, then an available column. Games have no "
+            "timeout and survive normal Railway restarts."
         ),
     }
 
@@ -1117,6 +2078,7 @@ async def setup(bot: commands.Bot) -> None:
 
     service = BattleshipsService(bot)
     bot.add_view(BattleshipsView(service))
+    bot.add_view(BattleshipsSetupView(service))
 
     cog = BattleshipsCog(bot, service)
     bind_public_cog(cog, bot, include_admin=True)
