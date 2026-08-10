@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import asyncio
+import random
 import uuid
 from datetime import datetime, timezone
 from typing import Any
@@ -10,11 +11,12 @@ import discord
 from discord import app_commands
 from discord.ext import commands
 
-from core.game_stats import record_head_to_head_result
+from core.game_stats import record_head_to_head_result, register_game
 from core.logger import log_cmd, warn
 from core.settings import SettingsManager
 from core.storage import known_guild_dirs, load_guild_json, save_guild_json
 from core.utils import ensure_deferred
+
 
 EMPTY = "⬜"
 P1 = "❌"
@@ -55,16 +57,18 @@ def _valid_board(raw: Any) -> list[list[str]]:
     for raw_row in raw:
         if not isinstance(raw_row, list) or len(raw_row) != 3:
             return _new_board()
-        row = [
+        board.append([
             cell if cell in (EMPTY, P1, P2) else EMPTY
             for cell in raw_row
-        ]
-        board.append(row)
+        ])
     return board
 
 
 def active_content(game: dict[str, Any]) -> str:
-    return f"🎯 **Tic Tac Toe** — <@{int(game['turn_id'])}>, your turn."
+    turn_id = int(game.get("turn_id") or 0)
+    if bool(game.get("computer")) and turn_id == int(game.get("p2_id") or 0):
+        return "🎯 **Tic Tac Toe** — 🤖 Computer is thinking..."
+    return f"🎯 **Tic Tac Toe** — <@{turn_id}>, your turn."
 
 
 def final_content(
@@ -76,8 +80,65 @@ def final_content(
     if cancelled:
         return "🛑 **Tic Tac Toe** — cancelled."
     if winner_id:
+        if bool(game.get("computer")) and winner_id == int(game.get("p2_id") or 0):
+            return "🏁 **Tic Tac Toe** — 🤖 Computer wins!"
         return f"🏁 **Tic Tac Toe** — <@{winner_id}> wins!"
     return "🤝 **Tic Tac Toe** — draw."
+
+
+def _available_moves(board: list[list[str]]) -> list[tuple[int, int]]:
+    return [
+        (row, col)
+        for row in range(3)
+        for col in range(3)
+        if board[row][col] == EMPTY
+    ]
+
+
+def _minimax(board: list[list[str]], maximizing: bool, depth: int = 0) -> int:
+    winner = check_winner(board)
+    if winner == P2:
+        return 10 - depth
+    if winner == P1:
+        return depth - 10
+    if is_full(board):
+        return 0
+
+    if maximizing:
+        best = -100
+        for row, col in _available_moves(board):
+            board[row][col] = P2
+            best = max(best, _minimax(board, False, depth + 1))
+            board[row][col] = EMPTY
+        return best
+
+    best = 100
+    for row, col in _available_moves(board):
+        board[row][col] = P1
+        best = min(best, _minimax(board, True, depth + 1))
+        board[row][col] = EMPTY
+    return best
+
+
+def computer_move(board: list[list[str]]) -> tuple[int, int] | None:
+    moves = _available_moves(board)
+    if not moves:
+        return None
+
+    best_score = -100
+    best_moves: list[tuple[int, int]] = []
+    for row, col in moves:
+        board[row][col] = P2
+        score = _minimax(board, False, 1)
+        board[row][col] = EMPTY
+
+        if score > best_score:
+            best_score = score
+            best_moves = [(row, col)]
+        elif score == best_score:
+            best_moves.append((row, col))
+
+    return random.choice(best_moves)
 
 
 class TTTSquare(discord.ui.Button):
@@ -90,10 +151,7 @@ class TTTSquare(discord.ui.Button):
         super().__init__(
             label=EMPTY,
             style=discord.ButtonStyle.secondary,
-            custom_id=(
-                f"hotbot:tictactoe:cell:"
-                f"{row_index}:{col_index}:v2"
-            ),
+            custom_id=f"hotbot:tictactoe:cell:{row_index}:{col_index}:v2",
             row=row_index,
         )
         self.cog = cog
@@ -150,9 +208,7 @@ class TicTacToeView(discord.ui.View):
 
         for row_index in range(3):
             for col_index in range(3):
-                self.add_item(
-                    TTTSquare(cog, row_index, col_index)
-                )
+                self.add_item(TTTSquare(cog, row_index, col_index))
 
         self.add_item(TTTResignButton(cog))
         self.add_item(TTTCancelButton(cog))
@@ -167,7 +223,6 @@ class TicTacToeView(discord.ui.View):
         finished: bool,
     ) -> None:
         board = _valid_board(game.get("board"))
-
         for item in self.children:
             if isinstance(item, TTTSquare):
                 mark = board[item.row_index][item.col_index]
@@ -184,11 +239,38 @@ class TicTacToeView(discord.ui.View):
 
 
 class TicTacToeCog(commands.Cog):
+    GAME_META = {
+        "key": "tictactoe",
+        "label": "Tic Tac Toe",
+        "kind": "head_to_head",
+        "result_word": "win",
+        "description": "Classic 3×3 Tic Tac Toe",
+        "emoji": "❎",
+        "requires_opponent": True,
+    }
+
+    HELP_META = {
+        "title": "Tic Tac Toe",
+        "summary": "Persistent Tic Tac Toe for two players or one player vs Computer.",
+        "details": (
+            "Use /tictactoe and optionally choose an opponent. Leave the opponent blank "
+            "for Computer mode, or choose Tic Tac Toe from /games and press Computer. "
+            "Games survive normal Railway restarts."
+        ),
+    }
+
     def __init__(self, bot: commands.Bot):
         self.bot = bot
         self.settings: SettingsManager = bot.settings
         self._locks: dict[tuple[int, int], asyncio.Lock] = {}
         self._restored_once = False
+
+        register_game(
+            "tictactoe",
+            label="Tic Tac Toe",
+            kind="head_to_head",
+            result_word="win",
+        )
 
     async def cog_load(self) -> None:
         # One generic persistent view routes every saved Tic Tac Toe message.
@@ -234,6 +316,7 @@ class TicTacToeCog(commands.Cog):
             return None
 
         game["board"] = _valid_board(game.get("board"))
+        game["computer"] = bool(game.get("computer"))
         return game
 
     def _set_game(
@@ -261,10 +344,7 @@ class TicTacToeCog(commands.Cog):
         channel_id = int(game.get("channel_id") or 0)
         message_id = int(game.get("message_id") or 0)
         if guild_id and channel_id and message_id:
-            return (
-                f"https://discord.com/channels/"
-                f"{guild_id}/{channel_id}/{message_id}"
-            )
+            return f"https://discord.com/channels/{guild_id}/{channel_id}/{message_id}"
         return ""
 
     def _current_game_for_interaction(
@@ -284,10 +364,33 @@ class TicTacToeCog(commands.Cog):
         )
         if not game:
             return None
-
         if int(game.get("message_id") or 0) != interaction.message.id:
             return None
         return game
+
+    def _record_result(
+        self,
+        guild_id: int,
+        game: dict[str, Any],
+        winner_id: int | None,
+    ) -> None:
+        if bool(game.get("computer")):
+            return
+
+        p1_id = int(game.get("p1_id") or 0)
+        p2_id = int(game.get("p2_id") or 0)
+        game_id = str(game.get("game_id") or "").strip()
+        if not p1_id or not p2_id or not game_id:
+            return
+
+        record_head_to_head_result(
+            guild_id,
+            "tictactoe",
+            p1_id,
+            p2_id,
+            winner_id=winner_id,
+            result_id=f"tictactoe:{game_id}",
+        )
 
     async def restore_saved_games(self) -> None:
         for guild_id in known_guild_dirs():
@@ -327,10 +430,12 @@ class TicTacToeCog(commands.Cog):
                     blob["games"].pop(channel_key, None)
                 self._save_blob(guild_id, blob)
 
-    async def start_game(
+    async def _start(
         self,
         interaction: discord.Interaction,
-        opponent: discord.Member,
+        *,
+        p2_id: int,
+        computer: bool,
     ) -> None:
         if interaction.guild is None or interaction.channel_id is None:
             await interaction.followup.send(
@@ -350,23 +455,8 @@ class TicTacToeCog(commands.Cog):
             )
             return
 
-        if opponent.bot:
-            await interaction.followup.send(
-                "❌ Can’t play against a bot.",
-                ephemeral=True,
-            )
-            return
-
-        if opponent.id == interaction.user.id:
-            await interaction.followup.send(
-                "❌ You can’t play yourself.",
-                ephemeral=True,
-            )
-            return
-
         guild_id = interaction.guild.id
         channel_id = interaction.channel_id
-
         async with self._lock_for(guild_id, channel_id):
             existing = self._get_game(guild_id, channel_id)
             if existing:
@@ -383,7 +473,8 @@ class TicTacToeCog(commands.Cog):
                 "channel_id": channel_id,
                 "message_id": 0,
                 "p1_id": interaction.user.id,
-                "p2_id": opponent.id,
+                "p2_id": int(p2_id),
+                "computer": bool(computer),
                 "turn_id": interaction.user.id,
                 "board": _new_board(),
                 "created_at": _utc_now(),
@@ -398,12 +489,57 @@ class TicTacToeCog(commands.Cog):
             game["message_id"] = message.id
             self._set_game(guild_id, channel_id, game)
 
+    async def start_game(
+        self,
+        interaction: discord.Interaction,
+        opponent: discord.Member,
+    ) -> None:
+        if opponent.bot:
+            await interaction.followup.send(
+                "❌ Can’t use a Discord bot as the opponent. Choose Computer mode instead.",
+                ephemeral=True,
+            )
+            return
+        if opponent.id == interaction.user.id:
+            await interaction.followup.send(
+                "❌ You can’t play yourself.",
+                ephemeral=True,
+            )
+            return
+        await self._start(interaction, p2_id=opponent.id, computer=False)
+
+    async def start_computer_game(self, interaction: discord.Interaction) -> None:
+        bot_user = self.bot.user or interaction.client.user
+        if bot_user is None:
+            await interaction.followup.send(
+                "❌ Computer mode is unavailable until the bot is fully connected.",
+                ephemeral=True,
+            )
+            return
+        await self._start(interaction, p2_id=int(bot_user.id), computer=True)
+
     async def _interaction_error(
         self,
         interaction: discord.Interaction,
         text: str,
     ) -> None:
         await interaction.followup.send(text, ephemeral=True)
+
+    async def _finish(
+        self,
+        interaction: discord.Interaction,
+        game: dict[str, Any],
+        *,
+        winner_id: int | None,
+    ) -> None:
+        guild_id = int(game["guild_id"])
+        channel_id = int(game["channel_id"])
+        self._record_result(guild_id, game, winner_id)
+        self._remove_game(guild_id, channel_id)
+        await interaction.message.edit(  # type: ignore[union-attr]
+            content=final_content(game, winner_id=winner_id),
+            view=TicTacToeView(self, game, finished=True),
+        )
 
     async def handle_move(
         self,
@@ -422,7 +558,6 @@ class TicTacToeCog(commands.Cog):
 
         guild_id = interaction.guild_id
         channel_id = interaction.channel_id
-
         async with self._lock_for(guild_id, channel_id):
             game = self._current_game_for_interaction(interaction)
             if not game:
@@ -435,8 +570,10 @@ class TicTacToeCog(commands.Cog):
             p1_id = int(game["p1_id"])
             p2_id = int(game["p2_id"])
             turn_id = int(game["turn_id"])
+            computer = bool(game.get("computer"))
 
-            if interaction.user.id not in (p1_id, p2_id):
+            allowed_players = (p1_id,) if computer else (p1_id, p2_id)
+            if interaction.user.id not in allowed_players:
                 await self._interaction_error(
                     interaction,
                     "❌ You aren’t playing this game.",
@@ -458,41 +595,41 @@ class TicTacToeCog(commands.Cog):
                 )
                 return
 
-            mark = P1 if turn_id == p1_id else P2
-            board[row_index][col_index] = mark
+            board[row_index][col_index] = P1 if turn_id == p1_id else P2
             game["board"] = board
 
             winning_mark = check_winner(board)
             if winning_mark:
                 winner_id = p1_id if winning_mark == P1 else p2_id
-                record_head_to_head_result(
-                    guild_id,
-                    "tictactoe",
-                    p1_id,
-                    p2_id,
-                    winner_id=winner_id,
-                    result_id=f"tictactoe:{game['game_id']}",
-                )
-                self._remove_game(guild_id, channel_id)
-                await interaction.message.edit(  # type: ignore[union-attr]
-                    content=final_content(game, winner_id=winner_id),
-                    view=TicTacToeView(self, game, finished=True),
-                )
+                await self._finish(interaction, game, winner_id=winner_id)
                 return
 
             if is_full(board):
-                record_head_to_head_result(
-                    guild_id,
-                    "tictactoe",
-                    p1_id,
-                    p2_id,
-                    winner_id=None,
-                    result_id=f"tictactoe:{game['game_id']}",
-                )
-                self._remove_game(guild_id, channel_id)
+                await self._finish(interaction, game, winner_id=None)
+                return
+
+            if computer:
+                game["turn_id"] = p2_id
+                move = computer_move(board)
+                if move is not None:
+                    ai_row, ai_col = move
+                    board[ai_row][ai_col] = P2
+                    game["board"] = board
+
+                winning_mark = check_winner(board)
+                if winning_mark == P2:
+                    await self._finish(interaction, game, winner_id=p2_id)
+                    return
+
+                if is_full(board):
+                    await self._finish(interaction, game, winner_id=None)
+                    return
+
+                game["turn_id"] = p1_id
+                self._set_game(guild_id, channel_id, game)
                 await interaction.message.edit(  # type: ignore[union-attr]
-                    content=final_content(game),
-                    view=TicTacToeView(self, game, finished=True),
+                    content=active_content(game),
+                    view=TicTacToeView(self, game),
                 )
                 return
 
@@ -508,7 +645,6 @@ class TicTacToeCog(commands.Cog):
         interaction: discord.Interaction,
     ) -> None:
         await interaction.response.defer()
-
         if interaction.guild_id is None or interaction.channel_id is None:
             await self._interaction_error(
                 interaction,
@@ -518,7 +654,6 @@ class TicTacToeCog(commands.Cog):
 
         guild_id = interaction.guild_id
         channel_id = interaction.channel_id
-
         async with self._lock_for(guild_id, channel_id):
             game = self._current_game_for_interaction(interaction)
             if not game:
@@ -530,7 +665,9 @@ class TicTacToeCog(commands.Cog):
 
             p1_id = int(game["p1_id"])
             p2_id = int(game["p2_id"])
-            if interaction.user.id not in (p1_id, p2_id):
+            computer = bool(game.get("computer"))
+            allowed_players = (p1_id,) if computer else (p1_id, p2_id)
+            if interaction.user.id not in allowed_players:
                 await self._interaction_error(
                     interaction,
                     "❌ You aren’t playing this game.",
@@ -538,20 +675,18 @@ class TicTacToeCog(commands.Cog):
                 return
 
             winner_id = p2_id if interaction.user.id == p1_id else p1_id
-            record_head_to_head_result(
-                guild_id,
-                "tictactoe",
-                p1_id,
-                p2_id,
-                winner_id=winner_id,
-                result_id=f"tictactoe:{game['game_id']}",
-            )
+            self._record_result(guild_id, game, winner_id)
             self._remove_game(guild_id, channel_id)
 
+            winner_text = (
+                "🤖 Computer"
+                if computer and winner_id == p2_id
+                else f"<@{winner_id}>"
+            )
             await interaction.message.edit(  # type: ignore[union-attr]
                 content=(
                     f"🏳️ <@{interaction.user.id}> resigned. "
-                    f"<@{winner_id}> wins!"
+                    f"{winner_text} wins!"
                 ),
                 view=TicTacToeView(self, game, finished=True),
             )
@@ -561,7 +696,6 @@ class TicTacToeCog(commands.Cog):
         interaction: discord.Interaction,
     ) -> None:
         await interaction.response.defer()
-
         if interaction.guild_id is None or interaction.channel_id is None:
             await self._interaction_error(
                 interaction,
@@ -571,7 +705,6 @@ class TicTacToeCog(commands.Cog):
 
         guild_id = interaction.guild_id
         channel_id = interaction.channel_id
-
         async with self._lock_for(guild_id, channel_id):
             game = self._current_game_for_interaction(interaction)
             if not game:
@@ -598,14 +731,15 @@ class TicTacToeCog(commands.Cog):
         name="tictactoe",
         description="Start a Tic Tac Toe game.",
     )
-    @app_commands.describe(opponent="Who you want to play against")
+    @app_commands.describe(
+        opponent="Who to play against — leave blank to play the Computer"
+    )
     async def tictactoe(
         self,
         interaction: discord.Interaction,
-        opponent: discord.Member,
+        opponent: discord.Member | None = None,
     ) -> None:
         log_cmd("tictactoe", interaction)
-
         if not self.settings.is_game_allowed(
             interaction.guild_id,
             interaction.channel_id,
@@ -618,7 +752,10 @@ class TicTacToeCog(commands.Cog):
             return
 
         await ensure_deferred(interaction, ephemeral=False)
-        await self.start_game(interaction, opponent)
+        if opponent is None:
+            await self.start_computer_game(interaction)
+        else:
+            await self.start_game(interaction, opponent)
 
 
 async def setup(bot: commands.Bot) -> None:
