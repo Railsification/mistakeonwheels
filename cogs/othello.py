@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import asyncio
+import random
 import uuid
 from datetime import datetime, timezone
 from typing import Any
@@ -183,6 +184,47 @@ def render_board(
         lines.append(f"{ROW_LABELS[row]} " + " ".join(cells))
 
     return "\n".join(lines)
+
+
+# Computer mode uses a positional heuristic. Corners are heavily favoured,
+# dangerous squares beside empty corners are penalised, and mobility matters.
+# It only evaluates the visible board state; there is no hidden information in Othello.
+OTHELLO_POSITION_WEIGHTS = (
+    (120, -25, 20, 5, 5, 20, -25, 120),
+    (-25, -45, -5, -5, -5, -5, -45, -25),
+    (20, -5, 15, 3, 3, 15, -5, 20),
+    (5, -5, 3, 3, 3, 3, -5, 5),
+    (5, -5, 3, 3, 3, 3, -5, 5),
+    (20, -5, 15, 3, 3, 15, -5, 20),
+    (-25, -45, -5, -5, -5, -5, -45, -25),
+    (120, -25, 20, 5, 5, 20, -25, 120),
+)
+
+
+def choose_computer_move(
+    board: list[list[int]],
+    piece: int = WHITE,
+) -> tuple[int, int] | None:
+    moves = legal_moves(board, piece)
+    if not moves:
+        return None
+
+    opponent = other_piece(piece)
+    scored: list[tuple[float, tuple[int, int]]] = []
+    for (row, col), flips in moves.items():
+        trial = [line[:] for line in board]
+        apply_move(trial, row, col, piece, flips)
+
+        positional = OTHELLO_POSITION_WEIGHTS[row][col]
+        immediate = len(flips) * 2
+        opponent_mobility = len(legal_moves(trial, opponent))
+        own_future_mobility = len(legal_moves(trial, piece))
+        score = positional + immediate - opponent_mobility * 4 + own_future_mobility
+        scored.append((float(score), (row, col)))
+
+    best_score = max(score for score, _move in scored)
+    best_moves = [move for score, move in scored if score == best_score]
+    return random.choice(best_moves)
 
 
 class OthelloMoveSelect(discord.ui.Select):
@@ -402,6 +444,97 @@ class OthelloService:
 
         return int(game.get("message_id") or 0) == interaction.message.id
 
+    @staticmethod
+    def _is_computer_game(game: dict[str, Any]) -> bool:
+        return bool(game.get("computer"))
+
+    def _player_label(self, game: dict[str, Any], piece: int) -> str:
+        if self._is_computer_game(game) and int(piece) == WHITE:
+            return "🤖 Computer"
+        return f"<@{self._player_for_piece(game, piece)}>"
+
+    def _label_for_id(self, game: dict[str, Any], user_id: int | None) -> str:
+        if user_id is None:
+            return "Nobody"
+        if self._is_computer_game(game) and int(user_id) == int(game.get("white_id") or 0):
+            return "🤖 Computer"
+        return f"<@{int(user_id)}>"
+
+    def _advance_after_move(
+        self,
+        game: dict[str, Any],
+        moved_piece: int,
+    ) -> tuple[bool, int | None]:
+        board = _normalise_board(game.get("board"))
+        next_piece = other_piece(moved_piece)
+
+        if legal_moves(board, next_piece):
+            game["turn"] = next_piece
+            game["notice"] = ""
+            return False, None
+
+        if legal_moves(board, moved_piece):
+            game["turn"] = moved_piece
+            game["notice"] = (
+                f"{self._player_label(game, next_piece)} has no legal moves, "
+                "so their turn was skipped."
+            )
+            return False, None
+
+        black_score, white_score = count_discs(board)
+        black_id, white_id = self._player_ids(game)
+        if black_score > white_score:
+            winner_id: int | None = black_id
+        elif white_score > black_score:
+            winner_id = white_id
+        else:
+            winner_id = None
+        return True, winner_id
+
+    def _run_computer_turns(
+        self,
+        game: dict[str, Any],
+    ) -> tuple[bool, int | None]:
+        if not self._is_computer_game(game):
+            return False, None
+
+        while int(game.get("turn") or BLACK) == WHITE:
+            board = _normalise_board(game.get("board"))
+            move = choose_computer_move(board, WHITE)
+            if move is None:
+                # Defensive recovery for persisted/legacy states. Normally the
+                # turn-transition helper prevents an impossible computer turn.
+                if legal_moves(board, BLACK):
+                    game["turn"] = BLACK
+                    game["notice"] = "🤖 Computer has no legal moves, so its turn was skipped."
+                    return False, None
+                black_score, white_score = count_discs(board)
+                black_id, white_id = self._player_ids(game)
+                if black_score > white_score:
+                    return True, black_id
+                if white_score > black_score:
+                    return True, white_id
+                return True, None
+
+            row, col = move
+            flips = legal_moves(board, WHITE).get(move, [])
+            apply_move(board, row, col, WHITE, flips)
+            game["board"] = board
+            game["last_move"] = move_name(row, col)
+            game["move_number"] = int(game.get("move_number") or 0) + 1
+            game["notice"] = ""
+
+            finished, winner_id = self._advance_after_move(game, WHITE)
+            if finished:
+                return True, winner_id
+
+            # If Black can move, control returns to the human. If Black had to
+            # pass, _advance_after_move keeps WHITE and this loop moves again.
+            if int(game.get("turn") or BLACK) == BLACK:
+                return False, None
+
+        return False, None
+
     def _build_embed(
         self,
         game: dict[str, Any],
@@ -430,7 +563,7 @@ class OthelloService:
         )
         embed.add_field(
             name="Players",
-            value=f"● Black — <@{black_id}>\n○ White — <@{white_id}>",
+            value=f"● Black — {self._player_label(game, BLACK)}\n○ White — {self._player_label(game, WHITE)}",
             inline=True,
         )
         embed.add_field(
@@ -444,7 +577,7 @@ class OthelloService:
             current_id = self._player_for_piece(game, turn)
             piece_name = "Black ●" if turn == BLACK else "White ○"
             last_move = str(game.get("last_move") or "").strip()
-            turn_text = f"{piece_name}\n<@{current_id}>"
+            turn_text = f"{piece_name}\n{self._label_for_id(game, current_id)}"
             if last_move:
                 turn_text += f"\nLast move: **{last_move}**"
 
@@ -475,21 +608,21 @@ class OthelloService:
             else:
                 embed.add_field(
                     name="Result",
-                    value=f"🏆 <@{winner_id}> wins **{max(black_score, white_score)}–{min(black_score, white_score)}**!",
+                    value=f"🏆 {self._label_for_id(game, winner_id)} wins **{max(black_score, white_score)}–{min(black_score, white_score)}**!",
                     inline=False,
                 )
             embed.set_footer(text="Use /othello or /games to start another game.")
         elif status == "resigned":
             embed.add_field(
                 name="Result",
-                value=f"🏳️ <@{resigned_by}> resigned. <@{winner_id}> wins!",
+                value=f"🏳️ {self._label_for_id(game, resigned_by)} resigned. {self._label_for_id(game, winner_id)} wins!",
                 inline=False,
             )
             embed.set_footer(text="Use /othello or /games to start another game.")
         elif status == "cancelled":
             embed.add_field(
                 name="Result",
-                value=f"🛑 Game cancelled by <@{cancelled_by}>. No result recorded.",
+                value=f"🛑 Game cancelled by {self._label_for_id(game, cancelled_by)}. No result recorded.",
                 inline=False,
             )
             embed.set_footer(text="Use /othello or /games to start another game.")
@@ -502,6 +635,9 @@ class OthelloService:
         game: dict[str, Any],
         winner_id: int | None,
     ) -> None:
+        if self._is_computer_game(game):
+            return
+
         black_id, white_id = self._player_ids(game)
         game_id = str(game.get("game_id") or "").strip()
         if not game_id or not black_id or not white_id:
@@ -562,10 +698,12 @@ class OthelloService:
         except Exception as exc:
             warn(f"othello final message edit failed: {exc!r}")
 
-    async def start_game(
+    async def _start_game(
         self,
         interaction: discord.Interaction,
-        opponent: discord.Member,
+        opponent: discord.Member | None,
+        *,
+        computer: bool,
     ) -> None:
         guild = interaction.guild
         channel_id = interaction.channel_id
@@ -584,12 +722,23 @@ class OthelloService:
             )
             return
 
-        if opponent.bot or opponent.id == interaction.user.id:
+        if not computer:
+            if opponent is None or opponent.bot or opponent.id == interaction.user.id:
+                await interaction.followup.send(
+                    "❌ Pick a real opponent.",
+                    ephemeral=True,
+                )
+                return
+
+        bot_user = self.bot.user or interaction.client.user
+        if computer and bot_user is None:
             await interaction.followup.send(
-                "❌ Pick a real opponent.",
+                "❌ Computer mode is unavailable until the bot is fully connected.",
                 ephemeral=True,
             )
             return
+
+        white_id = int(bot_user.id) if computer else int(opponent.id)  # type: ignore[union-attr]
 
         async with self._lock_for(guild.id, channel_id):
             existing = self._get_game(guild.id, channel_id)
@@ -612,7 +761,8 @@ class OthelloService:
                 "channel_id": channel_id,
                 "message_id": 0,
                 "black_id": interaction.user.id,
-                "white_id": opponent.id,
+                "white_id": white_id,
+                "computer": computer,
                 "turn": BLACK,
                 "board": new_board(),
                 "last_move": "",
@@ -629,6 +779,19 @@ class OthelloService:
             )
             game["message_id"] = int(message.id)
             self._set_game(guild.id, channel_id, game)
+
+    async def start_game(
+        self,
+        interaction: discord.Interaction,
+        opponent: discord.Member,
+    ) -> None:
+        await self._start_game(interaction, opponent, computer=False)
+
+    async def start_computer_game(
+        self,
+        interaction: discord.Interaction,
+    ) -> None:
+        await self._start_game(interaction, None, computer=True)
 
     async def handle_move(
         self,
@@ -672,19 +835,32 @@ class OthelloService:
             current_id = self._player_for_piece(game, turn)
             black_id, white_id = self._player_ids(game)
 
-            if interaction.user.id not in (black_id, white_id):
-                await interaction.response.send_message(
-                    "This isn't your game.",
-                    ephemeral=True,
-                )
-                return
-
-            if interaction.user.id != current_id:
-                await interaction.response.send_message(
-                    "Not your turn.",
-                    ephemeral=True,
-                )
-                return
+            if self._is_computer_game(game):
+                if interaction.user.id != black_id:
+                    await interaction.response.send_message(
+                        "This isn't your game.",
+                        ephemeral=True,
+                    )
+                    return
+                if turn != BLACK:
+                    await interaction.response.send_message(
+                        "🤖 Computer is taking its turn.",
+                        ephemeral=True,
+                    )
+                    return
+            else:
+                if interaction.user.id not in (black_id, white_id):
+                    await interaction.response.send_message(
+                        "This isn't your game.",
+                        ephemeral=True,
+                    )
+                    return
+                if interaction.user.id != current_id:
+                    await interaction.response.send_message(
+                        "Not your turn.",
+                        ephemeral=True,
+                    )
+                    return
 
             moves = legal_moves(board, turn)
             flips = moves.get((row, col))
@@ -703,42 +879,23 @@ class OthelloService:
             game["move_number"] = int(game.get("move_number") or 0) + 1
             game["notice"] = ""
 
-            next_turn = other_piece(turn)
-            next_moves = legal_moves(board, next_turn)
+            finished, winner_id = self._advance_after_move(game, turn)
+            if not finished and self._is_computer_game(game):
+                finished, winner_id = self._run_computer_turns(game)
 
-            if next_moves:
-                game["turn"] = next_turn
-                self._set_game(guild_id, channel_id, game)
-                await self._edit_active_message(interaction, game)
-                return
-
-            same_player_moves = legal_moves(board, turn)
-            if same_player_moves:
-                skipped_id = self._player_for_piece(game, next_turn)
-                game["turn"] = turn
-                game["notice"] = (
-                    f"<@{skipped_id}> has no legal moves, so their turn was skipped."
+            if finished:
+                self._remove_game(guild_id, channel_id)
+                self._record_result(guild_id, game, winner_id)
+                await self._edit_finished_message(
+                    interaction,
+                    game,
+                    status="finished",
+                    winner_id=winner_id,
                 )
-                self._set_game(guild_id, channel_id, game)
-                await self._edit_active_message(interaction, game)
                 return
 
-            black_score, white_score = count_discs(board)
-            if black_score > white_score:
-                winner_id: int | None = black_id
-            elif white_score > black_score:
-                winner_id = white_id
-            else:
-                winner_id = None
-
-            self._remove_game(guild_id, channel_id)
-            self._record_result(guild_id, game, winner_id)
-            await self._edit_finished_message(
-                interaction,
-                game,
-                status="finished",
-                winner_id=winner_id,
-            )
+            self._set_game(guild_id, channel_id, game)
+            await self._edit_active_message(interaction, game)
 
     async def resign(self, interaction: discord.Interaction) -> None:
         if (
@@ -765,7 +922,8 @@ class OthelloService:
                 return
 
             black_id, white_id = self._player_ids(game)
-            if interaction.user.id not in (black_id, white_id):
+            allowed_ids = (black_id,) if self._is_computer_game(game) else (black_id, white_id)
+            if interaction.user.id not in allowed_ids:
                 await interaction.response.send_message(
                     "This isn't your game.",
                     ephemeral=True,
@@ -810,7 +968,8 @@ class OthelloService:
                 return
 
             black_id, white_id = self._player_ids(game)
-            if interaction.user.id not in (black_id, white_id):
+            allowed_ids = (black_id,) if self._is_computer_game(game) else (black_id, white_id)
+            if interaction.user.id not in allowed_ids:
                 await interaction.response.send_message(
                     "This isn't your game.",
                     ephemeral=True,
@@ -841,8 +1000,8 @@ class OthelloCog(commands.Cog):
 
     HELP_META = {
         "title": "Othello",
-        "summary": "A persistent two-player Othello/Reversi game with legal-move dropdowns and leaderboard results.",
-        "details": "Use /othello or choose Othello from /games, pick an opponent, then choose a legal square from the move dropdown. The board marks legal moves with ✦. Games have no timeout and survive normal bot restarts.",
+        "summary": "Persistent Othello/Reversi for player-v-player or solo play against the computer.",
+        "details": "Use /othello with an opponent for PvP, leave the opponent blank for Computer, or launch it from /games. The board marks legal moves with ✦. Computer games are practice and do not alter the leaderboard.",
     }
 
     def __init__(self, bot: commands.Bot, service: OthelloService) -> None:
@@ -863,17 +1022,26 @@ class OthelloCog(commands.Cog):
     ) -> None:
         await self.service.start_game(interaction, opponent)
 
+    async def start_computer_game(
+        self,
+        interaction: discord.Interaction,
+    ) -> None:
+        await self.service.start_computer_game(interaction)
+
     @app_commands.command(name="othello", description="Play Othello / Reversi")
-    @app_commands.describe(opponent="Who you want to play against")
+    @app_commands.describe(opponent="Opponent (leave blank to play the computer)")
     async def othello(
         self,
         interaction: discord.Interaction,
-        opponent: discord.Member,
+        opponent: discord.Member | None = None,
     ) -> None:
         log_cmd("othello", interaction)
         if not await ensure_deferred(interaction, ephemeral=False):
             return
-        await self.start_game(interaction, opponent)
+        if opponent is None:
+            await self.start_computer_game(interaction)
+        else:
+            await self.start_game(interaction, opponent)
 
 
 async def setup(bot: commands.Bot) -> None:
