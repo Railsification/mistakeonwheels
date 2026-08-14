@@ -748,7 +748,81 @@ class ResignButton(discord.ui.Button):
         self.service = service
 
     async def callback(self, interaction: discord.Interaction) -> None:
-        await self.service.resign(interaction)
+        await self.service.request_resign(interaction)
+
+
+class ConfirmResignButton(discord.ui.Button):
+    def __init__(self, confirm_view: "ResignConfirmView") -> None:
+        super().__init__(
+            label="Yes, Resign",
+            emoji="🏳️",
+            style=discord.ButtonStyle.danger,
+            row=0,
+        )
+        self.confirm_view = confirm_view
+
+    async def callback(self, interaction: discord.Interaction) -> None:
+        if interaction.user.id != self.confirm_view.user_id:
+            await interaction.response.send_message(
+                "That confirmation is not for you.",
+                ephemeral=True,
+            )
+            return
+
+        success = await self.confirm_view.service.resign(
+            interaction,
+            source_message_id=self.confirm_view.source_message_id,
+        )
+        if success:
+            try:
+                await interaction.edit_original_response(
+                    content="🏳️ You resigned from the Battleships game.",
+                    embed=None,
+                    view=None,
+                )
+            except Exception:
+                pass
+
+
+class KeepPlayingButton(discord.ui.Button):
+    def __init__(self, confirm_view: "ResignConfirmView") -> None:
+        super().__init__(
+            label="Keep Playing",
+            emoji="✅",
+            style=discord.ButtonStyle.success,
+            row=0,
+        )
+        self.confirm_view = confirm_view
+
+    async def callback(self, interaction: discord.Interaction) -> None:
+        if interaction.user.id != self.confirm_view.user_id:
+            await interaction.response.send_message(
+                "That confirmation is not for you.",
+                ephemeral=True,
+            )
+            return
+
+        await interaction.response.edit_message(
+            content="✅ Resignation cancelled. Keep playing.",
+            embed=None,
+            view=None,
+        )
+
+
+class ResignConfirmView(discord.ui.View):
+    def __init__(
+        self,
+        service: "BattleshipsService",
+        *,
+        source_message_id: int,
+        user_id: int,
+    ) -> None:
+        super().__init__(timeout=60)
+        self.service = service
+        self.source_message_id = int(source_message_id)
+        self.user_id = int(user_id)
+        self.add_item(ConfirmResignButton(self))
+        self.add_item(KeepPlayingButton(self))
 
 
 class CancelButton(discord.ui.Button):
@@ -823,7 +897,6 @@ class BattleshipsView(discord.ui.View):
         self.add_item(FireButton(service))
         self.add_item(FleetButton(service))
         self.add_item(ResignButton(service))
-        self.add_item(CancelButton(service))
 
         if disabled:
             for child in self.children:
@@ -1918,37 +1991,94 @@ class BattleshipsService:
         if close_picker:
             await interaction.edit_original_response(content=confirmation, embed=None, view=None)
 
-    async def resign(self, interaction: discord.Interaction) -> None:
-        await interaction.response.defer()
-
+    async def request_resign(self, interaction: discord.Interaction) -> None:
         if (
             interaction.guild_id is None
             or interaction.channel_id is None
             or interaction.message is None
         ):
-            await interaction.followup.send(
+            await interaction.response.send_message(
                 "That Battleships game is no longer available.",
                 ephemeral=True,
             )
             return
 
+        game = self._get_game(interaction.guild_id, interaction.channel_id)
+        if not game or int(game.get("message_id") or 0) != interaction.message.id:
+            await interaction.response.send_message(
+                "That is not the current Battleships game in this channel.",
+                ephemeral=True,
+            )
+            return
+
+        if str(game.get("phase") or "active") != "active":
+            await interaction.response.send_message(
+                "The battle hasn't started yet. The game starter can use Cancel instead.",
+                ephemeral=True,
+            )
+            return
+
+        resigned_slot = self._slot_for_user(game, interaction.user.id)
+        if resigned_slot is None:
+            await interaction.response.send_message(
+                "You are not playing this Battleships game.",
+                ephemeral=True,
+            )
+            return
+
+        winner_slot = self._other_slot(resigned_slot)
+        winner_name = self._slot_label(game, winner_slot)
+        await interaction.response.send_message(
+            f"🏳️ **Resign this Battleships game?**\n"
+            f"This will give **{winner_name}** the win. Nothing happens unless you confirm.",
+            view=ResignConfirmView(
+                self,
+                source_message_id=interaction.message.id,
+                user_id=interaction.user.id,
+            ),
+            ephemeral=True,
+        )
+
+    async def resign(
+        self,
+        interaction: discord.Interaction,
+        *,
+        source_message_id: int | None = None,
+    ) -> bool:
+        await interaction.response.defer()
+
+        if interaction.guild_id is None or interaction.channel_id is None:
+            await interaction.followup.send(
+                "That Battleships game is no longer available.",
+                ephemeral=True,
+            )
+            return False
+
+        message_id = int(source_message_id or (interaction.message.id if interaction.message else 0))
+        if not message_id:
+            await interaction.followup.send(
+                "That Battleships game is no longer available.",
+                ephemeral=True,
+            )
+            return False
+
         guild_id = interaction.guild_id
         channel_id = interaction.channel_id
         async with self._lock_for(guild_id, channel_id):
             game = self._get_game(guild_id, channel_id)
-            if not game or int(game.get("message_id") or 0) != interaction.message.id:
+            if not game or int(game.get("message_id") or 0) != message_id:
                 await interaction.followup.send(
                     "That is not the current Battleships game in this channel.",
                     ephemeral=True,
                 )
-                return
+                return False
 
             if str(game.get("phase") or "active") != "active":
                 await interaction.followup.send(
                     "The battle hasn't started yet. The game starter can use Cancel instead.",
                     ephemeral=True,
                 )
-                return
+                return False
 
             resigned_slot = self._slot_for_user(game, interaction.user.id)
             if resigned_slot is None:
@@ -1956,7 +2086,7 @@ class BattleshipsService:
                     "You are not playing this Battleships game.",
                     ephemeral=True,
                 )
-                return
+                return False
 
             winner_slot = self._other_slot(resigned_slot)
             self._remove_game(guild_id, channel_id)
@@ -1968,6 +2098,7 @@ class BattleshipsService:
                 winner_slot=winner_slot,
                 resigned_slot=resigned_slot,
             )
+            return True
 
     async def cancel(self, interaction: discord.Interaction) -> None:
         await interaction.response.defer()
