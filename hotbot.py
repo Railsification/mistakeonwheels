@@ -1,3 +1,4 @@
+# hotbot.py
 from __future__ import annotations
 
 import os
@@ -22,6 +23,9 @@ except ImportError:  # pragma: no cover
     fcntl = None
 
 
+__version__ = "1.0.0"
+
+
 load_dotenv()
 
 BASE_DIR = Path(__file__).resolve().parent
@@ -42,8 +46,8 @@ def _is_cloudflare_1015(exc: Exception) -> bool:
     return (
         "1015" in text
         or "Cloudflare" in text
-        or "discord.com used Cloudflare to restrict access" in text
-        or "You are being rate limited" in text
+        or "discord.com used Cloudflare to restrict access"
+        or "You are being rate limited"
     )
 
 
@@ -97,24 +101,48 @@ class HotBot(commands.Bot):
         self.version = BOT_VERSION
 
     def _discover_cogs(self) -> list[str]:
+        """Discover flat and nested cog modules.
+
+        Examples:
+            cogs/help.py                  -> cogs.help
+            cogs/wos/canyon.py            -> cogs.wos.canyon
+            cogs/community/polls.py       -> cogs.community.polls
+
+        __init__.py files and underscore-prefixed Python files/folders are
+        intentionally ignored. This lets the repository migrate into folders
+        gradually without requiring a central list to be edited.
+        """
         if not COGS_DIR.exists():
             raise RuntimeError(f"Cog directory not found: {COGS_DIR}")
 
-        preferred_first = ["admin", "help"]
-        discovered = [
-            path.stem
-            for path in sorted(COGS_DIR.glob("*.py"))
-            if path.name != "__init__.py" and not path.name.startswith("_")
-        ]
+        discovered: list[str] = []
+
+        for path in sorted(COGS_DIR.rglob("*.py")):
+            if path.name == "__init__.py" or path.name.startswith("_"):
+                continue
+
+            relative = path.relative_to(BASE_DIR).with_suffix("")
+            if any(part.startswith("_") for part in relative.parts):
+                continue
+
+            discovered.append(".".join(relative.parts))
+
+        # Keep the important control/help cogs early where they exist.
+        preferred_first = (
+            "cogs.admin",
+            "cogs.admin.admin",
+            "cogs.help",
+            "cogs.utility.help",
+        )
 
         ordered: list[str] = []
-        for name in preferred_first:
-            if name in discovered:
-                ordered.append(name)
+        for module_name in preferred_first:
+            if module_name in discovered and module_name not in ordered:
+                ordered.append(module_name)
 
-        for name in discovered:
-            if name not in ordered:
-                ordered.append(name)
+        for module_name in discovered:
+            if module_name not in ordered:
+                ordered.append(module_name)
 
         return ordered
 
@@ -142,13 +170,12 @@ class HotBot(commands.Bot):
         loaded_names: list[str] = []
         failed_names: list[str] = []
 
-        for cog_name in self._discover_cogs():
-            extension_name = f"cogs.{cog_name}"
+        for extension_name in self._discover_cogs():
             try:
                 await self.load_extension(extension_name)
-                loaded_names.append(cog_name)
+                loaded_names.append(extension_name.removeprefix("cogs."))
             except Exception as e:
-                failed_names.append(cog_name)
+                failed_names.append(extension_name.removeprefix("cogs."))
                 err(f"Failed to load {extension_name}: {e!r}")
 
         ok(f"Loaded {len(loaded_names)} cog(s)")
