@@ -660,6 +660,59 @@ def render_board(board: list[list[str]]) -> str:
     return "\n".join(lines)
 
 
+PIECE_NAMES = {
+    "p": "Pawn",
+    "n": "Knight",
+    "b": "Bishop",
+    "r": "Rook",
+    "q": "Queen",
+    "k": "King",
+}
+
+
+def render_picker_board(
+    board: list[list[str]],
+    hints: set[tuple[int, int]] | None = None,
+    selected: tuple[int, int] | None = None,
+) -> str:
+    hints = hints or set()
+    lines = ["    a b c d e f g h"]
+    for row in range(8):
+        cells: list[str] = []
+        for col in range(8):
+            if selected == (row, col):
+                cells.append("S")
+                continue
+            if (row, col) in hints:
+                cells.append("*")
+                continue
+            piece = board[row][col]
+            if piece == ".":
+                cells.append("·" if (row + col) % 2 == 0 else "•")
+            else:
+                cells.append(PIECE_SYMBOLS[piece])
+        rank = 8 - row
+        lines.append(f"{rank}   " + " ".join(cells) + f"   {rank}")
+    lines.append("    a b c d e f g h")
+    return "\n".join(lines)
+
+
+def _move_destination_description(
+    board: list[list[str]],
+    move: ChessMove,
+) -> str:
+    if move.castle:
+        return "castle kingside" if move.tc == 6 else "castle queenside"
+    if move.en_passant:
+        return "en passant capture"
+    target = board[move.tr][move.tc]
+    if target != ".":
+        return f"capture {PIECE_NAMES.get(target.lower(), 'piece').lower()}"
+    if move.promotion:
+        return "promote pawn"
+    return "legal move"
+
+
 def _player_label(game: dict[str, Any], side: str) -> str:
     player_id = int(game["p1_id"] if side == WHITE else game["p2_id"])
     if bool(game.get("computer")) and side == BLACK:
@@ -684,7 +737,7 @@ def active_content(game: dict[str, Any]) -> str:
         f"White: {_player_label(game, WHITE)}  •  Black: {_player_label(game, BLACK)}\n"
         f"{status}{last_line}\n"
         f"```\n{render_board(board)}\n```"
-        "Press **Move** and enter something like `e2e4`. Castling: `O-O` / `O-O-O`."
+        "Press **Move**, choose one of your movable pieces, then choose a legal destination square."
     )
 
 
@@ -751,19 +804,232 @@ class ChessMoveButton(discord.ui.Button):
         self.cog = cog
 
     async def callback(self, interaction: discord.Interaction) -> None:
-        if interaction.guild_id is None or interaction.channel_id is None or interaction.message is None:
+        await self.cog.open_move_picker(interaction)
+
+
+class ChessPickerSelect(discord.ui.Select):
+    def __init__(
+        self,
+        picker: "ChessMovePickerView",
+        *,
+        mode: str,
+        options: list[discord.SelectOption],
+        chunk_index: int = 0,
+        chunk_total: int = 1,
+    ):
+        if mode == "piece":
+            placeholder = "Choose a piece to move…"
+        elif mode == "promotion":
+            placeholder = "Choose promotion piece…"
+        elif chunk_total > 1:
+            placeholder = f"Choose destination… ({chunk_index + 1}/{chunk_total})"
+        else:
+            placeholder = "Choose a destination square…"
+        super().__init__(
+            placeholder=placeholder,
+            min_values=1,
+            max_values=1,
+            options=options,
+        )
+        self.picker = picker
+        self.mode = mode
+
+    async def callback(self, interaction: discord.Interaction) -> None:
+        if interaction.user.id != self.picker.user_id:
             await interaction.response.send_message(
-                "This Chess game is no longer active.", ephemeral=True
+                "❌ This move picker belongs to the player whose turn it is.",
+                ephemeral=True,
             )
             return
-        await interaction.response.send_modal(
-            ChessMoveModal(
-                self.cog,
-                interaction.guild_id,
-                interaction.channel_id,
-                interaction.message.id,
-            )
+        await self.picker.cog.handle_picker_choice(
+            interaction,
+            guild_id=self.picker.guild_id,
+            channel_id=self.picker.channel_id,
+            message_id=self.picker.message_id,
+            user_id=self.picker.user_id,
+            mode=self.mode,
+            selected_square=self.picker.selected_square,
+            destination_square=self.picker.destination_square,
+            chosen=self.values[0],
         )
+
+
+class ChessPickerBackButton(discord.ui.Button):
+    def __init__(self, picker: "ChessMovePickerView"):
+        super().__init__(label="Back", emoji="↩️", style=discord.ButtonStyle.secondary)
+        self.picker = picker
+
+    async def callback(self, interaction: discord.Interaction) -> None:
+        if interaction.user.id != self.picker.user_id:
+            await interaction.response.send_message(
+                "❌ This move picker belongs to the player whose turn it is.",
+                ephemeral=True,
+            )
+            return
+        if self.picker.destination_square is not None:
+            selected_square = self.picker.selected_square
+        else:
+            selected_square = None
+        await self.picker.cog.refresh_move_picker(
+            interaction,
+            guild_id=self.picker.guild_id,
+            channel_id=self.picker.channel_id,
+            message_id=self.picker.message_id,
+            user_id=self.picker.user_id,
+            selected_square=selected_square,
+        )
+
+
+class ChessPickerCancelButton(discord.ui.Button):
+    def __init__(self, picker: "ChessMovePickerView"):
+        super().__init__(label="Cancel", style=discord.ButtonStyle.secondary)
+        self.picker = picker
+
+    async def callback(self, interaction: discord.Interaction) -> None:
+        if interaction.user.id != self.picker.user_id:
+            await interaction.response.send_message(
+                "❌ This move picker belongs to the player whose turn it is.",
+                ephemeral=True,
+            )
+            return
+        await interaction.response.edit_message(content="Move selection cancelled.", view=None)
+
+
+class ChessMovePickerView(discord.ui.View):
+    def __init__(
+        self,
+        cog: "ChessCog",
+        *,
+        guild_id: int,
+        channel_id: int,
+        message_id: int,
+        user_id: int,
+        board: list[list[str]],
+        moves: list[ChessMove],
+        selected_square: tuple[int, int] | None = None,
+        destination_square: tuple[int, int] | None = None,
+    ):
+        super().__init__(timeout=180)
+        self.cog = cog
+        self.guild_id = int(guild_id)
+        self.channel_id = int(channel_id)
+        self.message_id = int(message_id)
+        self.user_id = int(user_id)
+        self.board = valid_board(board)
+        self.moves = list(moves)
+        self.selected_square = selected_square
+        self.destination_square = destination_square
+
+        if self.selected_square is None:
+            starts = sorted(
+                {(move.sr, move.sc) for move in self.moves},
+                key=lambda rc: rc_to_square(*rc),
+            )
+            options: list[discord.SelectOption] = []
+            for rc in starts:
+                square = rc_to_square(*rc)
+                piece = self.board[rc[0]][rc[1]]
+                move_count = len([m for m in self.moves if (m.sr, m.sc) == rc])
+                # Promotion variants share a destination, so count unique landing squares.
+                destination_count = len({(m.tr, m.tc) for m in self.moves if (m.sr, m.sc) == rc})
+                name = PIECE_NAMES.get(piece.lower(), "Piece")
+                options.append(
+                    discord.SelectOption(
+                        label=f"{square.upper()} — {name}",
+                        value=square,
+                        description=f"{destination_count} legal destination{'s' if destination_count != 1 else ''}",
+                    )
+                )
+            if options:
+                self.add_item(ChessPickerSelect(self, mode="piece", options=options[:25]))
+
+        elif self.destination_square is None:
+            piece_moves = [
+                move for move in self.moves
+                if (move.sr, move.sc) == self.selected_square
+            ]
+            by_destination: dict[tuple[int, int], list[ChessMove]] = {}
+            for move in piece_moves:
+                by_destination.setdefault((move.tr, move.tc), []).append(move)
+            options = []
+            for rc in sorted(by_destination, key=lambda item: rc_to_square(*item)):
+                variants = by_destination[rc]
+                square = rc_to_square(*rc)
+                description = _move_destination_description(self.board, variants[0])
+                if len(variants) > 1 and any(m.promotion for m in variants):
+                    description = "promotion — choose piece next"
+                options.append(
+                    discord.SelectOption(
+                        label=square.upper(),
+                        value=square,
+                        description=description[:100],
+                    )
+                )
+            chunks = [options[i:i + 25] for i in range(0, len(options), 25)]
+            for index, chunk in enumerate(chunks[:4]):
+                self.add_item(ChessPickerSelect(
+                    self,
+                    mode="destination",
+                    options=chunk,
+                    chunk_index=index,
+                    chunk_total=len(chunks),
+                ))
+            self.add_item(ChessPickerBackButton(self))
+
+        else:
+            variants = [
+                move for move in self.moves
+                if (move.sr, move.sc) == self.selected_square
+                and (move.tr, move.tc) == self.destination_square
+            ]
+            promo_moves = [move for move in variants if move.promotion]
+            promo_names = {"q": "Queen", "r": "Rook", "b": "Bishop", "n": "Knight"}
+            promo_symbols = {"q": "♛", "r": "♜", "b": "♝", "n": "♞"}
+            options = [
+                discord.SelectOption(
+                    label=promo_names[move.promotion or "q"],
+                    value=move.promotion or "q",
+                    emoji=promo_symbols[move.promotion or "q"],
+                )
+                for move in promo_moves
+            ]
+            if options:
+                self.add_item(ChessPickerSelect(self, mode="promotion", options=options))
+            self.add_item(ChessPickerBackButton(self))
+
+        self.add_item(ChessPickerCancelButton(self))
+
+    def content(self) -> str:
+        if self.selected_square is None:
+            hints: set[tuple[int, int]] = set()
+            instruction = "Choose one of your movable pieces below."
+            selected = None
+        elif self.destination_square is None:
+            piece_moves = [
+                move for move in self.moves
+                if (move.sr, move.sc) == self.selected_square
+            ]
+            hints = {(move.tr, move.tc) for move in piece_moves}
+            selected = self.selected_square
+            instruction = (
+                f"Selected **{rc_to_square(*self.selected_square).upper()}**. "
+                "Choose one of the `*` legal destination squares below."
+            )
+        else:
+            hints = {self.destination_square}
+            selected = self.selected_square
+            instruction = (
+                f"Move **{rc_to_square(*self.selected_square).upper()} → "
+                f"{rc_to_square(*self.destination_square).upper()}**. "
+                "Choose what your pawn promotes to."
+            )
+        text = (
+            f"♟️ **Choose your Chess move**\n{instruction}\n"
+            f"```\n{render_picker_board(self.board, hints, selected)}\n```"
+        )
+        if self.selected_square is not None:
+            text += "`S` = selected piece  •  `*` = legal destination"
+        return text
 
 
 class ChessResignButton(discord.ui.Button):
@@ -819,9 +1085,10 @@ class ChessCog(commands.Cog):
         "summary": "Persistent Chess for two players or one player vs Computer.",
         "details": (
             "Use /chess and optionally choose an opponent. Leave opponent blank for "
-            "Computer mode. Press Move and enter coordinate notation such as e2e4, "
-            "e7e8q, O-O or O-O-O. Legal move checking includes check, checkmate, "
-            "stalemate, castling, en passant and promotion."
+            "Computer mode. Press Move, choose one of your movable pieces, then choose "
+            "one of its legal destination squares. Promotion asks which piece you want. "
+            "Legal move checking includes check, checkmate, stalemate, castling, en passant "
+            "and promotion."
         ),
     }
 
@@ -1024,6 +1291,222 @@ class ChessCog(commands.Cog):
             )
             return
         await self._start(interaction, p2_id=int(bot_user.id), computer=True)
+
+    def _picker_game_state(
+        self,
+        guild_id: int,
+        channel_id: int,
+        message_id: int,
+        user_id: int,
+    ) -> tuple[dict[str, Any] | None, list[ChessMove], str | None]:
+        game = self._get_game(guild_id, channel_id)
+        if not game or int(game.get("message_id") or 0) != int(message_id):
+            return None, [], "This Chess game is no longer active."
+
+        turn = str(game.get("turn") or WHITE)
+        p1_id = int(game["p1_id"])
+        p2_id = int(game["p2_id"])
+        computer = bool(game.get("computer"))
+        allowed = (p1_id,) if computer else (p1_id, p2_id)
+        expected_id = p1_id if turn == WHITE else p2_id
+        if int(user_id) not in allowed:
+            return None, [], "❌ You aren’t playing this game."
+        if int(user_id) != expected_id:
+            return None, [], "⏳ Not your turn."
+
+        board = valid_board(game.get("board"))
+        castling = _normalise_castling(game.get("castling"))
+        ep = _normalise_en_passant(game.get("en_passant"))
+        moves = legal_moves_from_position(board, turn, castling, ep)
+        if not moves:
+            return game, [], "There are no legal moves available."
+        return game, moves, None
+
+    async def open_move_picker(self, interaction: discord.Interaction) -> None:
+        if interaction.guild_id is None or interaction.channel_id is None or interaction.message is None:
+            await interaction.response.send_message(
+                "This Chess game is no longer active.",
+                ephemeral=True,
+            )
+            return
+
+        game, moves, error = self._picker_game_state(
+            interaction.guild_id,
+            interaction.channel_id,
+            interaction.message.id,
+            interaction.user.id,
+        )
+        if error or game is None:
+            await interaction.response.send_message(
+                error or "This Chess game is no longer active.",
+                ephemeral=True,
+            )
+            return
+
+        view = ChessMovePickerView(
+            self,
+            guild_id=interaction.guild_id,
+            channel_id=interaction.channel_id,
+            message_id=interaction.message.id,
+            user_id=interaction.user.id,
+            board=valid_board(game.get("board")),
+            moves=moves,
+        )
+        await interaction.response.send_message(view.content(), view=view, ephemeral=True)
+
+    async def refresh_move_picker(
+        self,
+        interaction: discord.Interaction,
+        *,
+        guild_id: int,
+        channel_id: int,
+        message_id: int,
+        user_id: int,
+        selected_square: tuple[int, int] | None = None,
+    ) -> None:
+        game, moves, error = self._picker_game_state(
+            guild_id, channel_id, message_id, user_id
+        )
+        if error or game is None:
+            await interaction.response.edit_message(
+                content=error or "This Chess game is no longer active.",
+                view=None,
+            )
+            return
+
+        if selected_square is not None and not any(
+            (move.sr, move.sc) == selected_square for move in moves
+        ):
+            selected_square = None
+        view = ChessMovePickerView(
+            self,
+            guild_id=guild_id,
+            channel_id=channel_id,
+            message_id=message_id,
+            user_id=user_id,
+            board=valid_board(game.get("board")),
+            moves=moves,
+            selected_square=selected_square,
+        )
+        await interaction.response.edit_message(content=view.content(), view=view)
+
+    async def handle_picker_choice(
+        self,
+        interaction: discord.Interaction,
+        *,
+        guild_id: int,
+        channel_id: int,
+        message_id: int,
+        user_id: int,
+        mode: str,
+        selected_square: tuple[int, int] | None,
+        destination_square: tuple[int, int] | None,
+        chosen: str,
+    ) -> None:
+        game, moves, error = self._picker_game_state(
+            guild_id, channel_id, message_id, user_id
+        )
+        if error or game is None:
+            await interaction.response.edit_message(
+                content=error or "This Chess game is no longer active.",
+                view=None,
+            )
+            return
+
+        board = valid_board(game.get("board"))
+
+        if mode == "piece":
+            try:
+                source = square_to_rc(chosen)
+            except ValueError:
+                source = None
+            if source is None or not any((m.sr, m.sc) == source for m in moves):
+                await interaction.response.edit_message(
+                    content="That piece can no longer move. Press **Move** again to refresh.",
+                    view=None,
+                )
+                return
+            view = ChessMovePickerView(
+                self, guild_id=guild_id, channel_id=channel_id, message_id=message_id,
+                user_id=user_id, board=board, moves=moves, selected_square=source,
+            )
+            await interaction.response.edit_message(content=view.content(), view=view)
+            return
+
+        if mode == "destination":
+            if selected_square is None:
+                await interaction.response.edit_message(
+                    content="Your selected piece was lost. Press **Move** again.",
+                    view=None,
+                )
+                return
+            try:
+                destination = square_to_rc(chosen)
+            except ValueError:
+                destination = None
+            variants = [
+                m for m in moves
+                if (m.sr, m.sc) == selected_square
+                and destination is not None
+                and (m.tr, m.tc) == destination
+            ]
+            if not variants:
+                await interaction.response.edit_message(
+                    content="That destination is no longer legal. Press **Move** again to refresh.",
+                    view=None,
+                )
+                return
+            if len(variants) > 1 and any(m.promotion for m in variants):
+                view = ChessMovePickerView(
+                    self, guild_id=guild_id, channel_id=channel_id, message_id=message_id,
+                    user_id=user_id, board=board, moves=moves,
+                    selected_square=selected_square, destination_square=destination,
+                )
+                await interaction.response.edit_message(content=view.content(), view=view)
+                return
+            move = variants[0]
+            await self.handle_move(
+                interaction, move.uci(), guild_id, channel_id, message_id
+            )
+            try:
+                await interaction.delete_original_response()
+            except Exception:
+                pass
+            return
+
+        if mode == "promotion":
+            if selected_square is None or destination_square is None:
+                await interaction.response.edit_message(
+                    content="Your promotion selection expired. Press **Move** again.",
+                    view=None,
+                )
+                return
+            promotion = chosen.lower()
+            move = next((
+                m for m in moves
+                if (m.sr, m.sc) == selected_square
+                and (m.tr, m.tc) == destination_square
+                and (m.promotion or "").lower() == promotion
+            ), None)
+            if move is None:
+                await interaction.response.edit_message(
+                    content="That promotion is no longer legal. Press **Move** again.",
+                    view=None,
+                )
+                return
+            await self.handle_move(
+                interaction, move.uci(), guild_id, channel_id, message_id
+            )
+            try:
+                await interaction.delete_original_response()
+            except Exception:
+                pass
+            return
+
+        await interaction.response.edit_message(
+            content="That move option expired. Press **Move** again.",
+            view=None,
+        )
 
     def _state_after_move(self, game: dict[str, Any], move: ChessMove, side: str) -> None:
         board = valid_board(game.get("board"))
