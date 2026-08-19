@@ -20,7 +20,7 @@ from core.storage import load_guild_json, save_guild_json
 from core.utils import ensure_deferred
 
 
-__version__ = "1.0.0"
+__version__ = "1.0.1"
 
 
 GAMES_FILENAME = "battleships_games.json"
@@ -739,6 +739,21 @@ class FleetButton(discord.ui.Button):
         await self.service.show_fleet(interaction)
 
 
+class PostUpdateButton(discord.ui.Button):
+    def __init__(self, service: "BattleshipsService") -> None:
+        super().__init__(
+            label="Post Update",
+            emoji="📣",
+            style=discord.ButtonStyle.secondary,
+            custom_id="hotbot:battleships:post_update:v1",
+            row=0,
+        )
+        self.service = service
+
+    async def callback(self, interaction: discord.Interaction) -> None:
+        await self.service.post_update(interaction)
+
+
 class ResignButton(discord.ui.Button):
     def __init__(self, service: "BattleshipsService") -> None:
         super().__init__(
@@ -899,6 +914,7 @@ class BattleshipsView(discord.ui.View):
         self.service = service
         self.add_item(FireButton(service))
         self.add_item(FleetButton(service))
+        self.add_item(PostUpdateButton(service))
         self.add_item(ResignButton(service))
 
         if disabled:
@@ -1159,6 +1175,7 @@ class BattleshipsService:
         if status == "active":
             description = (
                 "Press **Fire**, choose a row, then choose one of the available columns. "
+                "Use **Post Update** when you want the latest shot/status copied into chat. "
                 "Sink all five enemy ships before yours are destroyed."
             )
         elif status in {"finished", "resigned"}:
@@ -1417,8 +1434,8 @@ class BattleshipsService:
         interaction: discord.Interaction,
         game: dict[str, Any],
         action: str,
-    ) -> None:
-        """Post a permanent public shot record so the move history stays in chat."""
+    ) -> bool:
+        """Post the latest Battleships shot/status into chat when a player asks for it."""
         channel = interaction.channel
         if channel is None and interaction.channel_id:
             channel = self.bot.get_channel(interaction.channel_id)
@@ -1429,7 +1446,7 @@ class BattleshipsService:
                     channel = None
 
         if channel is None or not hasattr(channel, "send"):
-            return
+            return False
 
         fleet1 = self._fleet(game, 1)
         fleet2 = self._fleet(game, 2)
@@ -1450,8 +1467,10 @@ class BattleshipsService:
                 content,
                 allowed_mentions=discord.AllowedMentions.none(),
             )
+            return True
         except Exception as exc:
             warn(f"Battleships shot update post failed: {exc!r}")
+            return False
 
     def _record_result(
         self,
@@ -1914,6 +1933,51 @@ class BattleshipsService:
             ephemeral=True,
         )
 
+    async def post_update(self, interaction: discord.Interaction) -> None:
+        if interaction.guild_id is None or interaction.channel_id is None or interaction.message is None:
+            await interaction.response.send_message(
+                "That Battleships game is no longer available.",
+                ephemeral=True,
+            )
+            return
+
+        game = self._get_game(interaction.guild_id, interaction.channel_id)
+        if not game or int(game.get("message_id") or 0) != interaction.message.id:
+            await interaction.response.send_message(
+                "That is not the current Battleships game in this channel.",
+                ephemeral=True,
+            )
+            return
+
+        if str(game.get("phase") or "active") != "active":
+            await interaction.response.send_message(
+                "The battle has not started yet.",
+                ephemeral=True,
+            )
+            return
+
+        if self._slot_for_user(game, interaction.user.id) is None:
+            await interaction.response.send_message(
+                "You are not playing this Battleships game.",
+                ephemeral=True,
+            )
+            return
+
+        action = str(game.get("last_action") or "").strip()
+        if not action:
+            await interaction.response.send_message(
+                "There is no shot update to post yet.",
+                ephemeral=True,
+            )
+            return
+
+        await interaction.response.defer(ephemeral=True)
+        posted = await self._post_shot_update(interaction, game, action)
+        await interaction.followup.send(
+            "📣 Battleships update posted." if posted else "❌ I couldn't post the Battleships update.",
+            ephemeral=True,
+        )
+
     async def handle_fire(
         self,
         interaction: discord.Interaction,
@@ -2008,7 +2072,6 @@ class BattleshipsService:
                     status="finished",
                     winner_slot=slot,
                 )
-                await self._post_shot_update(interaction, game, action)
                 if close_picker:
                     await interaction.edit_original_response(content=confirmation, embed=None, view=None)
                 return
@@ -2040,11 +2103,6 @@ class BattleshipsService:
                         status="finished",
                         winner_slot=2,
                     )
-                    await self._post_shot_update(
-                        interaction,
-                        game,
-                        f"{action}\n{bot_action}",
-                    )
                     if close_picker:
                         await interaction.edit_original_response(content=confirmation, embed=None, view=None)
                     return
@@ -2052,11 +2110,6 @@ class BattleshipsService:
                 game["turn"] = 1
                 self._set_game(guild_id, channel_id, game)
                 await self._edit_message(interaction, game)
-                await self._post_shot_update(
-                    interaction,
-                    game,
-                    f"{action}\n{bot_action}",
-                )
                 if close_picker:
                     await interaction.edit_original_response(content=confirmation, embed=None, view=None)
                 return
@@ -2065,7 +2118,6 @@ class BattleshipsService:
             game["turn"] = target_slot
             self._set_game(guild_id, channel_id, game)
             await self._edit_message(interaction, game)
-            await self._post_shot_update(interaction, game, action)
 
         if close_picker:
             await interaction.edit_original_response(content=confirmation, embed=None, view=None)
@@ -2238,7 +2290,8 @@ class BattleshipsCog(commands.Cog):
             "Use /battleships and optionally choose an opponent. Leave the opponent blank "
             "for Computer mode, or choose Battleships from /games. Each player privately "
             "sets or randomises their fleet and presses Ready. During play, Fire opens a "
-            "private target picker: choose a row, then an available column. Games survive "
+            "private target picker: choose a row, then an available column. Post Update "
+            "publishes the latest shot/status only when a player chooses to. Games survive "
             "normal Railway restarts."
         ),
     }
