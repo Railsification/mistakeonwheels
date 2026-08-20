@@ -1,7 +1,7 @@
 # cogs/games/games.py
 from __future__ import annotations
 
-__version__ = "1.0.0"
+__version__ = "1.1.0"
 
 from typing import Any
 
@@ -20,6 +20,235 @@ from core.utils import ensure_deferred
 # the shared registry whenever /games is opened.
 GAMES: list[tuple[str, str]] = []
 TWO_PLAYER_GAMES: set[str] = set()
+
+
+# Built-in rules keep every currently shipped game documented even while older
+# cogs are gradually moved to the structured HELP_META standard. A game's own
+# HELP_META goal/how_to_play/rules values always take priority over these.
+GAME_RULES: dict[str, dict[str, str]] = {
+    "tictactoe": {
+        "goal": "Be the first player to place 3 of your marks in a straight line.",
+        "how_to_play": (
+            "Players alternate pressing an empty square on the 3×3 board. Your mark is "
+            "placed in that square and the turn passes to the other player. A line can be "
+            "horizontal, vertical or diagonal."
+        ),
+        "rules": (
+            "A player wins immediately when they make 3 in a row. If all 9 squares fill "
+            "without a winning line, the game is a draw. You cannot play an occupied square "
+            "or move when it is not your turn. Computer games are practice and do not "
+            "change the leaderboard."
+        ),
+    },
+    "connect4": {
+        "goal": "Be the first player to connect 4 of your discs in a row.",
+        "how_to_play": (
+            "Take turns choosing one of the 7 columns. Your disc falls to the lowest empty "
+            "space in that column. Build a line of four while blocking your opponent."
+        ),
+        "rules": (
+            "Four connected discs can be horizontal, vertical or diagonal. Full columns "
+            "cannot be chosen. If the board fills before either player connects four, the "
+            "game is a draw. Computer games are practice and do not change the leaderboard."
+        ),
+    },
+    "chess": {
+        "goal": "Checkmate the opponent's king.",
+        "how_to_play": (
+            "Press **Move**, choose one of your movable pieces, then choose one of its legal "
+            "destination squares. Pieces use normal chess movement. The bot handles legal "
+            "moves, captures, check, castling, en passant and pawn promotion."
+        ),
+        "rules": (
+            "You may not make a move that leaves your own king in check. The game ends when "
+            "a king is checkmated or when the implemented draw condition is reached. Use "
+            "Resign only when you intend to concede. Computer games are practice and do not "
+            "change the leaderboard."
+        ),
+    },
+    "checkers": {
+        "goal": "Capture all opposing pieces or leave the opponent with no legal move.",
+        "how_to_play": (
+            "Press **Move**, choose one of your movable pieces, then choose a legal landing "
+            "square. Men move diagonally forward. Jump over an adjacent enemy piece into the "
+            "empty square beyond it to capture. Kings can move and capture both directions."
+        ),
+        "rules": (
+            "Captures are compulsory when available. If another capture is available after a "
+            "jump, the multi-jump continues. A man reaching the far back row is crowned as a "
+            "king. The game uses English/American Checkers rules. Computer games are practice "
+            "and do not change the leaderboard."
+        ),
+    },
+    "othello": {
+        "goal": "Finish the game with more discs of your colour than your opponent.",
+        "how_to_play": (
+            "Choose one of the legal moves marked on the 8×8 board. A legal placement must "
+            "trap one or more opposing discs in a straight line between the new disc and one "
+            "of your existing discs. Every trapped disc flips to your colour."
+        ),
+        "rules": (
+            "Only legal trapping moves may be played. If a player has no legal move, their "
+            "turn is passed. The game ends when neither player can move or the board is full; "
+            "the player with the most discs wins. Computer games are practice and do not "
+            "change the leaderboard."
+        ),
+    },
+    "hangman": {
+        "goal": "Solve the hidden word or phrase before the group reaches 7 misses.",
+        "how_to_play": (
+            "Press **Guess Letter** to try one letter or **Guess Word** to attempt the full "
+            "answer. Correct letters are revealed to everyone. The first player to complete "
+            "the answer gets the solve."
+        ),
+        "rules": (
+            "A wrong letter costs 1 miss and a wrong full answer costs 1 miss. Repeating an "
+            "already-tried guess does not cost another miss. At 7 misses the answer is "
+            "revealed and the game ends. Anyone can participate in the channel-wide game."
+        ),
+    },
+    "rebus": {
+        "goal": "Solve the phrase or saying represented by the puzzle's visual layout.",
+        "how_to_play": (
+            "Press **Answer** to submit a guess, **Hint** to reveal the next public hint, or "
+            "**Skip** if the group wants to abandon the puzzle. Look at position, spacing, "
+            "repetition, numbers, missing letters and word order for clues."
+        ),
+        "rules": (
+            "The first accepted answer wins the solve. Small typos and equivalent number "
+            "wording may be accepted. The starter or a moderator can skip immediately; other "
+            "players need 3 skip votes. Guesses, hints and skip votes are shared by the channel."
+        ),
+    },
+    "dice": {
+        "goal": "Roll higher than your opponent.",
+        "how_to_play": (
+            "Each player presses **Roll Dice** once. Your roll is locked in and kept hidden "
+            "until both players have rolled. In Computer mode, the computer rolls when you do."
+        ),
+        "rules": (
+            "The highest die wins. If both dice tie, both sides automatically reroll until "
+            "there is a winner. A player cannot reroll a locked die. Computer games are "
+            "practice and do not change the leaderboard."
+        ),
+    },
+    "rps": {
+        "goal": "Choose the option that defeats your opponent's choice.",
+        "how_to_play": (
+            "Each player privately locks in **Rock**, **Paper** or **Scissors**. Choices stay "
+            "hidden until both players have selected. In Computer mode, the bot chooses at "
+            "the same time as you."
+        ),
+        "rules": (
+            "Rock beats Scissors, Scissors beats Paper, and Paper beats Rock. Matching choices "
+            "are a draw. Once a choice is locked it cannot be changed. Computer games are "
+            "practice and do not change the leaderboard."
+        ),
+    },
+    "headsortails": {
+        "goal": "Correctly predict which side of the coin will land face-up.",
+        "how_to_play": (
+            "Start the game and press **Heads** or **Tails**. The bot immediately flips the "
+            "coin and reveals the result in the game message."
+        ),
+        "rules": (
+            "You get one call per flip. Matching the result wins the flip; the other side "
+            "loses. The result is generated randomly when your choice is made."
+        ),
+    },
+    "yahtzee": {
+        "goal": "Finish 13 scoring rounds with the highest total score.",
+        "how_to_play": (
+            "On your turn, roll five dice up to 3 times. Hold any dice you want to keep between "
+            "rolls, then select one unused scoring category. Each category can be scored only "
+            "once, even when the roll scores zero."
+        ),
+        "rules": (
+            "The scorecard uses Ones through Sixes, 3/4 of a Kind, Full House, Small Straight, "
+            "Large Straight, Yahtzee and Chance. An upper-section subtotal of at least 63 earns "
+            "a 35-point bonus. After all 13 categories are filled, the higher total wins. "
+            "Computer games are practice and do not change the leaderboard."
+        ),
+    },
+    "battleships": {
+        "goal": "Sink every ship in the opposing fleet before your own fleet is destroyed.",
+        "how_to_play": (
+            "Set up your private 10×10 fleet, then take turns firing at enemy coordinates. "
+            "The public game shows hits, misses, sunk ships and whose turn it is while each "
+            "player's own ship locations remain private."
+        ),
+        "rules": (
+            "The fleet contains Carrier (5), Battleship (4), Cruiser (3), Submarine (3) and "
+            "Destroyer (2). Ships cannot overlap. A shot can target each coordinate only once. "
+            "A ship sinks when all of its cells have been hit; sinking the entire enemy fleet "
+            "wins. Computer games are practice and do not change the leaderboard."
+        ),
+    },
+}
+
+
+def _help_meta_for_entry(entry: dict[str, Any] | None) -> dict[str, Any]:
+    if not isinstance(entry, dict):
+        return {}
+    cog = entry.get("cog")
+    raw = getattr(cog, "HELP_META", None)
+    if callable(raw):
+        try:
+            raw = raw()
+        except Exception:
+            raw = None
+    return dict(raw) if isinstance(raw, dict) else {}
+
+
+def _rules_for_game(game_key: str, entry: dict[str, Any]) -> dict[str, str]:
+    key = str(game_key or "").strip().lower()
+    meta = _help_meta_for_entry(entry)
+    built_in = GAME_RULES.get(key, {})
+
+    goal = str(
+        meta.get("goal")
+        or built_in.get("goal")
+        or entry.get("description")
+        or "Play the game and complete its objective."
+    ).strip()
+    how_to_play = str(
+        meta.get("how_to_play")
+        or built_in.get("how_to_play")
+        or meta.get("details")
+        or "Use the controls shown on the game message."
+    ).strip()
+    rules_text = str(
+        meta.get("rules")
+        or built_in.get("rules")
+        or "Follow the legal moves and controls enforced by the game."
+    ).strip()
+
+    return {
+        "goal": goal[:1024],
+        "how_to_play": how_to_play[:1024],
+        "rules": rules_text[:1024],
+    }
+
+
+def build_how_to_play_embed(game_key: str, entry: dict[str, Any]) -> discord.Embed:
+    label = str(entry.get("label") or game_label(game_key))[:100]
+    help_text = _rules_for_game(game_key, entry)
+    embed = discord.Embed(
+        title=f"📖 {label} — How to Play",
+        description=help_text["goal"],
+        colour=discord.Colour.blurple(),
+    )
+    embed.add_field(
+        name="How to Play",
+        value=help_text["how_to_play"],
+        inline=False,
+    )
+    embed.add_field(
+        name="Rules",
+        value=help_text["rules"],
+        inline=False,
+    )
+    return embed
 
 
 def _refresh_compatibility_constants(bot: commands.Bot) -> dict[str, dict[str, Any]]:
@@ -183,6 +412,32 @@ class ComputerButton(discord.ui.Button):
         await view.refresh(interaction)
 
 
+class HowToPlayButton(discord.ui.Button):
+    def __init__(self):
+        super().__init__(
+            label="How to Play",
+            emoji="📖",
+            style=discord.ButtonStyle.secondary,
+            row=2,
+            disabled=True,
+        )
+
+    async def callback(self, interaction: discord.Interaction) -> None:
+        view: GamesView = self.view  # type: ignore[assignment]
+        entry = view.selected_entry()
+        if not view.selected_game or entry is None:
+            await interaction.response.send_message(
+                "❌ Choose a game first.",
+                ephemeral=True,
+            )
+            return
+
+        await interaction.response.send_message(
+            embed=build_how_to_play_embed(view.selected_game, entry),
+            ephemeral=True,
+        )
+
+
 class GamesView(discord.ui.View):
     def __init__(
         self,
@@ -217,6 +472,7 @@ class GamesView(discord.ui.View):
         self.add_item(GameSelect(bot, allowed_keys))
         self.add_item(OpponentSelect())
         self.add_item(ComputerButton())
+        self.add_item(HowToPlayButton())
         self.add_item(StartButton())
         self.add_item(CloseButton())
         self.sync_controls()
@@ -255,6 +511,9 @@ class GamesView(discord.ui.View):
                     else discord.ButtonStyle.primary
                 )
                 child.label = "Computer ✓" if self.computer_mode else "Computer"
+
+            elif isinstance(child, HowToPlayButton):
+                child.disabled = entry is None
 
         if not needs_opponent:
             self.opponent_id = None
@@ -297,7 +556,8 @@ class GamesView(discord.ui.View):
 
         return (
             "🎮 **Games Menu**\n"
-            "Pick a game, choose who you want to play, then press **Start**.\n"
+            "Pick a game, use **How to Play** for the rules, choose who you want to play, "
+            "then press **Start**.\n"
             f"{opponent_line}\n\n"
             f"{'✅' if ready else '❌'} **{label}** — {instruction}"
         )
@@ -428,10 +688,20 @@ class CloseButton(discord.ui.Button):
 class GamesCog(commands.Cog):
     HELP_META = {
         "title": "Games Menu",
-        "summary": "Automatically lists every loaded game cog in one menu.",
+        "summary": "Automatically lists every loaded game cog and exposes each game's rules.",
+        "goal": "Choose a game, check its rules, choose an opponent when needed, and start it.",
+        "how_to_play": (
+            "Use `/games`, select a game, press **How to Play** whenever you want its rules, "
+            "then choose another player or **Computer** when supported and press **Start**."
+        ),
+        "rules": (
+            "Only games enabled for the current channel are shown. The private launcher menu "
+            "expires after 5 minutes; once a game starts, that game's own persistence and "
+            "timeout rules apply."
+        ),
         "details": (
-            "Use /games, choose a game, then pick another player or Computer "
-            "when the selected game supports solo play."
+            "Use `/games`, choose a game, read **How to Play**, then pick another player or "
+            "Computer when the selected game supports solo play."
         ),
     }
 
