@@ -1,82 +1,113 @@
 # core/version.py
 from __future__ import annotations
 
-import hashlib
-import os
-import subprocess
+import ast
 from pathlib import Path
 
 
 BOT_NAME = "HotBot"
+MASTER_VERSION = 1
+DEFAULT_COMPONENT_VERSION = "1.0.0"
+__version__ = "1.0.0"
 
 _REPO_ROOT = Path(__file__).resolve().parents[1]
-_DEPLOYMENT_SHA_VARIABLES = (
-    "RAILWAY_GIT_COMMIT_SHA",
-    "GITHUB_SHA",
-    "SOURCE_VERSION",
-)
 
 
-def _short_revision(value: str) -> str:
-    cleaned = value.strip()
-    return cleaned[:8] if cleaned else ""
+def _component_paths() -> list[Path]:
+    paths: list[Path] = []
 
+    hotbot_path = _REPO_ROOT / "hotbot.py"
+    if hotbot_path.is_file():
+        paths.append(hotbot_path)
 
-def _environment_revision() -> str:
-    for variable_name in _DEPLOYMENT_SHA_VARIABLES:
-        revision = _short_revision(os.getenv(variable_name, ""))
-        if revision:
-            return revision
-    return ""
-
-
-def _git_revision() -> str:
-    try:
-        completed = subprocess.run(
-            ["git", "rev-parse", "--short=8", "HEAD"],
-            cwd=_REPO_ROOT,
-            check=True,
-            capture_output=True,
-            text=True,
-            timeout=2,
+    for folder_name in ("cogs", "core"):
+        folder = _REPO_ROOT / folder_name
+        if not folder.is_dir():
+            continue
+        paths.extend(
+            path
+            for path in folder.rglob("*.py")
+            if path.name != "__init__.py"
+            and not any(part.startswith("_") for part in path.parts)
         )
-    except (OSError, subprocess.SubprocessError):
-        return ""
-    return _short_revision(completed.stdout)
+
+    return sorted(set(paths))
 
 
-def file_revision(path: str | Path) -> str:
-    """Return a stable version generated from the file's actual contents."""
-    file_path = Path(path)
+def _explicit_version(path: Path) -> str | None:
     try:
-        content = file_path.read_bytes()
-    except OSError:
-        return "unavailable"
-    return hashlib.sha256(content).hexdigest()[:8]
+        tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+    except (OSError, SyntaxError, UnicodeError):
+        return None
+
+    for node in tree.body:
+        value_node: ast.expr | None = None
+
+        if isinstance(node, ast.Assign):
+            if any(
+                isinstance(target, ast.Name) and target.id == "__version__"
+                for target in node.targets
+            ):
+                value_node = node.value
+        elif (
+            isinstance(node, ast.AnnAssign)
+            and isinstance(node.target, ast.Name)
+            and node.target.id == "__version__"
+        ):
+            value_node = node.value
+
+        if (
+            isinstance(value_node, ast.Constant)
+            and isinstance(value_node.value, str)
+        ):
+            return value_node.value.strip()
+
+    return None
 
 
-def _source_revision() -> str:
-    digest = hashlib.sha256()
-    source_files = sorted(
-        path
-        for path in _REPO_ROOT.rglob("*.py")
-        if ".git" not in path.parts
+def _version_digits(version: str) -> tuple[int, int, int]:
+    try:
+        major_text, minor_text, patch_text = version.split(".", 2)
+        digits = (int(major_text), int(minor_text), int(patch_text))
+        if any(value < 0 for value in digits):
+            raise ValueError
+        return digits
+    except (AttributeError, TypeError, ValueError):
+        return (1, 0, 0)
+
+
+def component_versions() -> list[tuple[str, str]]:
+    """Return every bot component and its explicit or baseline version."""
+    components: list[tuple[str, str]] = []
+
+    for path in _component_paths():
+        version = _explicit_version(path) or DEFAULT_COMPONENT_VERSION
+        if _version_digits(version) == (1, 0, 0):
+            version = DEFAULT_COMPONENT_VERSION
+        components.append(
+            (path.relative_to(_REPO_ROOT).as_posix(), version)
+        )
+
+    return components
+
+
+def calculate_bot_version() -> str:
+    """Build MASTER.COUNT.MAJOR_SUM.MINOR_SUM.PATCH_SUM automatically."""
+    components = component_versions()
+    major_sum = 0
+    minor_sum = 0
+    patch_sum = 0
+
+    for _path, version in components:
+        major, minor, patch = _version_digits(version)
+        major_sum += major
+        minor_sum += minor
+        patch_sum += patch
+
+    return (
+        f"{MASTER_VERSION}.{len(components)}."
+        f"{major_sum}.{minor_sum}.{patch_sum}"
     )
 
-    for source_file in source_files:
-        try:
-            relative_path = source_file.relative_to(_REPO_ROOT)
-            digest.update(relative_path.as_posix().encode("utf-8"))
-            digest.update(source_file.read_bytes())
-        except OSError:
-            continue
 
-    return digest.hexdigest()[:8]
-
-
-def get_bot_version() -> str:
-    """Return the deployment revision without requiring a manual bump."""
-    return _environment_revision() or _git_revision() or _source_revision()
-
-
-BOT_VERSION = get_bot_version()
+BOT_VERSION = calculate_bot_version()
