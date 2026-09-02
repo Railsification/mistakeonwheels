@@ -19,7 +19,7 @@ from core.storage import known_guild_dirs, load_guild_json, save_guild_json
 from core.utils import ensure_deferred
 
 
-__version__ = "1.0.0"
+__version__ = "1.0.1"
 
 GAME_KEY = "yahtzee"
 GAMES_FILENAME = "yahtzee_games.json"
@@ -715,6 +715,9 @@ class YahtzeeCog(commands.Cog):
         self.bot = bot
         self.settings: SettingsManager = bot.settings
         self._locks: dict[tuple[int, int], asyncio.Lock] = {}
+        # Prevent repeated taps on actions such as Roll/Score from being queued
+        # while Discord is still updating the game message.
+        self._pending_actions: set[tuple[int, int, str]] = set()
         self._restored_once = False
 
         register_game(
@@ -741,6 +744,49 @@ class YahtzeeCog(commands.Cog):
             lock = asyncio.Lock()
             self._locks[key] = lock
         return lock
+
+    def _claim_action(
+        self,
+        interaction: discord.Interaction,
+        action: str,
+    ) -> tuple[int, int, str] | None:
+        if interaction.message is None:
+            return None
+        key = (int(interaction.message.id), int(interaction.user.id), str(action))
+        if key in self._pending_actions:
+            return None
+        self._pending_actions.add(key)
+        return key
+
+    def _release_action(self, key: tuple[int, int, str] | None) -> None:
+        if key is not None:
+            self._pending_actions.discard(key)
+
+    @staticmethod
+    def _requested_hold_state(
+        interaction: discord.Interaction,
+        index: int,
+        current_state: bool,
+    ) -> bool:
+        """Return what the button the user actually tapped was asking for.
+
+        Discord includes the source message/components in the interaction. If a
+        user taps the same grey die twice before the first edit becomes visible,
+        both interactions therefore mean "hold this die" instead of the second
+        queued interaction accidentally toggling it back off.
+        """
+        message = interaction.message
+        target_custom_id = f"hotbot:yahtzee:hold:{int(index)}:v1"
+        if message is not None:
+            for row in getattr(message, "components", []) or []:
+                for component in getattr(row, "children", []) or []:
+                    if getattr(component, "custom_id", None) != target_custom_id:
+                        continue
+                    style = getattr(component, "style", None)
+                    return style != discord.ButtonStyle.success
+
+        # Safe fallback for unusual/older interaction payloads.
+        return not bool(current_state)
 
     def _load_blob(self, guild_id: int) -> dict[str, Any]:
         raw = load_guild_json(guild_id, GAMES_FILENAME, {"games": {}})
@@ -1123,50 +1169,57 @@ class YahtzeeCog(commands.Cog):
 
     async def handle_roll(self, interaction: discord.Interaction) -> None:
         await interaction.response.defer()
-        if interaction.guild_id is None or interaction.channel_id is None:
-            await self._send_error(interaction, "This Yahtzee game is no longer active.")
+        action_key = self._claim_action(interaction, "roll")
+        if action_key is None:
             return
 
-        guild_id = interaction.guild_id
-        channel_id = interaction.channel_id
-
-        async with self._lock_for(guild_id, channel_id):
-            game = self._current_game_for_interaction(interaction)
-            if not game:
+        try:
+            if interaction.guild_id is None or interaction.channel_id is None:
                 await self._send_error(interaction, "This Yahtzee game is no longer active.")
                 return
-            if not self._human_allowed(game, interaction.user.id):
-                await self._send_error(interaction, "⏳ It isn’t your turn.")
-                return
 
-            rolls_used = int(game.get("rolls_used") or 0)
-            if rolls_used >= MAX_ROLLS:
-                await self._send_error(interaction, "You’ve already used all three rolls.")
-                return
+            guild_id = interaction.guild_id
+            channel_id = interaction.channel_id
 
-            dice = _normalise_dice(game.get("dice"))
-            held = _normalise_holds(game.get("held"))
+            async with self._lock_for(guild_id, channel_id):
+                game = self._current_game_for_interaction(interaction)
+                if not game:
+                    await self._send_error(interaction, "This Yahtzee game is no longer active.")
+                    return
+                if not self._human_allowed(game, interaction.user.id):
+                    await self._send_error(interaction, "⏳ It isn’t your turn.")
+                    return
 
-            if rolls_used > 0 and all(held):
-                await self._send_error(
-                    interaction,
-                    "All five dice are held. Unhold one or score this roll.",
+                rolls_used = int(game.get("rolls_used") or 0)
+                if rolls_used >= MAX_ROLLS:
+                    await self._send_error(interaction, "You’ve already used all three rolls.")
+                    return
+
+                dice = _normalise_dice(game.get("dice"))
+                held = _normalise_holds(game.get("held"))
+
+                if rolls_used > 0 and all(held):
+                    await self._send_error(
+                        interaction,
+                        "All five dice are held. Unhold one or score this roll.",
+                    )
+                    return
+
+                for index in range(DICE_COUNT):
+                    if rolls_used == 0 or not held[index]:
+                        dice[index] = roll_die()
+
+                game["dice"] = dice
+                game["rolls_used"] = rolls_used + 1
+                game["selected_category"] = ""
+                self._set_game(guild_id, channel_id, game)
+
+                await interaction.message.edit(  # type: ignore[union-attr]
+                    content=active_content(game),
+                    view=YahtzeeView(self, game),
                 )
-                return
-
-            for index in range(DICE_COUNT):
-                if rolls_used == 0 or not held[index]:
-                    dice[index] = roll_die()
-
-            game["dice"] = dice
-            game["rolls_used"] = rolls_used + 1
-            game["selected_category"] = ""
-            self._set_game(guild_id, channel_id, game)
-
-            await interaction.message.edit(  # type: ignore[union-attr]
-                content=active_content(game),
-                view=YahtzeeView(self, game),
-            )
+        finally:
+            self._release_action(action_key)
 
     async def handle_hold(self, interaction: discord.Interaction, index: int) -> None:
         await interaction.response.defer()
@@ -1197,7 +1250,14 @@ class YahtzeeCog(commands.Cog):
                 return
 
             held = _normalise_holds(game.get("held"))
-            held[index] = not held[index]
+            # Do not blindly toggle. If Discord delivers a second tap from the same
+            # stale grey button, it still means "hold", so it cannot undo the
+            # first tap just before Roll runs.
+            held[index] = self._requested_hold_state(
+                interaction,
+                index,
+                held[index],
+            )
             game["held"] = held
             self._set_game(guild_id, channel_id, game)
 
@@ -1247,68 +1307,76 @@ class YahtzeeCog(commands.Cog):
 
     async def handle_score(self, interaction: discord.Interaction) -> None:
         await interaction.response.defer()
-        if interaction.guild_id is None or interaction.channel_id is None:
-            await self._send_error(interaction, "This Yahtzee game is no longer active.")
+        action_key = self._claim_action(interaction, "score")
+        if action_key is None:
             return
 
-        guild_id = interaction.guild_id
-        channel_id = interaction.channel_id
-
-        async with self._lock_for(guild_id, channel_id):
-            game = self._current_game_for_interaction(interaction)
-            if not game:
+        try:
+            if interaction.guild_id is None or interaction.channel_id is None:
                 await self._send_error(interaction, "This Yahtzee game is no longer active.")
                 return
-            if not self._human_allowed(game, interaction.user.id):
-                await self._send_error(interaction, "⏳ It isn’t your turn.")
-                return
 
-            rolls_used = int(game.get("rolls_used") or 0)
-            category = str(game.get("selected_category") or "")
-            if rolls_used <= 0:
-                await self._send_error(interaction, "Roll the dice first.")
-                return
-            if category not in CATEGORY_ORDER:
-                await self._send_error(interaction, "Choose a score category first.")
-                return
+            guild_id = interaction.guild_id
+            channel_id = interaction.channel_id
 
-            current_player = int(game.get("current_player") or 1)
-            card = _card_for(game, current_player)
-            if category in card:
-                await self._send_error(interaction, "That category has already been scored.")
-                return
+            async with self._lock_for(guild_id, channel_id):
+                game = self._current_game_for_interaction(interaction)
+                if not game:
+                    await self._send_error(interaction, "This Yahtzee game is no longer active.")
+                    return
+                if not self._human_allowed(game, interaction.user.id):
+                    await self._send_error(interaction, "⏳ It isn’t your turn.")
+                    return
 
-            dice = _normalise_dice(game.get("dice"))
-            score = score_category(category, dice)
-            card[category] = score
-            game["scorecards"][_player_key(current_player)] = card
-            game["last_action"] = (
-                f"{_player_text(game, current_player)} scored **{score}** in "
-                f"**{CATEGORY_LABELS[category]}**."
-            )
-            game["current_player"] = 2 if current_player == 1 else 1
-            self._reset_turn(game)
+                rolls_used = int(game.get("rolls_used") or 0)
+                category = str(game.get("selected_category") or "")
+                if rolls_used <= 0:
+                    await self._send_error(interaction, "Roll the dice first.")
+                    return
+                if category not in CATEGORY_ORDER:
+                    await self._send_error(interaction, "Choose a score category first.")
+                    return
 
-            # Save the human turn before running the Computer. If Railway restarts
-            # here, on_ready will see that it is the Computer's turn and resume it.
-            self._set_game(guild_id, channel_id, game)
+                current_player = int(game.get("current_player") or 1)
+                card = _card_for(game, current_player)
+                if category in card:
+                    await self._send_error(interaction, "That category has already been scored.")
+                    return
 
-            if _game_complete(game):
-                await self._finish_saved_game(guild_id, channel_id, game)
-                return
+                dice = _normalise_dice(game.get("dice"))
+                score = score_category(category, dice)
+                card[category] = score
+                game["scorecards"][_player_key(current_player)] = card
+                game["last_action"] = (
+                    f"{_player_text(game, current_player)} scored **{score}** in "
+                    f"**{CATEGORY_LABELS[category]}**."
+                )
+                game["current_player"] = 2 if current_player == 1 else 1
+                self._reset_turn(game)
 
-            if bool(game.get("computer")) and int(game.get("current_player") or 1) == 2:
-                self._computer_turn(game)
+                # Save the human turn before running the Computer. If Railway restarts
+                # here, on_ready will see that it is the Computer's turn and resume it.
                 self._set_game(guild_id, channel_id, game)
 
                 if _game_complete(game):
                     await self._finish_saved_game(guild_id, channel_id, game)
                     return
 
-            await interaction.message.edit(  # type: ignore[union-attr]
-                content=active_content(game),
-                view=YahtzeeView(self, game),
-            )
+                if bool(game.get("computer")) and int(game.get("current_player") or 1) == 2:
+                    self._computer_turn(game)
+                    self._set_game(guild_id, channel_id, game)
+
+                    if _game_complete(game):
+                        await self._finish_saved_game(guild_id, channel_id, game)
+                        return
+
+                await interaction.message.edit(  # type: ignore[union-attr]
+                    content=active_content(game),
+                    view=YahtzeeView(self, game),
+                )
+
+        finally:
+            self._release_action(action_key)
 
     async def handle_resign_request(self, interaction: discord.Interaction) -> None:
         if (
