@@ -1,60 +1,21 @@
 # cogs/admin/bot_versions.py
 from __future__ import annotations
 
-import sys
-from pathlib import Path
-
 import discord
 from discord import app_commands
 from discord.ext import commands
 
 from core.command_scope import bind_admin_cog
 from core.logger import log_cmd
-from core.version import BOT_NAME, BOT_VERSION, file_revision
+from core.version import BOT_NAME, BOT_VERSION, component_versions
 
 
 __version__ = "1.1.0"
 
-_REPO_ROOT = Path(__file__).resolve().parents[2]
 
-
-def _module_file_path(module_name: str, module_path: Path) -> str:
-    try:
-        return module_path.resolve().relative_to(_REPO_ROOT).as_posix()
-    except ValueError:
-        return module_name.replace(".", "/") + ".py"
-
-
-def _loaded_module_versions() -> list[tuple[str, str]]:
-    found: list[tuple[str, str]] = []
-
-    for module_name, module in tuple(sys.modules.items()):
-        if not module_name.startswith(("cogs.", "core.")):
-            continue
-        if module is None:
-            continue
-
-        module_file = getattr(module, "__file__", None)
-        if not module_file:
-            continue
-        module_path = Path(module_file)
-        if module_path.suffix != ".py":
-            continue
-
-        found.append(
-            (
-                _module_file_path(module_name, module_path),
-                file_revision(module_path),
-            )
-        )
-
-    found.sort(
-        key=lambda item: (
-            0 if item[0].startswith("cogs/") else 1,
-            item[0].lower(),
-        )
-    )
-    return found
+def _versioned_loaded_modules() -> list[tuple[str, str]]:
+    """Backward-compatible wrapper for the complete component list."""
+    return component_versions()
 
 
 def _chunk_lines(lines: list[str], limit: int = 1900) -> list[str]:
@@ -130,29 +91,29 @@ class BotVersionsCog(commands.Cog):
         if not await self._require_admin(interaction):
             return
 
-        versioned = _loaded_module_versions()
+        versioned = _versioned_loaded_modules()
 
         lines = [
             f"🔒 **{BOT_NAME} internal versions**",
-            f"Deployment: **{BOT_VERSION}**",
+            f"Bot: **v{BOT_VERSION}**",
             "",
         ]
 
         if versioned:
-            lines.append("**Versioned loaded files:**")
+            lines.append("**Bot component versions:**")
             lines.extend(
                 f"`{path}` — **v{version}**"
                 for path, version in versioned
             )
         else:
             lines.append(
-                "No loaded cogs/core modules were found."
+                "No bot components were found."
             )
 
         lines.extend(
             [
                 "",
-                "Versions are generated automatically from each file's contents.",
+                "Files without `__version__` use the baseline **v1.0.0**.",
             ]
         )
 
