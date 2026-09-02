@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import sys
+from pathlib import Path
 
 import discord
 from discord import app_commands
@@ -9,17 +10,22 @@ from discord.ext import commands
 
 from core.command_scope import bind_admin_cog
 from core.logger import log_cmd
-from core.version import BOT_NAME, BOT_VERSION
+from core.version import BOT_NAME, BOT_VERSION, file_revision
 
 
-__version__ = "1.0.1"
+__version__ = "1.1.0"
+
+_REPO_ROOT = Path(__file__).resolve().parents[2]
 
 
-def _module_file_path(module_name: str) -> str:
-    return module_name.replace(".", "/") + ".py"
+def _module_file_path(module_name: str, module_path: Path) -> str:
+    try:
+        return module_path.resolve().relative_to(_REPO_ROOT).as_posix()
+    except ValueError:
+        return module_name.replace(".", "/") + ".py"
 
 
-def _versioned_loaded_modules() -> list[tuple[str, str]]:
+def _loaded_module_versions() -> list[tuple[str, str]]:
     found: list[tuple[str, str]] = []
 
     for module_name, module in tuple(sys.modules.items()):
@@ -28,15 +34,19 @@ def _versioned_loaded_modules() -> list[tuple[str, str]]:
         if module is None:
             continue
 
-        version = getattr(module, "__version__", None)
-        if version is None:
+        module_file = getattr(module, "__file__", None)
+        if not module_file:
+            continue
+        module_path = Path(module_file)
+        if module_path.suffix != ".py":
             continue
 
-        version_text = str(version).strip()
-        if not version_text:
-            continue
-
-        found.append((_module_file_path(module_name), version_text))
+        found.append(
+            (
+                _module_file_path(module_name, module_path),
+                file_revision(module_path),
+            )
+        )
 
     found.sort(
         key=lambda item: (
@@ -120,11 +130,11 @@ class BotVersionsCog(commands.Cog):
         if not await self._require_admin(interaction):
             return
 
-        versioned = _versioned_loaded_modules()
+        versioned = _loaded_module_versions()
 
         lines = [
             f"🔒 **{BOT_NAME} internal versions**",
-            f"Bot: **v{BOT_VERSION}**",
+            f"Deployment: **{BOT_VERSION}**",
             "",
         ]
 
@@ -136,13 +146,13 @@ class BotVersionsCog(commands.Cog):
             )
         else:
             lines.append(
-                "No loaded cogs/core modules have an internal `__version__` yet."
+                "No loaded cogs/core modules were found."
             )
 
         lines.extend(
             [
                 "",
-                "Older files without `__version__` are intentionally hidden.",
+                "Versions are generated automatically from each file's contents.",
             ]
         )
 
