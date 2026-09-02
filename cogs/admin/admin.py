@@ -1,7 +1,7 @@
 # cogs/admin/admin.py
 from __future__ import annotations
 
-__version__ = "1.0.0"
+__version__ = "1.1.0"
 
 import discord
 from discord import app_commands
@@ -1017,6 +1017,271 @@ class AdminCog(commands.Cog):
         await interaction.followup.send(
             f"Closed suggestion poll `{poll_id}`.",
             ephemeral=True,
+        )
+
+    @council.command(
+        name="suggestion_reopen",
+        description="Reopen the latest closed suggestion poll in a channel.",
+    )
+    @app_commands.describe(
+        guild_id="Select the target server",
+        channel_id="Select the poll channel",
+        duration_hours="How many more hours voting should stay open",
+    )
+    async def suggestion_reopen(
+        self,
+        interaction: discord.Interaction,
+        guild_id: str,
+        channel_id: str,
+        duration_hours: app_commands.Range[int, 1, 168] = 24,
+    ):
+        log_cmd("council suggestion_reopen", interaction)
+        if not await self._require_admin(interaction):
+            return
+
+        await ensure_deferred(interaction, ephemeral=True)
+        cog = self.bot.get_cog("SuggestionPollCog")
+        if cog is None:
+            await interaction.followup.send(
+                "Suggestion poll cog is not loaded.",
+                ephemeral=True,
+            )
+            return
+
+        target_guild_id, target_channel_id, error_message = self._target_ids(
+            guild_id,
+            channel_id,
+        )
+        if error_message:
+            await interaction.followup.send(f"❌ {error_message}", ephemeral=True)
+            return
+
+        matches = [
+            (str(poll_id), poll)
+            for poll_id, poll in cog.data.get("polls", {}).items()
+            if int(poll.get("guild_id") or 0) == target_guild_id
+            and int(poll.get("channel_id") or 0) == target_channel_id
+            and poll.get("status") == "closed"
+        ]
+        if not matches:
+            await interaction.followup.send(
+                "No closed suggestion poll found in that channel.",
+                ephemeral=True,
+            )
+            return
+
+        matches.sort(
+            key=lambda item: int(
+                item[1].get("finalized_ts")
+                or item[1].get("created_ts")
+                or 0
+            ),
+            reverse=True,
+        )
+        poll_id, poll = matches[0]
+
+        final_message_id = int(poll.get("final_message_id") or 0)
+        async with cog.lock:
+            poll["status"] = "open"
+            poll["end_ts"] = int(discord.utils.utcnow().timestamp()) + (
+                int(duration_hours) * 3600
+            )
+            poll.pop("final_shortlist", None)
+            poll.pop("finalized_ts", None)
+            poll.pop("tiebreak", None)
+            poll.pop("final_message_id", None)
+            cog.save_data()
+
+        target_guild = self.bot.get_guild(target_guild_id)
+        target_channel = (
+            self._get_message_channel(target_guild, target_channel_id)
+            if target_guild
+            else None
+        )
+        if target_channel and final_message_id:
+            try:
+                final_message = await target_channel.fetch_message(final_message_id)
+                await final_message.delete()
+            except (discord.NotFound, discord.Forbidden, discord.HTTPException):
+                pass
+
+        await cog.update_poll_message(poll_id)
+        message_id = int(poll.get("message_id") or 0)
+        if message_id:
+            cog.remember_persistent_view(poll_id, message_id)
+
+        await interaction.followup.send(
+            f"✅ Reopened suggestion poll `{poll_id}` for "
+            f"**{int(duration_hours)} hours**. Existing votes were kept.",
+            ephemeral=True,
+        )
+
+    @suggestion_reopen.autocomplete("guild_id")
+    async def suggestion_reopen_server_autocomplete(
+        self,
+        interaction: discord.Interaction,
+        current: str,
+    ) -> list[app_commands.Choice[str]]:
+        return await self._server_choices(current)
+
+    @suggestion_reopen.autocomplete("channel_id")
+    async def suggestion_reopen_channel_autocomplete(
+        self,
+        interaction: discord.Interaction,
+        current: str,
+    ) -> list[app_commands.Choice[str]]:
+        return await self._channel_choices(
+            interaction,
+            current,
+            guild_parameter="guild_id",
+        )
+
+    @council.command(
+        name="suggestion_voters",
+        description="Privately show who has and has not voted.",
+    )
+    @app_commands.describe(
+        guild_id="Select the target server",
+        channel_id="Select the poll channel",
+    )
+    async def suggestion_voters(
+        self,
+        interaction: discord.Interaction,
+        guild_id: str,
+        channel_id: str,
+    ):
+        log_cmd("council suggestion_voters", interaction)
+        if not await self._require_admin(interaction):
+            return
+
+        await ensure_deferred(interaction, ephemeral=True)
+        cog = self.bot.get_cog("SuggestionPollCog")
+        if cog is None:
+            await interaction.followup.send(
+                "Suggestion poll cog is not loaded.",
+                ephemeral=True,
+            )
+            return
+
+        target_guild_id, target_channel_id, error_message = self._target_ids(
+            guild_id,
+            channel_id,
+        )
+        if error_message:
+            await interaction.followup.send(f"❌ {error_message}", ephemeral=True)
+            return
+
+        matches = [
+            (str(poll_id), poll)
+            for poll_id, poll in cog.data.get("polls", {}).items()
+            if int(poll.get("guild_id") or 0) == target_guild_id
+            and int(poll.get("channel_id") or 0) == target_channel_id
+        ]
+        if not matches:
+            await interaction.followup.send(
+                "No suggestion poll found in that channel.",
+                ephemeral=True,
+            )
+            return
+
+        matches.sort(
+            key=lambda item: int(item[1].get("created_ts") or 0),
+            reverse=True,
+        )
+        poll_id, poll = matches[0]
+        voter_ids = {
+            int(user_id)
+            for idea in poll.get("ideas", {}).values()
+            if isinstance(idea, dict)
+            for user_id in idea.get("voters", [])
+            if str(user_id).isdigit()
+        }
+
+        target_guild = self.bot.get_guild(target_guild_id)
+        if target_guild is None:
+            await interaction.followup.send(
+                "The target server is not currently available.",
+                ephemeral=True,
+            )
+            return
+
+        members = [member for member in target_guild.members if not member.bot]
+        try:
+            fetched_members = [
+                member
+                async for member in target_guild.fetch_members(limit=None)
+                if not member.bot
+            ]
+            if fetched_members:
+                members = fetched_members
+        except (discord.Forbidden, discord.HTTPException):
+            pass
+
+        members_by_id = {member.id: member for member in members}
+        voted_members = sorted(
+            (
+                members_by_id[user_id]
+                for user_id in voter_ids
+                if user_id in members_by_id
+            ),
+            key=lambda member: member.display_name.casefold(),
+        )
+        not_voted_members = sorted(
+            (member for member in members if member.id not in voter_ids),
+            key=lambda member: member.display_name.casefold(),
+        )
+
+        lines = [
+            f"**Suggestion poll `{poll_id}`**",
+            f"Voted: **{len(voted_members)}** | Not voted: **{len(not_voted_members)}**",
+            "",
+            "**Voted**",
+            *([f"• {member.mention}" for member in voted_members] or ["• Nobody"]),
+            "",
+            "**Not voted**",
+            *(
+                [f"• {member.mention}" for member in not_voted_members]
+                or ["• Nobody"]
+            ),
+        ]
+
+        chunks = []
+        current_chunk = ""
+        for line in lines:
+            candidate = f"{current_chunk}\n{line}" if current_chunk else line
+            if len(candidate) > 1900:
+                chunks.append(current_chunk)
+                current_chunk = line
+            else:
+                current_chunk = candidate
+        if current_chunk:
+            chunks.append(current_chunk)
+
+        for chunk in chunks:
+            await interaction.followup.send(
+                chunk,
+                ephemeral=True,
+                allowed_mentions=discord.AllowedMentions.none(),
+            )
+
+    @suggestion_voters.autocomplete("guild_id")
+    async def suggestion_voters_server_autocomplete(
+        self,
+        interaction: discord.Interaction,
+        current: str,
+    ) -> list[app_commands.Choice[str]]:
+        return await self._server_choices(current)
+
+    @suggestion_voters.autocomplete("channel_id")
+    async def suggestion_voters_channel_autocomplete(
+        self,
+        interaction: discord.Interaction,
+        current: str,
+    ) -> list[app_commands.Choice[str]]:
+        return await self._channel_choices(
+            interaction,
+            current,
+            guild_parameter="guild_id",
         )
 
     @suggestion_close.autocomplete("guild_id")
