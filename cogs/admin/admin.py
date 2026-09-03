@@ -1,7 +1,7 @@
 # cogs/admin/admin.py
 from __future__ import annotations
 
-__version__ = "1.1.0"
+__version__ = "1.1.1"
 
 import discord
 from discord import app_commands
@@ -14,6 +14,20 @@ from core.utils import ensure_deferred
 
 
 MESSAGE_CHANNEL_TYPES = (discord.TextChannel, discord.Thread)
+
+
+def _user_label(user: discord.abc.User) -> str:
+    display_name = discord.utils.escape_mentions(
+        discord.utils.escape_markdown(
+            str(getattr(user, "display_name", user.name))
+        )
+    )
+    username = discord.utils.escape_mentions(
+        discord.utils.escape_markdown(str(user.name))
+    )
+    if display_name.casefold() == username.casefold():
+        return f"@{username}"
+    return f"{display_name} (@{username})"
 
 
 class CouncilMessageModal(discord.ui.Modal):
@@ -1218,29 +1232,46 @@ class AdminCog(commands.Cog):
             pass
 
         members_by_id = {member.id: member for member in members}
-        voted_members = sorted(
+        voted_users: list[tuple[int, str]] = []
+        for user_id in voter_ids:
+            user = members_by_id.get(user_id) or self.bot.get_user(user_id)
+            if user is None:
+                try:
+                    user = await self.bot.fetch_user(user_id)
+                except (
+                    discord.NotFound,
+                    discord.Forbidden,
+                    discord.HTTPException,
+                ):
+                    user = None
+
+            label = (
+                _user_label(user)
+                if user is not None
+                else f"Unknown account (ID `{user_id}`)"
+            )
+            voted_users.append((user_id, label))
+
+        voted_users.sort(key=lambda item: item[1].casefold())
+        not_voted_users = sorted(
             (
-                members_by_id[user_id]
-                for user_id in voter_ids
-                if user_id in members_by_id
+                (member.id, _user_label(member))
+                for member in members
+                if member.id not in voter_ids
             ),
-            key=lambda member: member.display_name.casefold(),
-        )
-        not_voted_members = sorted(
-            (member for member in members if member.id not in voter_ids),
-            key=lambda member: member.display_name.casefold(),
+            key=lambda item: item[1].casefold(),
         )
 
         lines = [
             f"**Suggestion poll `{poll_id}`**",
-            f"Voted: **{len(voted_members)}** | Not voted: **{len(not_voted_members)}**",
+            f"Voted: **{len(voted_users)}** | Not voted: **{len(not_voted_users)}**",
             "",
             "**Voted**",
-            *([f"• {member.mention}" for member in voted_members] or ["• Nobody"]),
+            *([f"• {label}" for _user_id, label in voted_users] or ["• Nobody"]),
             "",
             "**Not voted**",
             *(
-                [f"• {member.mention}" for member in not_voted_members]
+                [f"• {label}" for _user_id, label in not_voted_users]
                 or ["• Nobody"]
             ),
         ]
