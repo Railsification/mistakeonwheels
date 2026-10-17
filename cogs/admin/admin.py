@@ -1,9 +1,10 @@
 # cogs/admin/admin.py
 from __future__ import annotations
 
-__version__ = "1.1.1"
+__version__ = "1.1.2"
 
 import discord
+from typing import Optional
 from discord import app_commands
 from discord.ext import commands
 
@@ -982,17 +983,21 @@ class AdminCog(commands.Cog):
 
     @council.command(
         name="suggestion_close",
-        description="Close an active suggestion poll by server/channel.",
+        description="Close a suggestion poll or active tie-break, optionally without winners.",
     )
     @app_commands.describe(
         guild_id="Select the target server",
         channel_id="Select the poll channel",
+        winning_idea_numbers="Tie-break: choose remaining winners by idea number, comma-separated",
+        no_winner="Close without any winning ideas (overrides existing votes)",
     )
     async def suggestion_close(
         self,
         interaction: discord.Interaction,
         guild_id: str,
         channel_id: str,
+        winning_idea_numbers: Optional[str] = None,
+        no_winner: bool = False,
     ):
         log_cmd("council suggestion_close", interaction)
         if not await self._require_admin(interaction):
@@ -1015,21 +1020,65 @@ class AdminCog(commands.Cog):
             await interaction.followup.send(f"❌ {error_message}", ephemeral=True)
             return
 
-        active = cog.get_open_poll_for_channel(
+        active = cog.get_active_poll_for_channel(
             target_guild_id,
             target_channel_id,
         )
         if not active:
             await interaction.followup.send(
-                "No open suggestion poll in that channel.",
+                "No active suggestion poll or tie-break in that channel.",
                 ephemeral=True,
             )
             return
 
-        poll_id, _ = active
-        await cog.close_poll(poll_id, post_result=True)
+        poll_id, poll = active
+        if no_winner:
+            if winning_idea_numbers and winning_idea_numbers.strip():
+                await interaction.followup.send(
+                    "Use either no_winner or winning_idea_numbers, not both.",
+                    ephemeral=True,
+                )
+                return
+            success, result = await cog.close_without_winner(poll_id)
+            await interaction.followup.send(
+                f"{'✅' if success else '❌'} {result}", ephemeral=True,
+            )
+            return
+
+        if poll.get("status") == "tiebreak":
+            selected = None
+            if winning_idea_numbers and winning_idea_numbers.strip():
+                try:
+                    selected = [
+                        int(number.strip())
+                        for number in winning_idea_numbers.split(",")
+                    ]
+                except ValueError:
+                    await interaction.followup.send(
+                        "Enter idea numbers separated by commas (for example: 3,5).",
+                        ephemeral=True,
+                    )
+                    return
+
+            success, result = await cog.force_close_tiebreak(poll_id, selected)
+            await interaction.followup.send(
+                f"{'✅' if success else '❌'} {result}", ephemeral=True,
+            )
+            return
+
+        if winning_idea_numbers and winning_idea_numbers.strip():
+            await interaction.followup.send(
+                "winning_idea_numbers only applies to an active tie-break.",
+                ephemeral=True,
+            )
+            return
+
+        success = await cog.close_poll(poll_id, post_result=True)
         await interaction.followup.send(
-            f"Closed suggestion poll `{poll_id}`.",
+            (
+                f"✅ Closed suggestion poll `{poll_id}`."
+                if success else f"❌ Could not close suggestion poll `{poll_id}`."
+            ),
             ephemeral=True,
         )
 
@@ -1102,6 +1151,7 @@ class AdminCog(commands.Cog):
             )
             poll.pop("final_shortlist", None)
             poll.pop("finalized_ts", None)
+            poll.pop("closed_without_winner", None)
             poll.pop("tiebreak", None)
             poll.pop("final_message_id", None)
             cog.save_data()
