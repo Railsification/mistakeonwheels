@@ -1,1 +1,54 @@
+name: HotBot rules gate
 
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  source-rules:
+    name: Python syntax and version rules
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - name: Check changed Python source, file headers and version increments
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          PR_BASE: ${{ github.event.pull_request.base.sha }}
+          PR_HEAD: ${{ github.event.pull_request.head.sha }}
+          PUSH_BEFORE: ${{ github.event.before }}
+          CURRENT_SHA: ${{ github.sha }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [[ "$EVENT_NAME" == "pull_request" ]]; then
+            BASE="$PR_BASE"
+            HEAD="$PR_HEAD"
+          else
+            BASE="$PUSH_BEFORE"
+            HEAD="$CURRENT_SHA"
+          fi
+          # Empty before-SHA occurs on branch creation; compare to parent when available.
+          if [[ "$BASE" =~ ^0+$ ]]; then
+            BASE="$(git rev-parse "${HEAD}^" 2>/dev/null || git hash-object -t tree /dev/null)"
+          fi
+          python scripts/validate_hotbot_changes.py --base "$BASE" --head "$HEAD"
+
+  regression-tests:
+    name: Offline suggestion poll regression tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - name: Run offline state, command and notification tests
+        run: python -m unittest discover -s tests -v
