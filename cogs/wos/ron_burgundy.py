@@ -1,6 +1,6 @@
 # cogs/wos/ron_burgundy.py
 from __future__ import annotations
-__version__ = '1.0.0'
+__version__ = '1.1.0'
 """HotBot-side Ron control; the Raspberry Pi initiates every connection.
 
 No game OCR or tablet navigation is performed on Railway. Data is per-guild and
@@ -47,7 +47,7 @@ def baseline():
  return {'schema':1,'revision':1,'alerts':dict(DEFAULT_ALERTS),
          'schedules':json.loads(json.dumps(DEFAULT_SCHEDULE)), 'rules':{}, 'jobs':[],
          'events':{},'receipts':{},'updated_ids':{},'research':{},
-         'channel_id':0,'last_seen':None}
+         'channel_id':0,'last_seen':None,'deliveries':{}}
 
 def normalize(raw):
  b=baseline()
@@ -66,19 +66,25 @@ class RonBurgundyCog(commands.Cog):
  ron=app_commands.Group(name='ron',description='Ron Burgundy game monitoring and alerts')
  HELP_META={'title':'Ron Burgundy monitoring','summary':'View detected WoS events, control alerts and queue Pi checks.',
  'goal':'Keep WoS schedule and Discord announcements in sync.',
- 'how_to_play':'Use /ron events, /ron alerts, /ron alert, /ron check, /ron schedule and /ron channel.',
+ 'how_to_play':'Use /council feature_channel_add with feature ron; use /ron events, /ron alert, /ron check, and /ron schedule.',
  'rules':'Only server managers may use these commands. Pi only pushes changed facts.',
  'details':'No Discord command accesses the tablet directly; the Pi collects queued requests.'}
  def __init__(self,bot):
   self.bot=bot
   self.secret=os.getenv('RON_BRIDGE_SECRET','').strip()
-  self.guild_id=int(os.getenv('RON_GUILD_ID','0') or 0) or primary_data_guild_id(bot)
+  self.guild_id=primary_data_guild_id(bot)
   self.port=int(os.getenv('PORT','0') or 0)
-  self.default_channel_id=int(os.getenv('RON_CHANNEL_ID','0') or 0)
   self._runner=None
   self._lock=asyncio.Lock()
   self._change=asyncio.Event()
   bind_public_cog(self,bot)
+  # Crash/restart midway through Discord send: cannot know if it was received.
+  b=self._read()
+  changed=False
+  for record in b['deliveries'].values():
+   if record.get('state')=='sending':
+    record['state']='uncertain';changed=True
+  if changed:self._save(b)
  async def cog_load(self):
   if not self.secret or not self.guild_id or not self.port:
    info('Ron bridge inactive: configure RON_BRIDGE_SECRET, guild and Railway PORT');return
@@ -141,7 +147,7 @@ class RonBurgundyCog(commands.Cog):
   except (ValueError,TypeError):raise web.HTTPBadRequest()
   updates=payload.get('updates') if isinstance(payload,dict) else None
   if not isinstance(updates,list) or len(updates)>12:raise web.HTTPBadRequest(text='Invalid updates')
-  ack=[];to_send=[]
+  ack=[]
   async with self._lock:
    b=self._read()
    for item in updates:
@@ -151,23 +157,29 @@ class RonBurgundyCog(commands.Cog):
     if kind not in ('event','task','mail','notification','reminder','status','research') or not isinstance(data,dict):continue
     if ident in b['updated_ids']:
      ack.append(ident);continue
+    should_notify=False
+    name=str(data.get('title') or kind)
     if kind=='event':
      title=data.get('title','')
      if not safe_title(title):continue
      key=hashlib.sha256((title.casefold()+'|'+str(data.get('visible_start_date') or data.get('start_utc') or '')).encode()).hexdigest()[:32]
      b['events'][key]=data
      b['alerts'].setdefault(title,False)
-     if b['alerts'].get(title,False) and data.get('status')!='needs_review':
-      to_send.append((ident,title,data))
+     should_notify=bool(b['alerts'].get(title,False)) and data.get('status')!='needs_review'
     elif kind=='status':
      job_id=data.get('job_id')
      if isinstance(job_id,str):
       for j in b['jobs']:
        if j['id']==job_id:j['state']=str(data.get('status','failed'))
     elif kind in ('task','mail','reminder','notification'):
-     name=str(data.get('title') or kind)
-     if b['alerts'].get(name,False):to_send.append((ident,name,data))
-    # mark before external send prevents duplicate @everyone/announcements on retry.
+     should_notify=bool(b['alerts'].get(name,False))
+    if should_notify:
+     # Council feature channels are authoritative; do not use a second channel setting.
+     for cid in dict.fromkeys(self.bot.settings.feature_channels(self.guild_id,'ron')):
+      item_id=ident+':'+str(cid)
+      b['deliveries'].setdefault(item_id,{'id':ident,'channel_id':int(cid),
+                                         'title':name,'data':data,'state':'queued'})
+    # Persist the event and pending Discord deliveries before acknowledging the Pi.
     b['updated_ids'][ident]=utcnow()
     ack.append(ident)
    if len(b['updated_ids'])>2500:
@@ -175,33 +187,70 @@ class RonBurgundyCog(commands.Cog):
    if len(b['events'])>350:
     for k in list(b['events'])[:-250]:b['events'].pop(k,None)
    b['jobs']=b['jobs'][-250:]
+   if len(b['deliveries'])>2400:
+    for k in list(b['deliveries']):
+     if len(b['deliveries'])<=1800:break
+     if b['deliveries'][k].get('state')=='delivered':b['deliveries'].pop(k,None)
    b['last_seen']=utcnow()
    self._save(b)
-  for ident,name,data in to_send:
-   await self._announce(name,data)
+  # Do not send a Discord message while the state lock is held.
+  await self._deliver_pending()
   return web.json_response({'ack':ack})
- async def _announce(self,title,data):
-  b=self._read()
-  cid=int(b.get('channel_id') or self.default_channel_id or 0)
-  if not cid:return
+ async def _deliver_pending(self, limit=12):
+  """Send durable queued messages with explicit delivery states.
+
+  A process crash while sending is marked 'uncertain' rather than replayed
+  automatically, because a duplicate alert would be worse than a visible
+  uncertain delivery. /ron status reports these cases for manual review.
+  """
+  for _ in range(limit):
+   async with self._lock:
+    b=self._read()
+    key=next((k for k,v in b['deliveries'].items() if v.get('state')=='queued'),None)
+    if key is None:return
+    item=b['deliveries'][key]
+    item['state']='sending'
+    item['attempts']=int(item.get('attempts',0))+1
+    self._save(b)
+   ok=await self._send_notification(item['title'],item['data'],item['channel_id'])
+   async with self._lock:
+    b=self._read()
+    target=b['deliveries'].get(key)
+    if target and target.get('state')=='sending':
+     target['state']='delivered' if ok else 'failed'
+     target['updated_utc']=utcnow()
+     self._save(b)
+ async def _send_notification(self,title,data,cid):
+  safe=discord.utils.escape_mentions(str(title)[:110])
+  if data.get('currency'):
+   expiry=str(data.get('end_utc') or 'Unconfirmed')[:45]
+   currency=discord.utils.escape_mentions(str(data['currency'])[:80])
+   message=f'**WoS · {safe}**\nSpend {currency} before the shop closes: {expiry} UTC. One-hour warning.'
+  elif data.get('kind') in ('mail','task'):
+   summary=discord.utils.escape_mentions(str(data.get('summary',''))[:1300]).replace(chr(96)*3,chr(39)*3)
+   message=f'**WoS · {safe} updated**\n```text\n{summary}\n```'
+  else:
+   start=data.get('start_utc') or data.get('visible_start_date') or 'Unconfirmed'
+   end=data.get('end_utc') or data.get('visible_end_date') or 'Unconfirmed'
+   message=f'**WoS · {safe}**\nStart: {str(start)[:40]} UTC\nEnd: {str(end)[:40]} UTC'
   try:
-   channel=self.bot.get_channel(cid) or await self.bot.fetch_channel(cid)
-   if not hasattr(channel,'send'):return
-   safe=discord.utils.escape_mentions(str(title)[:110])
-   if data.get('currency'):
-    expiry=str(data.get('end_utc') or 'Unconfirmed')[:45]
-    currency=discord.utils.escape_mentions(str(data['currency'])[:80])
-    message=f'**WoS · {safe}**\nSpend {currency} before the shop closes: {expiry} UTC. One-hour warning.'
-   elif data.get('kind') in ('mail','task'):
-    summary=discord.utils.escape_mentions(str(data.get('summary',''))[:1300]).replace(chr(96)*3,chr(39)*3)
-    message=f'**WoS · {safe} updated**\n```text\n{summary}\n```'
-   else:
-    start=data.get('start_utc') or data.get('visible_start_date') or 'Unconfirmed'
-    end=data.get('end_utc') or data.get('visible_end_date') or 'Unconfirmed'
-    message=f'**WoS · {safe}**\nStart: {str(start)[:40]} UTC\nEnd: {str(end)[:40]} UTC'
+   channel=self.bot.get_channel(int(cid)) or await self.bot.fetch_channel(int(cid))
+   if not isinstance(channel,(discord.TextChannel,discord.Thread)) or not channel.guild or channel.guild.id!=self.guild_id:
+    return False
+   member=channel.guild.me
+   if member is not None and not channel.permissions_for(member).send_messages:
+    return False
    await channel.send(message,allowed_mentions=discord.AllowedMentions.none())
-  except (discord.Forbidden,discord.HTTPException,ValueError) as exc:
-   err(f'Ron notification could not post: {type(exc).__name__}')
+   return True
+  except (discord.Forbidden,discord.HTTPException,ValueError,TypeError) as exc:
+   err(f'Ron notification could not post in council-configured channel: {type(exc).__name__}')
+   return False
+ async def _announce(self,title,data):
+  """Compatibility entrypoint, now using only council channel assignments."""
+  results=[]
+  for cid in dict.fromkeys(self.bot.settings.feature_channels(self.guild_id,'ron')):
+   results.append(await self._send_notification(title,data,cid))
+  return all(results) if results else False
  async def research(self,request):
   """HotBot-only OpenAI web lookup for NEW event names; never trusted as a game date."""
   self._auth(request)
@@ -236,8 +285,9 @@ class RonBurgundyCog(commands.Cog):
   if not await self._manager(interaction):return
   b=self._read()
   pending=sum(j['state']=='queued' for j in b['jobs'])
+  delivery_errors=sum(x.get('state') in ('failed','uncertain') for x in b['deliveries'].values())
   await interaction.response.send_message(
-   f"Pi last update: {b['last_seen'] or 'Never'}\nKnown events: {len(b['events'])}\nPending checks: {pending}\nAlert channel: {b['channel_id'] or self.default_channel_id or 'Not selected'}",ephemeral=True)
+   f"Pi last update: {b['last_seen'] or 'Never'}\nKnown events: {len(b['events'])}\nPending checks: {pending}\nFailed/uncertain notification deliveries: {delivery_errors}\nAlert channels (council feature ron): {', '.join(str(x) for x in self.bot.settings.feature_channels(self.guild_id,'ron')) or 'Not selected'}",ephemeral=True)
  @ron.command(name='events',description='View the event schedule last supplied by the Pi')
  async def events_cmd(self,interaction:discord.Interaction):
   if not await self._manager(interaction):return
@@ -290,7 +340,7 @@ class RonBurgundyCog(commands.Cog):
    b['schedules'][kind.value]['interval_seconds']=seconds
    self._signal(b)
   await interaction.response.send_message(f'{kind.value} interval set to {seconds} seconds UTC-independent; Pi will sync.',ephemeral=True)
- @ron.command(name='channel',description='Set the channel for enabled Ron notifications')
+ @ron.command(name='channel',description='Compatibility: add a Ron channel through council settings')
  async def channel_cmd(self,interaction:discord.Interaction,channel:discord.TextChannel):
   if not await self._manager(interaction):return
   me=interaction.guild.me if interaction.guild else None
@@ -298,8 +348,20 @@ class RonBurgundyCog(commands.Cog):
    await interaction.response.send_message('HotBot cannot send messages in that channel.',ephemeral=True)
    return
   async with self._lock:
-   b=self._read();b['channel_id']=channel.id;self._signal(b)
-  await interaction.response.send_message(f'Ron alert channel saved: {channel.mention}.',ephemeral=True)
+   self.bot.settings.add_feature_channel(self.guild_id,'ron',channel.id)
+  await interaction.response.send_message(f'Ron feature **ron** added to {channel.mention}; council feature settings updated.',ephemeral=True)
+ @ron.command(name='retry_failed',description='Retry failed Ron notifications after resolving channel permissions')
+ async def retry_failed_cmd(self,interaction:discord.Interaction):
+  if not await self._manager(interaction):return
+  async with self._lock:
+   b=self._read()
+   count=0
+   for record in b['deliveries'].values():
+    if record.get('state')=='failed':
+     record['state']='queued';count+=1
+   self._save(b)
+  await self._deliver_pending()
+  await interaction.response.send_message(f'Retried {count} failed notifications. Uncertain deliveries require manual review to avoid duplicates.',ephemeral=True)
  @ron.command(name='check',description='Queue one check for the Pi, without opening the game on Railway')
  @app_commands.choices(kind=[app_commands.Choice(name=k.replace('_',' ').title(),value=k) for k in sorted(JOBS)])
  async def check_cmd(self,interaction:discord.Interaction,kind:app_commands.Choice[str]):
