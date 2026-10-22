@@ -1,6 +1,6 @@
 # cogs/wos/ron_burgundy.py
 from __future__ import annotations
-__version__ = '1.2.0'
+__version__ = '1.2.1'
 """HotBot-side Ron control; the Raspberry Pi initiates every connection.
 
 Ron is configured independently in every HotBot guild. Existing Pi clients
@@ -61,7 +61,14 @@ def normalize(raw):
  b = baseline()
  if isinstance(raw, dict):
   for k in b:
-   if k in raw and isinstance(raw[k], type(b[k])):
+   if k not in raw:
+    continue
+   # last_seen begins as None but becomes an ISO-8601 string after Pi polls.
+   # Comparing only against the baseline type discarded the persisted timestamp.
+   if k == 'last_seen':
+    if raw[k] is None or isinstance(raw[k], str):
+     b[k] = raw[k]
+   elif isinstance(raw[k], type(b[k])):
     b[k] = raw[k]
  return b
 
