@@ -1,6 +1,6 @@
 # cogs/wos/ron_burgundy.py
 from __future__ import annotations
-__version__ = '1.2.1'
+__version__ = '1.2.2'
 """HotBot-side Ron control; the Raspberry Pi initiates every connection.
 
 Ron is configured independently in every HotBot guild. Existing Pi clients
@@ -14,7 +14,7 @@ import json
 import os
 import re
 import secrets
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 from typing import Any
 
 import discord
@@ -42,7 +42,7 @@ DEFAULT_ALERTS = {
  "Dragonborn's Truck": False, 'Frostwind Journey': False,
  'Frostdragon Tyrant': False,
  "Dragonborn's Truck — spend reminder": True,
- 'Task List': True, 'Alliance Mail': False, 'System Mail': False,
+ 'Task List': False, 'Alliance Mail': False, 'System Mail': False,
 }
 
 
@@ -54,7 +54,8 @@ def baseline():
  return {'schema': 1, 'revision': 1, 'alerts': dict(DEFAULT_ALERTS),
          'schedules': json.loads(json.dumps(DEFAULT_SCHEDULE)), 'rules': {}, 'jobs': [],
          'events': {}, 'receipts': {}, 'updated_ids': {}, 'research': {},
-         'channel_id': 0, 'last_seen': None, 'deliveries': {}}
+         'channel_id': 0, 'last_seen': None, 'deliveries': {},
+         'event_baseline_at': None}
 
 
 def normalize(raw):
@@ -65,7 +66,7 @@ def normalize(raw):
     continue
    # last_seen begins as None but becomes an ISO-8601 string after Pi polls.
    # Comparing only against the baseline type discarded the persisted timestamp.
-   if k == 'last_seen':
+   if k in ('last_seen', 'event_baseline_at'):
     if raw[k] is None or isinstance(raw[k], str):
      b[k] = raw[k]
    elif isinstance(raw[k], type(b[k])):
@@ -75,6 +76,88 @@ def normalize(raw):
 
 def safe_title(s):
  return isinstance(s, str) and 1 <= len(s.strip()) <= 110 and '\n' not in s
+
+
+def parsed_utc(value):
+ if not isinstance(value, str) or not value.strip():
+  return None
+ try:
+  date = datetime.fromisoformat(value.strip().replace('Z', '+00:00'))
+  return date.astimezone(timezone.utc) if date.tzinfo else None
+ except ValueError:
+  return None
+
+
+def event_is_current(data, now=None):
+ """Never announce an expired or stale scan as a current event."""
+ now = now or datetime.now(timezone.utc)
+ observed = parsed_utc(data.get('observed_utc'))
+ if observed is None or not (-timedelta(minutes=5) <= now-observed <= timedelta(hours=6)):
+  return False
+ end = parsed_utc(data.get('end_utc'))
+ if end is not None:
+  return end > now
+ visible_end = data.get('visible_end_date')
+ if isinstance(visible_end, str):
+  try:
+   return datetime.fromisoformat(visible_end[:10]).date() >= now.date()
+  except ValueError:
+   pass
+ start = parsed_utc(data.get('start_utc'))
+ if start is not None:
+  return start > now
+ visible_start = data.get('visible_start_date')
+ if isinstance(visible_start, str):
+  try:
+   return datetime.fromisoformat(visible_start[:10]).date() >= now.date()
+  except ValueError:
+   pass
+ return False
+
+
+def event_changes(previous, data):
+ fields = ('start_utc', 'end_utc', 'visible_start_date', 'visible_end_date')
+ return [field for field in fields if previous.get(field) != data.get(field)]
+
+
+def alert_text(title, data):
+ """None means intentionally silent, not a delivery failure."""
+ safe = discord.utils.escape_mentions(str(title)[:110])
+ if data.get('currency'):
+  if data.get('expiry_confirmed') is not True:
+   return None
+  expire = parsed_utc(data.get('end_utc'))
+  if expire is None or expire <= datetime.now(timezone.utc):
+   return None
+  currency = discord.utils.escape_mentions(str(data['currency'])[:80])
+  return f'**WoS · {safe}**\nSpend remaining **{currency}** before <t:{int(expire.timestamp())}:F>. This is the confirmed one-hour deadline reminder.'
+ if data.get('notice_type') == 'urgent_text':
+  summary = str(data.get('summary') or '').strip().replace(chr(96)*3, chr(39)*3)
+  if not summary:
+   return None
+  short = discord.utils.escape_mentions(' '.join(summary.split())[:250])
+  return f'**WoS · {safe}: action required**\n{short}'
+ if data.get('notice_type') not in ('new_event', 'schedule_changed'):
+  return None
+ if data.get('status') != 'times_from_popup' or not event_is_current(data):
+  return None
+ start = parsed_utc(data.get('start_utc'))
+ # Rule-derived durations are not confirmed end times and must never
+ # appear as precise Discord deadlines.
+ end = parsed_utc(data.get('end_utc')) if data.get('duration_source') != 'rule' else None
+ if start is None and end is None:
+  return None
+ change = data['notice_type'] == 'schedule_changed'
+ header = f'**WoS · {safe} {"schedule changed" if change else "scheduled"}**'
+ fields = set(data.get('changed_fields', []))
+ details = []
+ if start and (not change or 'start_utc' in fields):
+  details.append(f'Starts <t:{int(start.timestamp())}:F>')
+ if end and (not change or 'end_utc' in fields):
+  details.append(f'Ends <t:{int(end.timestamp())}:F>')
+ if not details:
+  return None
+ return header + '\n' + '\n'.join(details)
 
 
 def can_manage(interaction):
@@ -102,6 +185,7 @@ class RonBurgundyCog(commands.Cog):
   self.port = int(os.getenv('PORT', '0') or 0)
   self._runner = None
   self._lock = asyncio.Lock()
+  self._research_lock = asyncio.Lock()
   self._change = asyncio.Event()
   bind_public_cog(self, bot)
   # Mark interrupted sends uncertain; never replay them automatically.
@@ -272,6 +356,7 @@ class RonBurgundyCog(commands.Cog):
    return ident
 
   should_notify = False
+  notice = data
   name = str(data.get('title') or kind)
   if kind == 'event':
    title = data.get('title', '')
@@ -279,24 +364,52 @@ class RonBurgundyCog(commands.Cog):
     return None
    key = hashlib.sha256((title.casefold() + '|' + str(
     data.get('visible_start_date') or data.get('start_utc') or '')).encode()).hexdigest()[:32]
+   previous = b['events'].get(key)
+   # A newly connected Pi sends its existing calendar history in batches.
+   # Baseline that history silently for 30 minutes (durable across restarts).
+   if b.get('event_baseline_at') is None:
+    b['event_baseline_at'] = utcnow()
+   seeded = parsed_utc(b.get('event_baseline_at'))
+   baseline_period = seeded is None or datetime.now(timezone.utc)-seeded < timedelta(minutes=30)
+   changes = event_changes(previous, data) if isinstance(previous, dict) else []
    b['events'][key] = data
    b['alerts'].setdefault(title, False)
-   should_notify = bool(b['alerts'].get(title, False)) and data.get('status') != 'needs_review'
+   is_verified = data.get('status') == 'times_from_popup'
+   meaningful = not isinstance(previous, dict) or bool(changes)
+   # The baseline is a cache load, not a new alliance announcement.
+   # A genuine correction to an already-confirmed time should not wait
+   # for the onboarding quiet period; OCR precision upgrades still do.
+   confirmed_correction = (isinstance(previous, dict)
+                           and previous.get('status') == 'times_from_popup'
+                           and any(f in changes for f in ('start_utc', 'end_utc')))
+   should_notify = (bool(b['alerts'].get(title, False))
+                    and (not baseline_period or confirmed_correction)
+                    and meaningful and is_verified and event_is_current(data))
+   if should_notify:
+    notice = {**data, 'notice_type': 'schedule_changed' if previous else 'new_event',
+              'changed_fields': changes}
   elif kind == 'status':
    job_id = data.get('job_id')
    if isinstance(job_id, str):
     for job in b['jobs']:
      if isinstance(job, dict) and job.get('id') == job_id:
       job['state'] = str(data.get('status', 'failed'))
-  elif kind in ('task', 'mail', 'reminder', 'notification'):
-   should_notify = bool(b['alerts'].get(name, False))
+  elif kind == 'reminder':
+   should_notify = (bool(b['alerts'].get(name, False)) and bool(data.get('currency'))
+                    and data.get('expiry_confirmed') is True)
+  elif kind in ('task', 'mail', 'notification'):
+   # OCR changes and routine tasks are retained privately. Explicit urgent
+   # notifications must be structured before they can be announced.
+   should_notify = bool(b['alerts'].get(name, False)) and data.get('action_required') is True
+   if should_notify:
+    notice = {**data, 'notice_type': 'urgent_text'}
 
   if should_notify:
    for cid in dict.fromkeys(self.bot.settings.feature_channels(guild_id, 'ron')):
     item_id = ident + ':' + str(cid)
     b['deliveries'].setdefault(item_id, {
      'id': ident, 'channel_id': int(cid), 'title': name,
-     'data': data, 'state': 'queued'})
+     'data': notice, 'state': 'queued'})
   b['updated_ids'][ident] = utcnow()
   if len(b['updated_ids']) > 2500:
    for k in list(b['updated_ids'])[:-1800]:
@@ -380,6 +493,16 @@ class RonBurgundyCog(commands.Cog):
     if selected is None:
      return
    gid, key, item = selected
+   # Old queued calendar dumps and stale alerts are deliberately suppressed.
+   if alert_text(item['title'], item['data']) is None:
+    async with self._lock:
+     b = self._read(gid)
+     record = b['deliveries'].get(key)
+     if record and record.get('state') == 'sending':
+      record['state'] = 'suppressed'
+      record['updated_utc'] = utcnow()
+      self._save(b, gid)
+    continue
    ok = await self._send_notification(item['title'], item['data'], item['channel_id'], gid)
    async with self._lock:
     b = self._read(gid)
@@ -390,18 +513,9 @@ class RonBurgundyCog(commands.Cog):
      self._save(b, gid)
 
  async def _send_notification(self, title, data, cid, guild_id=None):
-  safe = discord.utils.escape_mentions(str(title)[:110])
-  if data.get('currency'):
-   expiry = str(data.get('end_utc') or 'Unconfirmed')[:45]
-   currency = discord.utils.escape_mentions(str(data['currency'])[:80])
-   message = f'**WoS · {safe}**\nSpend {currency} before the shop closes: {expiry} UTC. One-hour warning.'
-  elif data.get('kind') in ('mail', 'task'):
-   summary = discord.utils.escape_mentions(str(data.get('summary', ''))[:1300]).replace(chr(96)*3, chr(39)*3)
-   message = f'**WoS · {safe} updated**\n```text\n{summary}\n```'
-  else:
-   start = data.get('start_utc') or data.get('visible_start_date') or 'Unconfirmed'
-   end = data.get('end_utc') or data.get('visible_end_date') or 'Unconfirmed'
-   message = f'**WoS · {safe}**\nStart: {str(start)[:40]} UTC\nEnd: {str(end)[:40]} UTC'
+  message = alert_text(title, data)
+  if message is None:
+   return True  # Legacy compatibility; suppressed notifications are not errors.
   try:
    channel = self.bot.get_channel(int(cid)) or await self.bot.fetch_channel(int(cid))
    expected_guild = int(guild_id or self.guild_id)
@@ -426,8 +540,60 @@ class RonBurgundyCog(commands.Cog):
    results.append(await self._send_notification(title, data, cid, gid))
   return all(results) if results else False
 
+ async def _research_guide(self, title, target_guild=None):
+  """Cache one sourced guide per event name, reusable by Pi and /ron info.
+
+  Multi-guild legacy Pi requests fill all configured guild caches. Never
+  invent a live alliance schedule from generic public documentation.
+  """
+  if not safe_title(title):
+   raise web.HTTPBadRequest(text='Invalid event name')
+  guilds = [target_guild] if target_guild is not None else self._guild_ids()
+  async with self._research_lock:
+   async with self._lock:
+    cached = next((self._read(gid)['research'].get(title) for gid in guilds
+                   if self._read(gid)['research'].get(title)), None)
+    if cached:
+     # Older installations cached only the primary guild. Safely share the
+     # same public event guide with other configured HotBot guilds.
+     for gid in guilds:
+      b=self._read(gid)
+      if title not in b['research']:
+       b['research'][title]=cached
+       self._save(b,gid)
+     return cached, True
+   key = os.getenv('OPENAI_API_KEY', '').strip()
+   if not key:
+    raise web.HTTPServiceUnavailable(text='Event research unavailable: OPENAI_API_KEY not configured on Railway')
+   try:
+    from openai import AsyncOpenAI
+    client = AsyncOpenAI(api_key=key, timeout=36)
+    response = await client.responses.create(
+     model=os.getenv('RON_RESEARCH_MODEL', 'gpt-4.1-mini'),
+     tools=[{'type': 'web_search'}], store=False,
+     input=('Research the Whiteout Survival event ' + title + '. '
+            'Write a concise, practical guide for alliance members and leaders: '
+            'what it is, what players actually need to do, relevant sign-up and preparation, '
+            'event phases, and any currency or shop that needs spending before expiry. '
+            'Use official Century Games support and reputable WoS community guides. '
+            'Give source URLs. Distinguish confirmed information from uncertainty. '
+            'Never invent current or upcoming in-game event dates, times, or a shop expiry.'),
+     max_output_tokens=650)
+    result = str(response.output_text).strip()[:5000]
+    if not result:
+     raise ValueError('Empty event research response')
+   except Exception as exc:
+    err('Ron event research unavailable: ' + type(exc).__name__)
+    raise web.HTTPServiceUnavailable(text='Event research temporarily unavailable') from exc
+   async with self._lock:
+    for gid in guilds:
+     b=self._read(gid)
+     b['research'][title]=result
+     self._save(b,gid)
+   return result, False
+
  async def research(self, request):
-  """HotBot-only OpenAI lookup for NEW event names, never a game date."""
+  """Authenticated Pi route; never returns invented game-state dates."""
   self._auth(request)
   target_guild = self._requested_guild(request)
   try:
@@ -435,36 +601,8 @@ class RonBurgundyCog(commands.Cog):
   except (ValueError, TypeError):
    raise web.HTTPBadRequest()
   title = data.get('title', '') if isinstance(data, dict) else ''
-  if not safe_title(title):
-   raise web.HTTPBadRequest(text='Invalid title')
-  async with self._lock:
-   b = self._read(target_guild)
-   cached = b['research'].get(title)
-   if cached:
-    return web.json_response({'result': cached, 'cached': True})
-  key = os.getenv('OPENAI_API_KEY', '').strip()
-  if not key:
-   raise web.HTTPServiceUnavailable(text='OpenAI not configured')
-  try:
-   from openai import AsyncOpenAI
-   client = AsyncOpenAI(api_key=key, timeout=36)
-   response = await client.responses.create(
-    model=os.getenv('RON_RESEARCH_MODEL', 'gpt-4.1-mini'),
-    tools=[{'type': 'web_search'}], store=False,
-    input=('Research the Whiteout Survival event ' + title +
-           '. Use official Century Games help and reputable community wiki sources. '
-           'Summarize confirmed event duration, associated currency/shop expiry and relevant notification timing, '
-           'include source URLs. Mark unknown facts unknown. Do NOT invent dates for a specific game state.'),
-    max_output_tokens=600)
-   result = str(response.output_text)[:5000]
-  except Exception as exc:
-   err('Ron AI event research unavailable: ' + type(exc).__name__)
-   raise web.HTTPServiceUnavailable(text='Research temporarily unavailable') from exc
-  async with self._lock:
-   b = self._read(target_guild)
-   b['research'][title] = result
-   self._save(b, target_guild)
-  return web.json_response({'result': result, 'cached': False})
+  result, cached = await self._research_guide(title, target_guild)
+  return web.json_response({'result': result, 'cached': cached})
 
  @ron.command(name='status', description='View Pi health and pending Ron checks')
  async def status_cmd(self, interaction: discord.Interaction):
@@ -486,10 +624,32 @@ class RonBurgundyCog(commands.Cog):
   if not await self._manager(interaction):
    return
   b = self._read(interaction.guild_id)
-  rows = sorted(b['events'].values(), key=lambda x: str(
-   x.get('visible_start_date') or x.get('start_utc') or ''))[:30]
-  lines = [f"{x.get('title', '?')}: {x.get('start_utc') or x.get('visible_start_date') or '?'} → {x.get('end_utc') or x.get('visible_end_date') or '?'}" for x in rows]
-  await interaction.response.send_message(('\n'.join(lines) or 'No events received yet.')[:1900], ephemeral=True)
+  now = datetime.now(timezone.utc)
+  rows = []
+  for event in b['events'].values():
+   if not isinstance(event, dict) or not event.get('title'):
+    continue
+   end = parsed_utc(event.get('end_utc'))
+   if end and end <= now:
+    continue
+   if not end and isinstance(event.get('visible_end_date'), str):
+    try:
+     if datetime.fromisoformat(event['visible_end_date'][:10]).date() < now.date():
+      continue
+    except ValueError:
+     continue
+   start = parsed_utc(event.get('start_utc'))
+   if start is None and event.get('visible_start_date'):
+    date = str(event['visible_start_date'])[:10]
+    label = f'{date} (time unconfirmed)'
+   elif start is not None:
+    label = f'<t:{int(start.timestamp())}:F>'
+   else:
+    continue
+   rows.append((start or datetime.max.replace(tzinfo=timezone.utc), str(event['title']), label))
+  rows.sort(key=lambda x: x[0])
+  lines = [f'{discord.utils.escape_mentions(name)}: {date}' for _, name, date in rows[:20]]
+  await interaction.response.send_message(('\n'.join(lines) or 'No current/upcoming event dates confirmed.')[:1900], ephemeral=True)
 
  @ron.command(name='alerts', description='Show available event notifications')
  async def alerts_cmd(self, interaction: discord.Interaction):
@@ -537,15 +697,27 @@ class RonBurgundyCog(commands.Cog):
    f'Event rule updated for {discord.utils.escape_mentions(event)}. The Pi will receive it on its next connection.',
    ephemeral=True)
 
- @ron.command(name='info', description='Read cached researched information about an event')
+ @ron.command(name='info', description='Read or research a sourced WoS event guide')
  async def info_cmd(self, interaction: discord.Interaction, event: str):
   if not await self._manager(interaction):
    return
+  if not safe_title(event):
+   await interaction.response.send_message('Invalid event name.', ephemeral=True)
+   return
   b = self._read(interaction.guild_id)
-  text = b['research'].get(event)
-  await interaction.response.send_message(
-   discord.utils.escape_mentions(str(text or 'No research cached for this event yet.'))[:1900],
-   ephemeral=True)
+  result = b['research'].get(event)
+  if result:
+   await interaction.response.send_message(
+    discord.utils.escape_mentions(str(result))[:1900], ephemeral=True)
+   return
+  # Web research may exceed Discord's initial response deadline.
+  await interaction.response.defer(thinking=True, ephemeral=True)
+  try:
+   result, _ = await self._research_guide(event, interaction.guild_id)
+   reply = discord.utils.escape_mentions(str(result))[:1900]
+  except web.HTTPServiceUnavailable:
+   reply = 'Research is unavailable. Check the OpenAI API configuration on Railway.'
+  await interaction.followup.send(reply, ephemeral=True)
 
  @ron.command(name='interval', description='Set the interval for chat or Alliance Help checks')
  @app_commands.choices(kind=[app_commands.Choice(name='Chat', value='chat'),
