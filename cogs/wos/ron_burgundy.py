@@ -1,6 +1,6 @@
 # cogs/wos/ron_burgundy.py
 from __future__ import annotations
-__version__ = '1.4.1'
+__version__ = '1.4.2'
 """HotBot-side Ron control; the Raspberry Pi initiates every connection.
 
 Ron is configured independently in every HotBot guild. Existing Pi clients
@@ -468,7 +468,7 @@ class RonBurgundyCog(commands.Cog):
    line=str(data.get('text') or '').strip()
    source=data.get('source')
    observed=parsed_utc(data.get('observed_utc'))
-   if source!='alliance_chat' or not 9<=len(line)<=250 or observed is None:
+   if source!='alliance_chat' or not (4<=len(line)<=250 if line.startswith('!') else 9<=len(line)<=250) or observed is None:
     return None
    if abs((datetime.now(timezone.utc)-observed).total_seconds()) > 600:
     # Stale offline OCR must be acknowledged without ever being announced;
@@ -1200,7 +1200,12 @@ class RonBurgundyCog(commands.Cog):
  async def diagnose_cmd(self,interaction:discord.Interaction):
   if not await self._manager(interaction):return
   if interaction.guild_id != self.guild_id:
-   await interaction.response.send_message("Run this on Ron's primary guild.",ephemeral=True)
+   home=self.bot.get_guild(self.guild_id) if self.guild_id else None
+   label=home.name if home else f'guild ID {self.guild_id}'
+   await interaction.response.send_message(
+    f'Ron diagnostics run on the primary server: **{discord.utils.escape_mentions(label)}** '
+    f'(`{self.guild_id}`). You are in `{interaction.guild_id}`. '
+    'This is a server assignment issue, not a tablet scan result.', ephemeral=True)
    return
   queued=[];existing=[]
   async with self._lock:
