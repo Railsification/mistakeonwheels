@@ -1,6 +1,6 @@
 # cogs/wos/ron_burgundy.py
 from __future__ import annotations
-__version__ = '1.4.2'
+__version__ = '1.4.3'
 """HotBot-side Ron control; the Raspberry Pi initiates every connection.
 
 Ron is configured independently in every HotBot guild. Existing Pi clients
@@ -1199,14 +1199,6 @@ class RonBurgundyCog(commands.Cog):
  @ron.command(name='diagnose',description='Queue Chat, Task List, Mail, Calendar and Help checks')
  async def diagnose_cmd(self,interaction:discord.Interaction):
   if not await self._manager(interaction):return
-  if interaction.guild_id != self.guild_id:
-   home=self.bot.get_guild(self.guild_id) if self.guild_id else None
-   label=home.name if home else f'guild ID {self.guild_id}'
-   await interaction.response.send_message(
-    f'Ron diagnostics run on the primary server: **{discord.utils.escape_mentions(label)}** '
-    f'(`{self.guild_id}`). You are in `{interaction.guild_id}`. '
-    'This is a server assignment issue, not a tablet scan result.', ephemeral=True)
-   return
   queued=[];existing=[]
   async with self._lock:
    b=self._read(interaction.guild_id)
