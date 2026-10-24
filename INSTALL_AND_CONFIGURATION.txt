@@ -1,0 +1,98 @@
+RON BURGUNDY v2.7.3 — ONE-TIME UPGRADE AND REMOTE UPDATES
+==========================================================
+
+A. RAILWAY / GITHUB COG (EXACT FILE NAME AND PATH, NEVER RENAME)
+Replace cogs/wos/ron_burgundy.py with the one included in this archive:
+  cogs/wos/ron_burgundy.py
+Its internal __version__ is 1.3.1; Railway needs this new cog to recognise
+plans, Legion starts, Arena/Stamina notices, and Notice/Personal scan jobs.
+Confirm the Railway deployment succeeds. Do NOT create a second cog file.
+Do NOT upload release code before verifying the GitHub commit from your phone.
+
+B. PI — USING EXISTING CX FILE EXPLORER SFTP + SSH ONE LAST TIME
+Copy ron_burgundy_pi_hotbot_v2.7.3.zip into /home/railsification/ on the Pi.
+In your existing SSH app paste this single command:
+
+mkdir -p /tmp/ron-local-v273 && unzip -oq ~/ron_burgundy_pi_hotbot_v2.7.3.zip -d /tmp/ron-local-v273 && sudo env RON_ENABLE_MONITOR=1 RON_ENABLE_UPDATES=1 bash /tmp/ron-local-v273/tools/ron_burgundy/install.sh
+
+The installer checks service health and rolls back if the dashboard fails.
+Config, secret, route calibration, SQLite scans, approved plans and legacy
+reading data are not wiped. It deletes old Ron installation ZIPs only after
+success and keeps the previous code release as rollback.
+
+C. REMOTE PI UPDATES: COMMIT SOURCE AND RELEASE WORKFLOW ONCE
+The current GitHub repo has the Railway cog but lacks the Pi code and release
+workflow. This ZIP contains the exact structure to commit to GitHub main:
+  tools/ron_burgundy/ (including 85 events/*.py modules)
+  tests/test_ron_*.py
+  .github/workflows/ron-burgundy-release.yml
+  README_FIRST.txt, INSTALL_AND_CONFIGURATION.txt,
+  FILES_AND_VERSIONS.txt, EVENT_PLAYBOOKS.md
+  cogs/wos/ron_burgundy.py
+
+After those source files are uploaded and CI succeeds, the workflow publishes
+an IMMUTABLE versioned GitHub Release with two assets:
+  ron_burgundy_pi_monitor.zip
+  ron_burgundy_pi_monitor.zip.sha256
+For each future change, bump the release tag in install.sh, commit source,
+verify Actions published it; the Pi's timer will pick up the newer version
+with no SFTP or SSH session. Never overwrite the assets of an old release.
+
+IMPORTANT: the repo/GitHub workflow upload was NOT performed by this archive.
+The authenticated GitHub integration previously rejected writes with HTTP 403.
+Do not assume automatic updates can obtain unpublished releases.
+
+D. DISCORD CONTROLS — NO PI TERMINAL REQUIRED AFTER SETUP
+In your server's Ron channel:
+  /ron check kind: Task List
+  /ron check kind: Alliance Notice
+  /ron check kind: Personal (requires calibration)
+  /ron status
+  /ron events
+
+To preload alliance-specific plans (event choices are built into command):
+  /ron plan_set event: Brothers in Arms start_date: 2026-10-24 day: 1
+     instructions: Shield until alliance leadership confirms PvP rules.
+  /ron plan_set event: SvS Preparation start_date: 2026-10-26 day: 3
+     instructions: Complete today's officer-recommended upgrades.
+  /ron plan
+  /ron plan_pending
+  /ron plan_approve proposal_id: ... start_date: ... day: ...
+
+To let a specific user preload instructions privately:
+  /ron plan_editor user: @Tanke allow: True
+That approved person DMs HotBot/Ron with the exact text:
+  ron plan bia | 2026-10-24 | 1 | Shield until R4 approval
+  ron plan svs | 2026-10-26 | 2 | Follow today's upgrade priorities
+The bot accepts DMs only from managers or authorised editors for exactly one
+configured Ron server; OCR that appears to be from Tanke remains an untrusted
+draft until approved by a manager. No automated in-game messages are sent.
+
+E. VERIFY
+  readlink -f /opt/ron-burgundy/current
+  sudo systemctl is-active ron-burgundy-local
+  sudo systemctl is-enabled ron-burgundy-update.timer
+Expected current: /opt/ron-burgundy/releases/ron-pi-v2.7.3
+
+Run /ron check Task List and /ron status in Discord. A completed/failed
+status is NOT proof of accurate OCR; verify the read battle slots per Legion.
+The Arena/Stamina daily reminders are advisory, not proof of items left.
+
+No WoS public API or paid API service has been added.
+
+
+F. v2.7.3 DAILY CHECKS AND DEDUPLICATION
+Calendar: one scheduled check after 00:05 UTC per day.
+Task List: four default windows after 01:15, 07:15, 13:15 and 19:15 UTC,
+with up to 150 seconds of deterministic wait; a new to-do banner or badge
+at the calibrated UTC clock/Task List button triggers an extra check.
+These times are stored in the Discord /ron schedule configuration as
+  task_list: {enabled: true, cadence: hybrid,
+              utc_hours: [1,7,13,19], utc_minute: 15}
+Existing disabled schedule settings and saved task/calendar observations
+are preserved. Avoid adding a global red-dot detector: other game controls
+also have badges.
+
+Flame & Fangs: one actionable day-before-intel preparation alert calculated
+from a trustworthy event start on the WoS calendar. The event module owns
+its rules; no change to the generic OCR parser is required.

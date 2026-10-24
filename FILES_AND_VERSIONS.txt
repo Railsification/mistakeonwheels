@@ -1,0 +1,30 @@
+Ron Burgundy v2.7.3 — Exact file/version manifest
+======================================================
+Base ZIP: ron_burgundy_pi_hotbot_v2.7.2.zip (complete prior release).
+Last verified GitHub canonical cog: cogs/wos/ron_burgundy.py v1.2.3.
+No deployment or owner installation is assumed.
+
+Modified complete replacement versioned Python files:
+  tools/ron_burgundy/events/flame_and_fangs.py  1.1.1 -> 1.1.2
+  tools/ron_burgundy/dashboard.py               2.7.2 -> 2.7.3
+  tests/test_ron_daily_task_flame.py            1.0.1 -> 1.0.2
+  tests/test_ron_pi_framework.py               1.6.2 -> 1.6.3
+
+Changed unversioned files:
+  tools/ron_burgundy/install.sh (release tag v2.7.2 -> v2.7.3)
+  README_FIRST.txt
+  INSTALL_AND_CONFIGURATION.txt
+  EVENT_PLAYBOOKS.md
+  FILES_AND_VERSIONS.txt
+
+Unmodified canonical repository cog included under exact file path:
+  cogs/wos/ron_burgundy.py                      1.3.1 -> 1.3.1 (UNCHANGED)
+  (GitHub last verified at 1.2.3; full 2.7.x requires updating it once.)
+
+No change to other Pi files, event modules, database schema, scanning schedule,
+Discord command names, or storage. Alliance Flame & Fangs notice takes priority:
+00:00 normal Intel claimed, 08:00 normal + Agnes Intel completed unclaimed,
+16:00 no actions. Collection after the event begins at the next UTC reset.
+
+Deployment: download-only; no GitHub/Railway/Pi update performed.
+Live game screens and Discord delivery remain unverified.
