@@ -1,6 +1,6 @@
 # cogs/wos/ron_burgundy.py
 from __future__ import annotations
-__version__ = '1.3.1'
+__version__ = '1.3.2'
 """HotBot-side Ron control; the Raspberry Pi initiates every connection.
 
 Ron is configured independently in every HotBot guild. Existing Pi clients
@@ -133,6 +133,20 @@ def event_is_current(data, now=None):
  return False
 
 
+# A calendar popup for these activities describes an event cycle or a
+# registration window. The actual battle/session times come from the Task List
+# or the alliance-selected slot, never the Calendar start/end timestamp.
+BATTLE_SLOT_EVENTS = frozenset({
+ 'foundry battle', 'canyon clash', 'tundra arms league',
+ 'frostdragon tyrant', 'sunfire castle', 'fortress battles',
+ 'alliance championship',
+})
+
+
+def is_battle_slot_event(title):
+ return str(title).casefold().strip() in BATTLE_SLOT_EVENTS
+
+
 def event_changes(previous, data):
  fields = ('start_utc', 'end_utc', 'visible_start_date', 'visible_end_date')
  return [field for field in fields if previous.get(field) != data.get(field)]
@@ -158,6 +172,10 @@ def alert_text(title, data):
   when = f'\nDeadline <t:{int(deadline.timestamp())}:F>' if deadline else ''
   return f'**WoS · {safe}: action required**\n{short}{when}'
  if data.get('notice_type') not in ('new_event', 'schedule_changed'):
+  return None
+ # Even a one-hour Calendar popup is not evidence of an alliance-selected
+ # legion/battle slot. Task List reminders arrive as separate urgent notices.
+ if is_battle_slot_event(title):
   return None
  if data.get('status') != 'times_from_popup' or not event_is_current(data):
   return None
@@ -861,6 +879,7 @@ class RonBurgundyCog(commands.Cog):
   # One accurate occurrence per name is more helpful than a week of duplicate
   # OCR bars. Old calendar guesses remain in storage but never become a date.
   by_name = {}
+  calendar_cycles = set()
   unverified = 0
   for event in b['events'].values():
    if not isinstance(event, dict) or not safe_title(event.get('title')):
@@ -884,6 +903,15 @@ class RonBurgundyCog(commands.Cog):
     unverified += 1
     continue
    name = str(event['title']).strip()
+   # Calendar cycles must never be presented as verified battle starts.
+   # Legitimate multi-day event dates are useful as an approximate calendar
+   # window, but extreme windows are likely OCR/title association errors.
+   if is_battle_slot_event(name):
+    calendar_cycles.add(name)
+    continue
+   if end-start > timedelta(days=14):
+    unverified += 1
+    continue
    key = name.casefold()
    is_active = start <= now
    # Active first; otherwise the next upcoming occurrence. Most recently
@@ -898,10 +926,20 @@ class RonBurgundyCog(commands.Cog):
   lines = []
   for _, name, start, end, active in rows:
    safe = discord.utils.escape_mentions(name)
-   if active:
+   if end-start > timedelta(hours=4):
+    # A multi-day calendar popup only establishes a displayed date RANGE,
+    # not a precise activity start, deadline or battle hour.
+    lines.append(f'**{safe}** — Calendar window: '
+                 f'<t:{int(start.timestamp())}:D>–<t:{int(end.timestamp())}:D>; '
+                 'exact event timing not confirmed')
+   elif active:
     lines.append(f'**{safe}** — ACTIVE; verified end <t:{int(end.timestamp())}:F>')
    else:
     lines.append(f'**{safe}** — verified start <t:{int(start.timestamp())}:F>')
+  if calendar_cycles:
+   names = ', '.join(discord.utils.escape_mentions(n) for n in sorted(calendar_cycles))
+   lines.append('Battle/registration cycles seen in Calendar: ' + names
+                + '. Actual times must come from Task List or alliance schedules.')
   if not lines:
    # Avoid a rapid and endless check-loop when calibration or OCR is failing.
    async with self._lock:
