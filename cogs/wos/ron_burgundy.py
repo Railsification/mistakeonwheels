@@ -1,6 +1,6 @@
 # cogs/wos/ron_burgundy.py
 from __future__ import annotations
-__version__ = '1.4.0'
+__version__ = '1.4.1'
 """HotBot-side Ron control; the Raspberry Pi initiates every connection.
 
 Ron is configured independently in every HotBot guild. Existing Pi clients
@@ -457,8 +457,12 @@ class RonBurgundyCog(commands.Cog):
   notice = data
   name = str(data.get('title') or kind)
   if kind == 'capabilities':
-   b['bridge_capabilities']={k:bool(data.get(k)) for k in
-       ('chat_capture_enabled','chat_send_calibrated','monitor_enabled')}
+   capabilities={k:bool(data.get(k)) for k in
+       ('chat_capture_enabled','chat_send_calibrated','monitor_enabled',
+        'healer_enabled','healer_calibrated')}
+   pressed=parsed_utc(data.get('healer_last_pressed_utc'))
+   if pressed:capabilities['healer_last_pressed_utc']=pressed.isoformat()
+   b['bridge_capabilities']=capabilities
   elif kind == 'chat':
    # Alliance chat is private to the Pi's designated primary guild.
    line=str(data.get('text') or '').strip()
@@ -945,6 +949,11 @@ class RonBurgundyCog(commands.Cog):
   chat_state=('Ready for calibrated sends' if capabilities.get('chat_send_calibrated')
               else 'Needs chat input/Send calibration')
   lines.append(f'Chat reading: {"enabled" if capabilities.get("chat_capture_enabled") else "not yet confirmed"}; sending: {chat_state}')
+  healer = 'ON' if capabilities.get('healer_enabled') else 'OFF'
+  healer_ready = 'calibrated' if capabilities.get('healer_calibrated') else 'needs active Help icon calibration'
+  lines.append(f'Alliance healer: {healer} ({healer_ready})')
+  if capabilities.get('healer_last_pressed_utc'):
+   lines.append(f'Last Help tap: {capabilities["healer_last_pressed_utc"]}')
   lines.append(f'Failed/uncertain notification deliveries: {delivery_errors}')
   await interaction.response.send_message('\n'.join(lines)[:1900], ephemeral=True)
 
@@ -1187,7 +1196,7 @@ class RonBurgundyCog(commands.Cog):
     msg='Queued WoS chat message. This is NOT confirmation it was sent; check /ron status.'
   await interaction.response.send_message(msg,ephemeral=True)
 
- @ron.command(name='diagnose',description='Queue a combined chat, Task List, Mail and Calendar check')
+ @ron.command(name='diagnose',description='Queue Chat, Task List, Mail, Calendar and Help checks')
  async def diagnose_cmd(self,interaction:discord.Interaction):
   if not await self._manager(interaction):return
   if interaction.guild_id != self.guild_id:
@@ -1196,7 +1205,7 @@ class RonBurgundyCog(commands.Cog):
   queued=[];existing=[]
   async with self._lock:
    b=self._read(interaction.guild_id)
-   for kind in ('chat','task_list','mail','calendar'):
+   for kind in ('chat','task_list','mail','calendar','help'):
     if any(j.get('kind')==kind and j.get('state') in ('queued','running','processing')
            for j in b['jobs'] if isinstance(j,dict)):
      existing.append(kind)
