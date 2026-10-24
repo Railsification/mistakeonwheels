@@ -1,6 +1,6 @@
 # cogs/wos/ron_burgundy.py
 from __future__ import annotations
-__version__ = '1.2.3'
+__version__ = '1.3.1'
 """HotBot-side Ron control; the Raspberry Pi initiates every connection.
 
 Ron is configured independently in every HotBot guild. Existing Pi clients
@@ -28,21 +28,26 @@ from core.storage import (configured_guild_ids, load_guild_json,
 from core.logger import info, err
 
 DATA = 'ron_control.json'
-JOBS = {'calendar', 'mail', 'task_list', 'chat', 'help'}
+JOBS = {'calendar', 'mail', 'task_list', 'chat', 'help', 'notice', 'personal'}
 DEFAULT_SCHEDULE = {
  'calendar': {'enabled': True, 'cadence': 'daily', 'utc_hour': 0, 'utc_minute': 5},
  'mail': {'enabled': True, 'cadence': 'hourly', 'utc_minute': 0},
- 'task_list': {'enabled': True, 'cadence': 'trigger'},
+ 'task_list': {'enabled': True, 'cadence': 'hybrid', 'utc_hours': [1,7,13,19], 'utc_minute': 15},
  'chat': {'enabled': True, 'cadence': 'periodic', 'interval_seconds': 120},
  'help': {'enabled': False, 'cadence': 'periodic', 'interval_seconds': 600},
+ 'notice': {'enabled': True, 'cadence': 'every_other_hour', 'utc_minute': 20},
+ 'personal': {'enabled': False, 'cadence': 'trigger'},
 }
 DEFAULT_ALERTS = {
  'Foundry Battle': True, 'Canyon Clash': True, 'Bear Hunt': True,
  'Fortress Battles': True, 'Crazy Joe': True, 'Alliance Championship': True,
  "Dragonborn's Truck": False, 'Frostwind Journey': False,
- 'Frostdragon Tyrant': False,
+ 'Frostdragon Tyrant': True, 'Tundra Arms League': True, 'Sunfire Castle': True,
  "Dragonborn's Truck — spend reminder": True,
  'Task List': False, 'Alliance Mail': False, 'System Mail': False,
+ 'Arena': True, 'Stamina': True,
+ 'Treasure Hunter': True, 'Tundra Trading Station': True,
+ 'Brothers in Arms': True, 'Mercenary Prestige': True,
 }
 
 
@@ -55,7 +60,7 @@ def baseline():
          'schedules': json.loads(json.dumps(DEFAULT_SCHEDULE)), 'rules': {}, 'jobs': [],
          'events': {}, 'receipts': {}, 'updated_ids': {}, 'research': {},
          'channel_id': 0, 'last_seen': None, 'deliveries': {},
-         'event_baseline_at': None}
+         'event_baseline_at': None, 'plans': {}, 'plan_editors': [], 'proposals': {}}
 
 
 def normalize(raw):
@@ -71,6 +76,16 @@ def normalize(raw):
      b[k] = raw[k]
    elif isinstance(raw[k], type(b[k])):
     b[k] = raw[k]
+ # Preserve explicit per-server choices, but pick up newly added alert types.
+ b['alerts'] = {**DEFAULT_ALERTS, **b['alerts']}
+ # Legacy guilds saved task_list as trigger-only. Keep their enabled toggle,
+ # but migrate the scan cadence to include periodic checks.
+ saved_task = b['schedules'].get('task_list')
+ if isinstance(saved_task, dict):
+  task = {**DEFAULT_SCHEDULE['task_list'], **saved_task}
+  if task.get('cadence') == 'trigger':
+   task['cadence'] = 'hybrid'
+  b['schedules']['task_list'] = task
  return b
 
 
@@ -133,16 +148,25 @@ def alert_text(title, data):
   if expire is None or expire <= datetime.now(timezone.utc):
    return None
   currency = discord.utils.escape_mentions(str(data['currency'])[:80])
-  return f'**WoS · {safe}**\nSpend remaining **{currency}** before <t:{int(expire.timestamp())}:F>. This is the confirmed one-hour deadline reminder.'
+  return f'**WoS · {safe}**\nSpend remaining **{currency}** before <t:{int(expire.timestamp())}:F>. This is a confirmed final-spending reminder near closing time.'
  if data.get('notice_type') == 'urgent_text':
   summary = str(data.get('summary') or '').strip().replace(chr(96)*3, chr(39)*3)
   if not summary:
    return None
-  short = discord.utils.escape_mentions(' '.join(summary.split())[:250])
-  return f'**WoS · {safe}: action required**\n{short}'
+  short = discord.utils.escape_mentions(' '.join(summary.split())[:1300])
+  deadline = parsed_utc(data.get('deadline_utc'))
+  when = f'\nDeadline <t:{int(deadline.timestamp())}:F>' if deadline else ''
+  return f'**WoS · {safe}: action required**\n{short}{when}'
  if data.get('notice_type') not in ('new_event', 'schedule_changed'):
   return None
  if data.get('status') != 'times_from_popup' or not event_is_current(data):
+  return None
+ # A seven-day calendar cycle is NOT a week-long Foundry/Canyon/Castle
+ # battle. Only announce a verified single-session slot, never a long
+ # event-banner span. Phase and deadline notices come from the Pi plugins.
+ start_window = parsed_utc(data.get('start_utc'))
+ end_window = parsed_utc(data.get('end_utc'))
+ if start_window and end_window and end_window-start_window > timedelta(hours=4):
   return None
  start = parsed_utc(data.get('start_utc'))
  # Rule-derived durations are not confirmed end times and must never
@@ -161,6 +185,28 @@ def alert_text(title, data):
  if not details:
   return None
  return header + '\n' + '\n'.join(details)
+
+
+PLAN_EVENTS = {'bia': 'Brothers in Arms', 'svs': 'SvS Preparation'}
+PLAN_DATE = re.compile(r'^20\d{2}-\d{2}-\d{2}$')
+
+
+def validate_alliance_plan(code, start_day, plan_day, instructions):
+ '''Require explicit UTC event start and day number, not a guessed schedule.'''
+ if code not in PLAN_EVENTS:
+  raise ValueError('Event must be bia or svs')
+ try:
+  parsed = datetime.strptime(start_day, '%Y-%m-%d').date()
+ except (TypeError, ValueError):
+  raise ValueError('Start must be YYYY-MM-DD (UTC)') from None
+ if parsed.year < 2025 or parsed.year > 2035:
+  raise ValueError('Start date outside supported range')
+ days = 2 if code == 'bia' else 5
+ if type(plan_day) is not int or not 1 <= plan_day <= days:
+  raise ValueError(f'{code} day must be 1–{days}')
+ if not isinstance(instructions,str) or not 8 <= len(instructions.strip()) <= 950:
+  raise ValueError('Instructions must be 8–950 characters')
+ return start_day, str(plan_day), instructions.strip()
 
 
 def can_manage(interaction):
@@ -337,13 +383,14 @@ class RonBurgundyCog(commands.Cog):
     all_jobs.extend(jobs)
     guilds[str(gid)] = {
      'revision': b['revision'], 'alerts': b['alerts'],
-     'schedules': b['schedules'], 'rules': b['rules'], 'jobs': jobs[:12]}
+     'schedules': b['schedules'], 'rules': b['rules'], 'jobs': jobs[:12],
+     'plans': b['plans']}
    # Keep the original top-level protocol for pre-existing Pi bridge clients.
    primary = self._read(target_guild)
    return web.json_response({
     'revision': self._control_revision(target_guild), 'alerts': primary['alerts'],
     'schedules': primary['schedules'], 'rules': primary['rules'],
-    'jobs': all_jobs[:12], 'guilds': guilds,
+    'plans': primary['plans'], 'jobs': all_jobs[:12], 'guilds': guilds,
    })
 
  def _apply_update(self, b, item, guild_id):
@@ -353,7 +400,7 @@ class RonBurgundyCog(commands.Cog):
   data = item.get('data')
   if not isinstance(ident, str) or not re.fullmatch(r'[A-Za-z0-9_-]{10,100}', ident):
    return None
-  if kind not in ('event', 'task', 'mail', 'notification', 'reminder', 'status', 'research') or not isinstance(data, dict):
+  if kind not in ('event', 'task', 'mail', 'notification', 'reminder', 'status', 'research', 'plan_proposal') or not isinstance(data, dict):
    return None
   if ident in b['updated_ids']:
    return ident
@@ -379,7 +426,7 @@ class RonBurgundyCog(commands.Cog):
                         and previous.get('time_evidence') == 'detail_popup')
    changes = event_changes(previous, data) if previous_verified else []
    b['events'][key] = data
-   b['alerts'].setdefault(title, False)
+   b['alerts'].setdefault(title, bool(data.get('default_alert', False)))
    is_verified = (data.get('status') == 'times_from_popup'
                   and data.get('time_evidence') == 'detail_popup')
    # Upgrading an old calendar guess into a confirmed popup is NOT a
@@ -395,16 +442,43 @@ class RonBurgundyCog(commands.Cog):
    if should_notify:
     notice = {**data, 'notice_type': 'schedule_changed' if previous else 'new_event',
               'changed_fields': changes}
+  elif kind == 'plan_proposal':
+   # In-game OCR is untrusted, even when it appears to name an officer.
+   # Store it privately; only an authorised Discord user can approve it.
+   event = data.get('event')
+   summary = str(data.get('text') or '').strip()
+   source = str(data.get('source') or '')
+   if event not in ('bia', 'svs') or len(summary) < 20 or len(summary) > 500 or source not in (
+       'alliance_mail', 'alliance_notice', 'personal_message', 'chat'):
+    return None
+   b['proposals'][ident] = {'event':event,'text':summary,'source':source,
+                            'observed_utc':utcnow()}
+   if len(b['proposals']) > 40:
+    for oldkey in list(b['proposals'])[:-35]:
+     b['proposals'].pop(oldkey, None)
+  elif kind == 'research':
+   guide = str(data.get('summary') or '').strip()
+   if safe_title(name) and 20 <= len(guide) <= 4700:
+    link = str(data.get('source') or '').strip()
+    if link.startswith('https://') and len(link) <= 350:
+     guide += '\nSource: ' + link
+    b['research'][name] = guide[:5000]
   elif kind == 'status':
    job_id = data.get('job_id')
    if isinstance(job_id, str):
     for job in b['jobs']:
      if isinstance(job, dict) and job.get('id') == job_id:
-      job['state'] = str(data.get('status', 'failed'))
+      state = str(data.get('status', 'failed'))
+      if state in ('queued', 'running', 'processing', 'completed', 'failed'):
+       job['state'] = state
+       job['detail'] = str(data.get('detail') or '')[:260]
+       job['updated_utc'] = utcnow()
   elif kind == 'reminder':
    should_notify = (bool(b['alerts'].get(name, False)) and bool(data.get('currency'))
                     and data.get('expiry_confirmed') is True)
   elif kind in ('task', 'mail', 'notification'):
+   if kind == 'notification' and data.get('event_rule') is True:
+    b['alerts'].setdefault(name, True)
    # OCR changes and routine tasks are retained privately. Explicit urgent
    # notifications must be structured before they can be announced.
    should_notify = bool(b['alerts'].get(name, False)) and data.get('action_required') is True
@@ -611,20 +685,172 @@ class RonBurgundyCog(commands.Cog):
   result, cached = await self._research_guide(title, target_guild)
   return web.json_response({'result': result, 'cached': cached})
 
- @ron.command(name='status', description='View Pi health and pending Ron checks')
+ def _write_plan(self, b, code, start_day, plan_day, instructions, author_id, guild_id=None):
+  start_day, day, content = validate_alliance_plan(code,start_day,plan_day,instructions)
+  entry = b['plans'].get(code)
+  if not isinstance(entry,dict) or entry.get('start_date') != start_day:
+   entry={'start_date':start_day,'days':{}}
+  entry.setdefault('days',{})[day]=content
+  entry['updated_by']=str(author_id)
+  entry['updated_utc']=utcnow()
+  b['plans'][code]=entry
+  # A late same-day correction must reach members; preloaded plans are delivered
+  # by the Pi near day rollover. Persist queued Discord sends before response.
+  today=datetime.now(timezone.utc)
+  target=datetime.combine(datetime.strptime(start_day,'%Y-%m-%d').date()
+      + timedelta(days=plan_day-1),datetime.min.time(),timezone.utc)
+  if target+timedelta(hours=1) <= today < target+timedelta(days=1):
+   notice_id='planmanual_'+hashlib.sha256((code+'|'+start_day+'|'+day+'|'+content).encode()).hexdigest()[:32]
+   title=PLAN_EVENTS[code]
+   payload={'title':title,'summary':f'{title} day {day} — updated alliance instructions: {content}',
+            'notice_type':'urgent_text','action_required':True,'source':'approved_discord_plan'}
+   for cid in dict.fromkeys(self.bot.settings.feature_channels(int(guild_id), 'ron')) if guild_id else ():
+    b['deliveries'].setdefault(notice_id+':'+str(cid),{
+     'id':notice_id,'channel_id':int(cid),'title':title,'data':payload,'state':'queued'})
+  return PLAN_EVENTS[code],day
+
+ def _plan_display(self,b):
+  lines=[]
+  for code,title in PLAN_EVENTS.items():
+   row=b['plans'].get(code, {})
+   if not isinstance(row,dict) or not row.get('days'):
+    lines.append(f'{title}: no approved plan')
+    continue
+   lines.append(f'**{title}**, starts {row.get("start_date", "?")} UTC')
+   for number, content in sorted(row.get('days',{}).items()):
+    lines.append(f'Day {number}: {discord.utils.escape_mentions(str(content))[:240]}')
+  return '\n'.join(lines)[:1900]
+
+ @ron.command(name='plan_set',description='Preload an approved BiA or SvS alliance plan for a UTC date')
+ @app_commands.choices(event=[app_commands.Choice(name='Brothers in Arms',value='bia'),
+                        app_commands.Choice(name='SvS Preparation',value='svs')])
+ async def plan_set_cmd(self,interaction:discord.Interaction,event:app_commands.Choice[str],
+                        start_date:str,day:int,instructions:str):
+  if not await self._manager(interaction):return
+  try:
+   validate_alliance_plan(event.value,start_date,day,instructions)
+  except ValueError as exc:
+   await interaction.response.send_message(str(exc),ephemeral=True)
+   return
+  async with self._lock:
+   b=self._read(interaction.guild_id)
+   title,day_num=self._write_plan(b,event.value,start_date,day,instructions,interaction.user.id,interaction.guild_id)
+   self._signal(b,interaction.guild_id)
+  await self._deliver_pending()
+  await interaction.response.send_message(
+   f'Saved **{title} day {day_num}** starting {start_date} UTC; Pi will receive the approved plan.',ephemeral=True)
+
+ @ron.command(name='plan',description='View approved alliance BiA and SvS day-by-day plans')
+ async def plan_cmd(self,interaction:discord.Interaction):
+  if not await self._manager(interaction):return
+  await interaction.response.send_message(self._plan_display(self._read(interaction.guild_id)),ephemeral=True)
+
+ @ron.command(name='plan_editor',description='Allow or revoke a Discord member sending private Ron plans')
+ async def plan_editor_cmd(self,interaction:discord.Interaction,user:discord.User,allow:bool):
+  if not await self._manager(interaction):return
+  if user.bot:
+   await interaction.response.send_message('Bot accounts cannot be approved plan editors.',ephemeral=True)
+   return
+  async with self._lock:
+   b=self._read(interaction.guild_id)
+   editors=set(int(n) for n in b['plan_editors'] if str(n).isdigit())
+   if allow:editors.add(user.id)
+   else:editors.discard(user.id)
+   b['plan_editors']=sorted(editors)
+   self._signal(b,interaction.guild_id)
+  await interaction.response.send_message(f'Private plan editing {"enabled" if allow else "revoked"} for {user.mention}.',ephemeral=True)
+
+ @ron.command(name='plan_pending',description='View unverified alliance message/notice plan suggestions')
+ async def plan_pending_cmd(self,interaction:discord.Interaction):
+  if not await self._manager(interaction):return
+  proposals=list(self._read(interaction.guild_id)['proposals'].items())[-6:]
+  content='\n'.join(f'`{ident}` {item.get("event")}: {discord.utils.escape_mentions(item.get("text", "")[:170])}'
+                     for ident,item in proposals)
+  await interaction.response.send_message(content[:1900] or 'No pending OCR plan suggestions.',ephemeral=True)
+
+ @ron.command(name='plan_approve',description='Approve an OCR suggestion as an alliance plan day')
+ async def plan_approve_cmd(self,interaction:discord.Interaction,proposal_id:str,start_date:str,day:int):
+  if not await self._manager(interaction):return
+  async with self._lock:
+   b=self._read(interaction.guild_id)
+   proposal=b['proposals'].get(proposal_id)
+   if not proposal:
+    message='Unknown proposal ID.'
+   else:
+    try:
+     title,daynum=self._write_plan(b,proposal['event'],start_date,day,proposal['text'],interaction.user.id,interaction.guild_id)
+    except ValueError as exc:
+     message=str(exc)
+    else:
+     del b['proposals'][proposal_id]
+     self._signal(b,interaction.guild_id)
+     message=f'Approved {title} day {daynum} from an OCR suggestion.'
+  await self._deliver_pending()
+  await interaction.response.send_message(message,ephemeral=True)
+
+ @commands.Cog.listener('on_message')
+ async def ron_private_plan(self,message:discord.Message):
+  """Authorised private message format: ron plan bia | YYYY-MM-DD | 1 | Instructions."""
+  if not isinstance(message.channel,discord.DMChannel) or message.author.bot:return
+  raw=(message.content or '').strip()
+  if not raw.lower().startswith('ron plan '):return
+  parts=[chunk.strip() for chunk in raw[9:].split('|',3)]
+  if len(parts)!=4:
+   await message.channel.send('Format: ron plan bia | YYYY-MM-DD | 1 | Instructions (or svs).')
+   return
+  event,date_text,day_str,instructions=parts
+  try:
+   parsed_day=int(day_str)
+   validate_alliance_plan(event.lower(),date_text,parsed_day,instructions)
+  except ValueError as exc:
+   await message.channel.send(str(exc))
+   return
+  eligible=[]
+  for gid in self._guild_ids():
+   if not self.bot.settings.feature_channels(gid,'ron'):continue
+   b=self._read(gid)
+   approved=message.author.id in b['plan_editors']
+   if not approved:
+    guild=self.bot.get_guild(gid)
+    member=guild.get_member(message.author.id) if guild else None
+    if member is None and guild:
+     try:member=await guild.fetch_member(message.author.id)
+     except (discord.Forbidden,discord.NotFound,discord.HTTPException):pass
+    approved=bool(member and (member.guild_permissions.manage_guild or member.guild_permissions.administrator))
+   if approved:eligible.append(gid)
+  if len(eligible)!=1:
+   await message.channel.send('Not authorised, or more than one Ron server matches. Use /ron plan_set in the intended server.')
+   return
+  gid=eligible[0]
+  async with self._lock:
+   b=self._read(gid)
+   title,number=self._write_plan(b,event.lower(),date_text,parsed_day,instructions,message.author.id,gid)
+   self._signal(b,gid)
+  await self._deliver_pending()
+  await message.channel.send(f'Saved {title} day {number} starting {date_text} UTC.')
+
+ @ron.command(name='status', description='View Pi health and recent Ron check outcomes')
  async def status_cmd(self, interaction: discord.Interaction):
   if not await self._manager(interaction):
    return
   gid = interaction.guild_id
   b = self._read(gid)
-  pending = sum(j.get('state') == 'queued' for j in b['jobs'] if isinstance(j, dict))
+  jobs = [j for j in b['jobs'] if isinstance(j, dict) and j.get('kind') in JOBS]
+  pending = sum(j.get('state') in ('queued', 'running', 'processing') for j in jobs)
   delivery_errors = sum(x.get('state') in ('failed', 'uncertain')
                         for x in b['deliveries'].values() if isinstance(x, dict))
-  await interaction.response.send_message(
-   f"Pi last contact: {b['last_seen'] or 'Never'}\nSaved calendar records: {len(b['events'])} (not necessarily current)\n"
-   f"Pending checks: {pending}\nFailed/uncertain notification deliveries: {delivery_errors}\n"
-   f"Alert channels (council feature ron): {', '.join(str(x) for x in self.bot.settings.feature_channels(gid, 'ron')) or 'Not selected'}",
-   ephemeral=True)
+  lines = [f"Pi last contact: {b['last_seen'] or 'Never'}",
+           f"Active/pending checks: {pending}",
+           f"Saved calendar records (including history): {len(b['events'])}"]
+  if jobs:
+   lines.append('Recent checks:')
+   for job in jobs[-5:][::-1]:
+    kind = str(job.get('kind', '?')).replace('_', ' ').title()
+    status = str(job.get('state', '?'))
+    detail = discord.utils.escape_mentions(str(job.get('detail') or '')[:180])
+    lines.append(f'- {kind}: **{status}**' + (f' — {detail}' if detail else ''))
+  lines.append(f'Failed/uncertain notification deliveries: {delivery_errors}')
+  await interaction.response.send_message('\n'.join(lines)[:1900], ephemeral=True)
 
  @ron.command(name='events', description='Show verified WoS events; request fresh scan if needed')
  async def events_cmd(self, interaction: discord.Interaction):
@@ -677,25 +903,30 @@ class RonBurgundyCog(commands.Cog):
    else:
     lines.append(f'**{safe}** — verified start <t:{int(start.timestamp())}:F>')
   if not lines:
-   # The user asked for live game information. Request a fresh scan rather
-   # than repeatedly showing the same stale cache or making them queue one.
+   # Avoid a rapid and endless check-loop when calibration or OCR is failing.
    async with self._lock:
     latest = self._read(interaction.guild_id)
-    already = any(isinstance(job, dict) and job.get('kind') == 'calendar'
-                  and job.get('state') == 'queued' for job in latest['jobs'])
-    if not already:
+    calendar_jobs = [j for j in latest['jobs'] if isinstance(j, dict)
+                     and j.get('kind') == 'calendar']
+    last = calendar_jobs[-1] if calendar_jobs else None
+    waiting = bool(last and last.get('state') in ('queued', 'running', 'processing'))
+    stamped = parsed_utc(last.get('created_utc')) if last else None
+    recent = bool(stamped and now - stamped < timedelta(minutes=30))
+    if waiting:
+     message = 'Calendar check is still queued or processing. /ron status shows progress.'
+    elif recent:
+     reason = discord.utils.escape_mentions(str(last.get('detail') or 'No verified game times were produced')[:260])
+     message = ('No verified current event times. Last calendar check: '
+                f"{last.get('state','unknown')} — {reason}. "
+                'Use /ron check Calendar to retry when the tablet is ready.')
+    else:
      latest['jobs'].append({'id':'check_'+secrets.token_hex(12),
-                            'kind':'calendar', 'state':'queued',
-                            'created_utc':utcnow()})
+                            'kind':'calendar', 'state':'queued', 'created_utc':utcnow()})
      self._signal(latest, interaction.guild_id)
-   message = ('No reliable current/upcoming event times yet. '
-              'A fresh Calendar check is already queued.' if already else
-              'No reliable current/upcoming event times yet. '
-              'I queued a fresh Calendar check automatically; check again once it completes.')
+     message = ('No verified current event times. Requested one calendar check. '
+                'Use /ron status to see its result or failure reason.')
   else:
    message = '\n'.join(lines)
-  if unverified:
-   message += f'\n\n{unverified} old/estimated calendar reading(s) hidden; no invented start times.'
   await interaction.response.send_message(message[:1900], ephemeral=True)
 
  @ron.command(name='alerts', description='Show available event notifications')
@@ -825,7 +1056,7 @@ class RonBurgundyCog(commands.Cog):
   async with self._lock:
    b = self._read(gid)
    active = next((j for j in b['jobs'] if isinstance(j, dict) and
-                  j.get('kind') == kind.value and j.get('state') == 'queued'), None)
+                  j.get('kind') == kind.value and j.get('state') in ('queued','running','processing')), None)
    if active:
     result = 'Already queued'
    else:
@@ -838,7 +1069,7 @@ class RonBurgundyCog(commands.Cog):
 
  @ron.command(name='schedule', description='Set the daily UTC check time and enable/disable a job')
  @app_commands.choices(kind=[app_commands.Choice(name=k.replace('_', ' ').title(), value=k)
-                             for k in ('calendar', 'mail', 'task_list', 'chat', 'help')])
+                             for k in ('calendar', 'mail', 'task_list', 'chat', 'help', 'notice', 'personal')])
  async def schedule_cmd(self, interaction: discord.Interaction,
                         kind: app_commands.Choice[str], enabled: bool,
                         utc_hour: app_commands.Range[int, 0, 23]=0,
