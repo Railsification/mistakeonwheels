@@ -1,6 +1,6 @@
 # cogs/wos/ron_burgundy.py
 from __future__ import annotations
-__version__ = '1.5.2'
+__version__ = '1.5.3'
 """HotBot-side Ron control; the Raspberry Pi initiates every connection.
 
 Ron is configured independently in every HotBot guild. Existing Pi clients
@@ -12,6 +12,8 @@ Pi capabilities fan out to every configured guild, /ron chat_send and
 /ron chat_recent work in every configured guild, and one shared tablet job queue
 is de-duplicated across guilds. Adds simple `!ron ...` prefix commands for
 everyday use and Help All controls (Discord and an officer-armed WoS chat form).
+v1.5.3: `!ron monitor on|off|status` starts/stops the Pi monitor from Discord (applies even
+while the monitor is off).
 v1.5.2: Help All from WoS Alliance Chat is OPEN by default (any R4/R5 can type
 `!ron helpall on|off` any time). OCR cannot prove a sender's rank, so `!ron helpall lock`
 restricts it to Discord officers and `unlock` reopens it. `arm [min]` still opens a locked window.
@@ -41,7 +43,7 @@ from core.logger import info, err
 DATA = 'ron_control.json'
 JOBS = {'calendar', 'mail', 'task_list', 'chat', 'help', 'notice', 'personal', 'chat_send'}
 # Jobs that carry their own payload and are never offered as a plain /ron check.
-CONTROL_JOBS = {'help_control'}
+CONTROL_JOBS = {'help_control', 'monitor_control'}
 ALL_JOBS = JOBS | CONTROL_JOBS
 HELPALL_ARM_MAX_MINUTES = 24 * 60
 HELPALL_ARM_DEFAULT_MINUTES = 30
@@ -293,7 +295,7 @@ def expire_stale_jobs(b, now=None):
     now = now or datetime.now(timezone.utc)
     changed = False
     for job in b.get('jobs', []):
-        if (isinstance(job, dict) and job.get('kind') in ('chat_send', 'help_control')
+        if (isinstance(job, dict) and job.get('kind') in ('chat_send', 'help_control', 'monitor_control')
                 and job.get('state') in ('queued', 'running')):
             expiry = parsed_utc(job.get('expires_utc'))
             if expiry is not None and expiry <= now:
@@ -533,12 +535,12 @@ class RonBurgundyCog(commands.Cog):
       **({'text': j['text'], 'expires_utc': j['expires_utc']}
          if j.get('kind')=='chat_send' else {}),
       **({'enabled': j['enabled'], 'expires_utc': j['expires_utc']}
-         if j.get('kind')=='help_control' else {})}
+         if j.get('kind') in ('help_control', 'monitor_control') else {})}
     for j in b['jobs'] if isinstance(j, dict) and j.get('state') == 'queued'
      and isinstance(j.get('id'), str) and j.get('kind') in ALL_JOBS
      and (j.get('kind')!='chat_send' or
           (isinstance(j.get('text'),str) and isinstance(j.get('expires_utc'),str)))
-     and (j.get('kind')!='help_control' or
+     and (j.get('kind') not in ('help_control', 'monitor_control') or
           (type(j.get('enabled')) is bool and isinstance(j.get('expires_utc'),str)))]
     all_jobs.extend(jobs)
     guilds[str(gid)] = {
@@ -807,6 +809,32 @@ class RonBurgundyCog(commands.Cog):
   self._change.set()
   self._change = asyncio.Event()
 
+ def _append_monitor_job(self, b, enabled, source):
+  b['jobs'].append({'id': 'mon_' + secrets.token_hex(12), 'kind': 'monitor_control',
+                    'enabled': bool(enabled), 'source': source, 'state': 'queued',
+                    'created_utc': utcnow(),
+                    'expires_utc': (datetime.now(timezone.utc) + timedelta(minutes=10)).isoformat()})
+  b['jobs'] = b['jobs'][-250:]
+  b['revision'] = int(b['revision']) + 1
+  self._change.set()
+  self._change = asyncio.Event()
+
+ async def _set_monitor(self, guild_id, enabled, author_id):
+  async with self._lock:
+   b = self._read(guild_id)
+   for gid in self._guild_ids():
+    other = self._read(gid)
+    if expire_stale_jobs(other):
+     self._save(other, gid)
+    if gid == guild_id:
+     b = other
+   if self._active_tablet_job('monitor_control'):
+    return 'A Monitor change is already waiting for the Pi.'
+   self._append_monitor_job(b, enabled, 'discord:' + str(author_id))
+   self._signal(b, guild_id)
+  return (f'Monitor **{"ON" if enabled else "OFF"}** requested. The Pi applies it within about a minute, '
+          'even if the monitor is currently off. Check with `!ron monitor status`.')
+
  def _append_help_job(self, b, enabled, source):
   b['jobs'].append({'id': 'help_' + secrets.token_hex(12), 'kind': 'help_control',
                     'enabled': bool(enabled), 'source': source, 'state': 'queued',
@@ -980,6 +1008,7 @@ class RonBurgundyCog(commands.Cog):
   chat_state = ('Ready for calibrated sends' if caps.get('chat_send_calibrated')
                 else 'Needs chat input/Send calibration')
   lines.append(f'Chat reading: {"enabled" if caps.get("chat_capture_enabled") else "not yet confirmed"}; sending: {chat_state}')
+  lines.append('Pi monitor: ' + ('**ON**' if caps.get('monitor_enabled') else '**OFF**' if 'monitor_enabled' in caps else 'unknown (no report yet)'))
   healer = 'ON' if caps.get('healer_enabled') else 'OFF'
   healer_ready = 'calibrated' if caps.get('healer_calibrated') else 'no Help icon calibration (Help page must be open or Alliance/Help buttons taught)'
   lines.append(f'Alliance Help All: {healer} ({healer_ready})')
@@ -1584,6 +1613,7 @@ class RonBurgundyCog(commands.Cog):
                 '`!ron chat` — DM you the latest WoS chat readings\n'
                 '`!ron check <calendar|mail|task|chat|help|notice>` — queue one scan\n'
                 '`!ron diagnose` — queue Chat, Task List, Mail, Calendar and Help checks\n'
+                '`!ron monitor on|off|status` — start or stop the Pi monitor\n'
                 '`!ron helpall on|off|status` — control Alliance Help All on the Pi\n'
                 'In WoS Alliance Chat, R4/R5 can type `!ron helpall on|off` any time.\n'
                 '`!ron helpall lock` / `unlock` — block or allow that chat control\n'
@@ -1667,6 +1697,31 @@ class RonBurgundyCog(commands.Cog):
   done = [await self._queue_check(ctx.guild.id, k) for k in ('chat', 'task_list', 'mail', 'calendar', 'help')]
   await ctx.send(f"Diagnosis requested ({', '.join(done)}). The Pi runs one tablet action at a time; "
                  'use `!ron status` for results.')
+
+ @ron_prefix.group(name='monitor', invoke_without_command=True)
+ async def ron_prefix_monitor(self, ctx: commands.Context):
+  if await self._prefix_manager(ctx):
+   await ctx.send('Usage: `!ron monitor on|off|status`')
+
+ @ron_prefix_monitor.command(name='on')
+ async def ron_monitor_on(self, ctx: commands.Context):
+  if await self._prefix_manager(ctx):
+   await ctx.send(await self._set_monitor(ctx.guild.id, True, ctx.author.id),
+                  allowed_mentions=discord.AllowedMentions.none())
+
+ @ron_prefix_monitor.command(name='off')
+ async def ron_monitor_off(self, ctx: commands.Context):
+  if await self._prefix_manager(ctx):
+   await ctx.send(await self._set_monitor(ctx.guild.id, False, ctx.author.id),
+                  allowed_mentions=discord.AllowedMentions.none())
+
+ @ron_prefix_monitor.command(name='status')
+ async def ron_monitor_status(self, ctx: commands.Context):
+  if not await self._prefix_manager(ctx):
+   return
+  caps = self._capabilities_for(self._guild_ids())
+  state = 'ON' if caps.get('monitor_enabled') else 'OFF' if 'monitor_enabled' in caps else 'unknown (the Pi has not reported yet)'
+  await ctx.send(f'Pi monitor is **{state}**.')
 
  @ron_prefix.group(name='helpall', invoke_without_command=True)
  async def ron_prefix_helpall(self, ctx: commands.Context):

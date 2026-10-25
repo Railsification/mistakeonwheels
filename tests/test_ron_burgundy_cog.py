@@ -385,6 +385,25 @@ class RonCogTests(unittest.TestCase):
         run(self.cog.ron_helpall_on.callback(self.cog, ctx))
         self.assertEqual(len(self.jobs('help_control')), 2)
 
+    def test_discord_monitor_commands_queue_offer_and_complete_jobs(self):
+        ctx = FakeCtx(222)
+        run(self.cog.ron_monitor_off.callback(self.cog, ctx))
+        job = self.jobs('monitor_control')[0]
+        self.assertIs(job['enabled'], False)
+        offered = body(run(self.cog.control(FakeRequest(query={'revision': '0'}))))['jobs']
+        self.assertIn({'id': job['id'], 'kind': 'monitor_control', 'guild_id': offered[0]['guild_id'],
+                       'enabled': False, 'expires_utc': job['expires_utc']}, offered)
+        run(self.cog.ron_monitor_on.callback(self.cog, ctx))
+        self.assertIn('already waiting', ctx.sent[-1])
+        self.sync({'id': 'receipt_000000009', 'kind': 'status',
+                   'data': {'job_id': job['id'], 'status': 'completed', 'detail': 'Monitor is OFF'}})
+        self.assertEqual([j['state'] for j in self.jobs('monitor_control')], ['completed'])
+        run(self.cog.ron_monitor_on.callback(self.cog, ctx))
+        self.assertEqual(len(self.jobs('monitor_control')), 2)
+        self.sync({'id': 'caps_0000000002', 'kind': 'capabilities', 'data': {'monitor_enabled': True}})
+        run(self.cog.ron_monitor_status.callback(self.cog, ctx))
+        self.assertIn('ON', ctx.sent[-1])
+
     def test_wos_helpall_status_is_read_only_and_public(self):
         self.sync({'id': 'caps_0000000001', 'kind': 'capabilities',
                    'data': {'chat_send_calibrated': True, 'healer_enabled': True}})
