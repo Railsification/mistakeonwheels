@@ -1,6 +1,6 @@
 # cogs/wos/ron_burgundy.py
 from __future__ import annotations
-__version__ = '1.5.1'
+__version__ = '1.5.2'
 """HotBot-side Ron control; the Raspberry Pi initiates every connection.
 
 Ron is configured independently in every HotBot guild. Existing Pi clients
@@ -12,6 +12,9 @@ Pi capabilities fan out to every configured guild, /ron chat_send and
 /ron chat_recent work in every configured guild, and one shared tablet job queue
 is de-duplicated across guilds. Adds simple `!ron ...` prefix commands for
 everyday use and Help All controls (Discord and an officer-armed WoS chat form).
+v1.5.2: Help All from WoS Alliance Chat is OPEN by default (any R4/R5 can type
+`!ron helpall on|off` any time). OCR cannot prove a sender's rank, so `!ron helpall lock`
+restricts it to Discord officers and `unlock` reopens it. `arm [min]` still opens a locked window.
 v1.5.1: `!ron dashboard` and `/ron dashboard` privately give officers the Pi dashboard link
 (kept in memory only, never saved to disk).
 """
@@ -75,7 +78,7 @@ def baseline():
          'channel_id': 0, 'last_seen': None, 'deliveries': {},
          'event_baseline_at': None, 'plans': {}, 'plan_editors': [], 'proposals': {},
          'chat_messages': {}, 'chat_command_seen': {}, 'bridge_capabilities': {},
-         'helpall': {'armed_until': None, 'armed_by': '', 'desired': None,
+         'helpall': {'chat_locked': False, 'armed_until': None, 'armed_by': '', 'desired': None,
                      'updated_utc': None, 'updated_by': ''}}
 
 
@@ -251,10 +254,17 @@ def chat_reply(verb, b):
 
 
 def helpall_armed(b, now=None):
-    """True while a Discord officer has opened the Help All chat-control window."""
+    """True while a Discord officer has opened a temporary Help All chat window."""
     row = b.get('helpall') if isinstance(b, dict) else None
     until = parsed_utc(row.get('armed_until')) if isinstance(row, dict) else None
     return bool(until and until > (now or datetime.now(timezone.utc)))
+
+
+def helpall_chat_allowed(b, now=None):
+    """WoS chat may change Help All unless an officer locked it (and no window is open)."""
+    row = b.get('helpall') if isinstance(b, dict) else None
+    locked = bool(row.get('chat_locked')) if isinstance(row, dict) else False
+    return (not locked) or helpall_armed(b, now)
 
 
 _ASCII_FIXES = str.maketrans({
@@ -868,11 +878,11 @@ class RonBurgundyCog(commands.Cog):
     say('Help All is ' + ('ON' if caps.get('healer_enabled') else 'OFF')
         + '. Officers can change it from Discord.')
    return changed
-  armed = any(helpall_armed(states.setdefault(g, self._read(g)), now) for g in guild_ids)
+  armed = all(helpall_chat_allowed(states.setdefault(g, self._read(g)), now) for g in guild_ids)
   if not armed:
    if not seen_recently('helpall_denied', 10):
     remember('helpall_denied')
-    say('Help All control is locked. A Discord officer must arm it first.')
+    say('Help All chat control is locked by a Discord officer.')
    return changed
   key = 'helpall_' + action
   if seen_recently(key, 1) or self._active_tablet_job('help_control', states):
@@ -975,8 +985,8 @@ class RonBurgundyCog(commands.Cog):
   lines.append(f'Alliance Help All: {healer} ({healer_ready})')
   if caps.get('healer_last_pressed_utc'):
    lines.append(f'Last Help All tap: {caps["healer_last_pressed_utc"]}')
-  lines.append('WoS chat Help All control: ' + ('ARMED until ' + str(b['helpall'].get('armed_until'))
-               if helpall_armed(b) else 'locked (officer arms it with !ron helpall arm)'))
+  lines.append('WoS chat Help All control: ' + ('open to anyone typing in Alliance Chat'
+               if helpall_chat_allowed(b) else 'LOCKED (unlock with !ron helpall unlock)'))
   lines.append(f'Failed/uncertain notification deliveries: {delivery_errors}')
   return lines
 
@@ -1575,8 +1585,8 @@ class RonBurgundyCog(commands.Cog):
                 '`!ron check <calendar|mail|task|chat|help|notice>` — queue one scan\n'
                 '`!ron diagnose` — queue Chat, Task List, Mail, Calendar and Help checks\n'
                 '`!ron helpall on|off|status` — control Alliance Help All on the Pi\n'
-                '`!ron helpall arm [minutes]` / `disarm` — let alliance members type '
-                '`!ron helpall on|off` in WoS chat for a limited time\n'
+                'In WoS Alliance Chat, R4/R5 can type `!ron helpall on|off` any time.\n'
+                '`!ron helpall lock` / `unlock` — block or allow that chat control\n'
                 'Slash versions: `/ron status`, `/ron chat_send`, `/ron check`, `/ron events` …')
 
  async def _prefix_manager(self, ctx):
@@ -1661,7 +1671,7 @@ class RonBurgundyCog(commands.Cog):
  @ron_prefix.group(name='helpall', invoke_without_command=True)
  async def ron_prefix_helpall(self, ctx: commands.Context):
   if await self._prefix_manager(ctx):
-   await ctx.send('Usage: `!ron helpall on|off|status|arm [minutes]|disarm`')
+   await ctx.send('Usage: `!ron helpall on|off|status|lock|unlock`')
 
  @ron_prefix_helpall.command(name='on')
  async def ron_helpall_on(self, ctx: commands.Context):
@@ -1681,7 +1691,7 @@ class RonBurgundyCog(commands.Cog):
    return
   b = self._read(ctx.guild.id)
   caps = self._capabilities_for(self._guild_ids())
-  armed = ('ARMED until ' + str(b['helpall'].get('armed_until'))) if helpall_armed(b) else 'locked'
+  armed = 'open (R4/R5 can type !ron helpall on/off)' if helpall_chat_allowed(b) else 'LOCKED (!ron helpall unlock)'
   await ctx.send(f"Help All is **{'ON' if caps.get('healer_enabled') else 'OFF'}** on the Pi "
                  f"({'calibrated' if caps.get('healer_calibrated') else 'no Help icon calibration'}). "
                  f"WoS chat control: {armed}. Last tap: {caps.get('healer_last_pressed_utc') or 'never'}.")
@@ -1697,7 +1707,7 @@ class RonBurgundyCog(commands.Cog):
    row['armed_until'] = (datetime.now(timezone.utc) + timedelta(minutes=minutes)).isoformat()
    row['armed_by'] = str(ctx.author.id)
    self._signal(b, ctx.guild.id)
-  await ctx.send(f'WoS chat Help All control is **armed for {minutes} minute(s)**. Alliance members can type '
+  await ctx.send(f'WoS chat Help All control is **open for {minutes} minute(s)**. Alliance members can type '
                  '`!ron helpall on` or `!ron helpall off` in Alliance Chat until then. '
                  'Disarm early with `!ron helpall disarm`.')
 
@@ -1705,11 +1715,27 @@ class RonBurgundyCog(commands.Cog):
  async def ron_helpall_disarm(self, ctx: commands.Context):
   if not await self._prefix_manager(ctx):
    return
+  await self._helpall_lock(ctx, True)
+
+ async def _helpall_lock(self, ctx, locked):
   async with self._lock:
    b = self._read(ctx.guild.id)
-   b.setdefault('helpall', baseline()['helpall'])['armed_until'] = None
+   row = b.setdefault('helpall', baseline()['helpall'])
+   row['chat_locked'] = bool(locked)
+   row['armed_until'] = None
    self._signal(b, ctx.guild.id)
-  await ctx.send('WoS chat Help All control is locked again.')
+  await ctx.send('WoS chat Help All control is **locked**: only Discord commands can change it. `!ron helpall unlock` reopens it.'
+                 if locked else 'WoS chat Help All control is **open**: R4/R5 can type `!ron helpall on` or `off` in Alliance Chat any time.')
+
+ @ron_prefix_helpall.command(name='lock')
+ async def ron_helpall_lock(self, ctx: commands.Context):
+  if await self._prefix_manager(ctx):
+   await self._helpall_lock(ctx, True)
+
+ @ron_prefix_helpall.command(name='unlock')
+ async def ron_helpall_unlock(self, ctx: commands.Context):
+  if await self._prefix_manager(ctx):
+   await self._helpall_lock(ctx, False)
 
 
 async def setup(bot: commands.Bot):

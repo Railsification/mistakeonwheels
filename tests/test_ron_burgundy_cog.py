@@ -332,16 +332,27 @@ class RonCogTests(unittest.TestCase):
         self.assertEqual(len(self.jobs('chat_send')), 1)
 
     # ---- Help All control --------------------------------------------------------------
-    def test_wos_chat_cannot_change_help_all_until_an_officer_arms_it(self):
+    def test_wos_chat_can_change_help_all_by_default(self):
+        self.sync({'id': 'caps_0000000001', 'kind': 'capabilities', 'data': {'chat_send_calibrated': True}})
+        self.sync(chat_item('chat_00000000004', '!ron helpall on'))
+        self.assertEqual(len(self.jobs('help_control')), 1)
+
+    def test_wos_chat_cannot_change_help_all_while_locked_and_unlock_reopens(self):
+        ctx = FakeCtx(111)
+        run(self.cog.ron_helpall_lock.callback(self.cog, ctx))
+        self.assertIn('locked', ctx.sent[0])
         self.sync({'id': 'caps_0000000001', 'kind': 'capabilities', 'data': {'chat_send_calibrated': True}})
         self.sync(chat_item('chat_00000000004', '!ron helpall on'))
         self.assertEqual(self.jobs('help_control'), [])
         self.assertIn('locked', self.jobs('chat_send')[0]['text'])
+        run(self.cog.ron_helpall_unlock.callback(self.cog, ctx))
+        self.assertTrue(ron.helpall_chat_allowed(self.cog._read(111)))
 
     def test_armed_wos_chat_command_queues_exactly_one_help_job(self):
         ctx = FakeCtx(111)
+        run(self.cog.ron_helpall_lock.callback(self.cog, ctx))
         run(self.cog.ron_helpall_arm.callback(self.cog, ctx, 10))
-        self.assertIn('armed', ctx.sent[0])
+        self.assertIn('open for', ctx.sent[-1])
         self.sync({'id': 'caps_0000000001', 'kind': 'capabilities', 'data': {'chat_send_calibrated': True}})
         self.sync(chat_item('chat_00000000005', '!ron help all on'))
         self.sync(chat_item('chat_00000000006', '!ron helpall on'))
@@ -354,6 +365,7 @@ class RonCogTests(unittest.TestCase):
 
     def test_arming_expires_and_disarm_locks_again(self):
         ctx = FakeCtx(222)
+        run(self.cog.ron_helpall_lock.callback(self.cog, ctx))
         run(self.cog.ron_helpall_arm.callback(self.cog, ctx, 10))
         self.assertTrue(ron.helpall_armed(self.cog._read(222)))
         run(self.cog.ron_helpall_disarm.callback(self.cog, ctx))
