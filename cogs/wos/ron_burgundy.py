@@ -1,6 +1,6 @@
 # cogs/wos/ron_burgundy.py
 from __future__ import annotations
-__version__ = '1.5.0'
+__version__ = '1.5.1'
 """HotBot-side Ron control; the Raspberry Pi initiates every connection.
 
 Ron is configured independently in every HotBot guild. Existing Pi clients
@@ -12,6 +12,8 @@ Pi capabilities fan out to every configured guild, /ron chat_send and
 /ron chat_recent work in every configured guild, and one shared tablet job queue
 is de-duplicated across guilds. Adds simple `!ron ...` prefix commands for
 everyday use and Help All controls (Discord and an officer-armed WoS chat form).
+v1.5.1: `!ron dashboard` and `/ron dashboard` privately give officers the Pi dashboard link
+(kept in memory only, never saved to disk).
 """
 import asyncio
 import hashlib
@@ -370,6 +372,7 @@ class RonBurgundyCog(commands.Cog):
   self.guild_id = primary_data_guild_id(bot)
   self.port = int(os.getenv('PORT', '0') or 0)
   self._runner = None
+  self._dashboard_link = None  # (url, received_utc); memory only, it contains the Pi's key
   self._lock = asyncio.Lock()
   self._research_lock = asyncio.Lock()
   self._change = asyncio.Event()
@@ -705,6 +708,7 @@ class RonBurgundyCog(commands.Cog):
      continue
     item_target = self._requested_guild(request, item) if 'guild_id' in item else target_guild
     # Status receipts from legacy Pi clients are routed by job ID when possible.
+    self._note_dashboard_link(item)
     if item_target is not None:
      targets = [item_target]
     elif item.get('kind') == 'status':
@@ -877,6 +881,24 @@ class RonBurgundyCog(commands.Cog):
   self._append_help_job(home, action == 'on', 'wos_chat')
   say('Help All ' + action.upper() + ' requested.')
   return changed
+
+ DASHBOARD_URL = re.compile(r'^http://(?:\d{1,3}\.){3}\d{1,3}:\d{2,5}/\?token=[A-Za-z0-9_-]{10,80}$')
+
+ def _note_dashboard_link(self, item):
+  """Remember the Pi's LAN dashboard link in memory only (it contains the Pi's key)."""
+  data = item.get('data') if isinstance(item, dict) else None
+  if (isinstance(item, dict) and item.get('kind') == 'capabilities' and isinstance(data, dict)
+      and isinstance(data.get('dashboard_url'), str) and self.DASHBOARD_URL.fullmatch(data['dashboard_url'])):
+   self._dashboard_link = (data['dashboard_url'], utcnow())
+
+ def _dashboard_message(self):
+  if not self._dashboard_link:
+   return ('The Pi has not reported its dashboard address yet. It does this every couple of minutes '
+           'once Pi v2.9.1+ is running and connected; try again shortly.')
+  url, seen = self._dashboard_link
+  return (f'**Ron dashboard** (last confirmed {seen[:16].replace("T", " ")} UTC)\n{url}\n'
+          'Open it on a device on the same home network as the Pi. The link contains the Pi key, '
+          'so do not share it.')
 
  async def _queue_chat_message(self, guild_id, message):
   """Queue one Alliance Chat message for the shared tablet; returns user feedback."""
@@ -1239,6 +1261,12 @@ class RonBurgundyCog(commands.Cog):
   await interaction.response.send_message(
    '\n'.join(self._status_lines(interaction.guild_id))[:1900], ephemeral=True)
 
+ @ron.command(name='dashboard', description='Privately get the link to the Ron Pi dashboard (setup, switches, calibration)')
+ async def dashboard_cmd(self, interaction: discord.Interaction):
+  if not await self._manager(interaction):
+   return
+  await interaction.response.send_message(self._dashboard_message(), ephemeral=True)
+
  @ron.command(name='events', description='Show verified WoS events; request fresh scan if needed')
  async def events_cmd(self, interaction: discord.Interaction):
   if not await self._manager(interaction):
@@ -1540,6 +1568,7 @@ class RonBurgundyCog(commands.Cog):
                   'task_list': 'task_list', 'chat': 'chat', 'help': 'help', 'notice': 'notice',
                   'personal': 'personal'}
  PREFIX_HELP = ('**Ron commands** (Manage Server permission, any configured HotBot server)\n'
+                '`!ron dashboard` — private link to the Pi dashboard: switches, setup checklist, calibration\n'
                 '`!ron status` — Pi health, recent checks, Help All state\n'
                 '`!ron say <message>` — post a message in WoS Alliance Chat\n'
                 '`!ron chat` — DM you the latest WoS chat readings\n'
@@ -1570,6 +1599,16 @@ class RonBurgundyCog(commands.Cog):
  async def ron_prefix_commands(self, ctx: commands.Context):
   if await self._prefix_manager(ctx):
    await ctx.send(self.PREFIX_HELP, allowed_mentions=discord.AllowedMentions.none())
+
+ @ron_prefix.command(name='dashboard', aliases=['web', 'setup'])
+ async def ron_prefix_dashboard(self, ctx: commands.Context):
+  if not await self._prefix_manager(ctx):
+   return
+  try:
+   await ctx.author.send(self._dashboard_message())
+   await ctx.send('Sent the Ron dashboard link to your DMs.')
+  except (discord.Forbidden, discord.HTTPException):
+   await ctx.send('I could not DM you. Enable DMs from this server, or use `/ron dashboard`.')
 
  @ron_prefix.command(name='status')
  async def ron_prefix_status(self, ctx: commands.Context):
