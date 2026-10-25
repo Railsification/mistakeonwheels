@@ -1,6 +1,6 @@
 # cogs/wos/ron_burgundy.py
 from __future__ import annotations
-__version__ = '1.4.3'
+__version__ = '1.4.4'
 """HotBot-side Ron control; the Raspberry Pi initiates every connection.
 
 Ron is configured independently in every HotBot guild. Existing Pi clients
@@ -229,6 +229,38 @@ def chat_reply(verb, b):
  if verb in ('bear','fortress'):
   return 'Please check your alliance schedule or ask an R4 for confirmed times.'
  return 'For security, only Discord officers can request tablet scans.'
+
+
+def routine_chat_reminder(item, now=None):
+ """Provide one safe, expiring Alliance Chat copy of the daily Stamina alert.
+
+ No arbitrary Pi/OCR text is ever echoed to game chat. Discord's independently
+ configured Ron feature channels continue to receive their normal alert.
+ """
+ if not isinstance(item, dict) or item.get('kind') != 'notification':
+  return None
+ data=item.get('data')
+ if not isinstance(data, dict) or any((
+     data.get('title') != 'Stamina',
+     data.get('purpose') != 'daily_stamina',
+     data.get('rule_source') != 'daily routine',
+     data.get('action_required') is not True,
+ )):
+  return None
+ deadline=parsed_utc(data.get('deadline_utc'))
+ now=now or datetime.now(timezone.utc)
+ if deadline is None or now.tzinfo is None:
+  return None
+ if (deadline.hour,deadline.minute,deadline.second,deadline.microsecond) != (0,0,0,0):
+  return None
+ now=now.astimezone(timezone.utc)
+ if not timedelta(0) < deadline-now <= timedelta(hours=1):
+  return None
+ # The alert belongs to the UTC day that ends at this reset.
+ if data.get('event_date') != (deadline-timedelta(days=1)).date().isoformat():
+  return None
+ message='Stamina reset reminder: collect unclaimed Stamina and Intel rewards before 00:00 UTC.'
+ return (message, deadline.isoformat()) if CHAT_TEXT.fullmatch(message) else None
 
 
 PLAN_EVENTS = {'bia': 'Brothers in Arms', 'svs': 'SvS Preparation'}
@@ -645,6 +677,26 @@ class RonBurgundyCog(commands.Cog):
       changed.add(gid)
     if accepted and targets:
      ack.append(item['id'])
+     # Send the same Stamina reminder to WoS Alliance Chat as well as every
+     # Council-configured Ron Discord channel. Only the single Pi's primary
+     # job queue can own a game-chat send, regardless of Discord server.
+     reminder = routine_chat_reminder(item)
+     if (reminder is not None and self.guild_id in guild_ids
+         and any(states[gid]['alerts'].get('Stamina',False)
+                 and self.bot.settings.feature_channels(gid,'ron')
+                 for gid in targets)):
+      home = states.setdefault(self.guild_id, self._read(self.guild_id))
+      job_id='chat_stamina_'+hashlib.sha256(item['id'].encode('utf-8')).hexdigest()[:24]
+      if not any(isinstance(j,dict) and j.get('id')==job_id for j in home['jobs']):
+       message, expires = reminder
+       home['jobs'].append({'id':job_id,'kind':'chat_send',
+                           'text':message,'expires_utc':expires,
+                           'created_utc':utcnow(),'state':'queued'})
+       home['jobs']=home['jobs'][-250:]
+       home['revision']+=1
+       changed.add(self.guild_id)
+       self._change.set()
+       self._change=asyncio.Event()
    # All guild state (including queued deliveries) is durable before ack.
    for gid in changed:
     self._save(states[gid], gid)
