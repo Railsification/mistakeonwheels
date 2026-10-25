@@ -479,6 +479,84 @@ class RonCogTests(unittest.TestCase):
                         'plan_editor_cmd', 'plan_pending_cmd', 'plan_approve_cmd'):
             self.assertTrue(hasattr(ron.RonBurgundyCog, command), command)
 
+class RemindCommandTests(RonCogTests):
+    """!ron remind ...: adjustable event reminders travel to the Pi inside `rules`."""
+
+    def rules(self, gid=111):
+        return self.cog._read(gid)['rules']
+
+    def test_default_summary_and_help(self):
+        ctx = FakeCtx(111)
+        run(self.cog.ron_prefix_remind.callback(self.cog, ctx))
+        self.assertIn('Daily briefing: **ON**', ctx.sent[-1])
+        self.assertIn('Mercenary Prestige', ctx.sent[-1])
+        run(self.cog.ron_remind_help.callback(self.cog, ctx))
+        self.assertIn('remind hours', ctx.sent[-1])
+
+    def test_hours_event_hours_add_remove_reset(self):
+        ctx = FakeCtx(111)
+        run(self.cog.ron_remind_hours.callback(self.cog, ctx, '1', '24', '12'))
+        self.assertEqual(self.rules()['__reminders__']['end_hours'], [24, 12, 1])
+        run(self.cog.ron_remind_hours.callback(self.cog, ctx, 'banana'))
+        self.assertIn('numbers of hours', ctx.sent[-1])
+        self.assertEqual(self.rules()['__reminders__']['end_hours'], [24, 12, 1])
+        run(self.cog.ron_remind_eventhours.callback(self.cog, ctx, 'Mercenary Prestige', '48', '0.5'))
+        self.assertEqual(self.rules()['Mercenary Prestige']['end_hours'], [48, 0.5])
+        run(self.cog.ron_remind_eventhours.callback(self.cog, ctx, 'Mercenary Prestige', 'default'))
+        self.assertNotIn('end_hours', self.rules()['Mercenary Prestige'])
+        run(self.cog.ron_remind_add.callback(self.cog, ctx, event='"Frostwind Journey"'))
+        self.assertIn('Frostwind Journey', self.rules()['__reminders__']['selected'])
+        run(self.cog.ron_remind_remove.callback(self.cog, ctx, event="Dragonborn's Truck"))
+        self.assertNotIn("Dragonborn's Truck", self.rules()['__reminders__']['selected'])
+        self.assertIn('Mercenary Prestige', self.rules()['__reminders__']['selected'])
+        run(self.cog.ron_remind_reset.callback(self.cog, ctx))
+        self.assertEqual(self.rules()['__reminders__'], {})
+
+    def test_briefing_and_store_settings_validate(self):
+        ctx = FakeCtx(111)
+        run(self.cog.ron_remind_briefing_time.callback(self.cog, ctx, '06:15'))
+        d = self.rules()['__reminders__']['digest']
+        self.assertEqual((d['hour'], d['minute']), (6, 15))
+        run(self.cog.ron_remind_briefing_time.callback(self.cog, ctx, '25:99'))
+        self.assertIn('HH:MM', ctx.sent[-1])
+        run(self.cog.ron_remind_briefing_days.callback(self.cog, ctx, 20))
+        self.assertIn('0-14', ctx.sent[-1])
+        run(self.cog.ron_remind_briefing.callback(self.cog, ctx, 'off'))
+        self.assertIs(self.rules()['__reminders__']['digest']['on'], False)
+        run(self.cog.ron_remind_store_hours.callback(self.cog, ctx, '2', '1'))
+        self.assertEqual(self.rules()['__reminders__']['store']['hours'], [2, 1])
+        run(self.cog.ron_remind_store_daily.callback(self.cog, ctx, 'off'))
+        self.assertIs(self.rules()['__reminders__']['store']['with_daily'], False)
+        run(self.cog.ron_remind_storewindow.callback(self.cog, ctx, 'Frostdragon Tyrant', 40))
+        self.assertEqual(self.rules()['Frostdragon Tyrant']['shop_window_hours'], 40)
+
+    def test_settings_reach_the_pi_and_need_manager(self):
+        ctx = FakeCtx(111)
+        run(self.cog.ron_remind_hours.callback(self.cog, ctx, '6'))
+        sent = body(run(self.cog.control(FakeRequest(query={'revision': '0'}))))
+        self.assertEqual(sent['rules']['__reminders__']['end_hours'], [6])
+        denied = FakeCtx(111, manager=False)
+        run(self.cog.ron_remind_hours.callback(self.cog, denied, '3'))
+        self.assertEqual(self.rules()['__reminders__']['end_hours'], [6])
+
+    def test_briefing_and_end_reminder_notices_are_delivered(self):
+        briefing = {'id': 'eventplan_brief', 'kind': 'notification', 'data': {
+            'title': 'Event briefing', 'summary': '**Ending soon**\n• **Mercenary Prestige** ends in 23 h',
+            'action_required': True, 'notice_type': 'urgent_text', 'briefing': True, 'event_rule': True}}
+        end = {'id': 'eventplan_end', 'kind': 'notification', 'data': {
+            'title': 'Mercenary Prestige — ending reminder', 'summary': '**Mercenary Prestige** ends in about 1 h.',
+            'action_required': True, 'notice_type': 'urgent_text', 'event_rule': True}}
+        self.sync(briefing, end)
+        queued = [d for gid in (111, 222) for d in self.cog._read(gid)['deliveries'].values()]
+        titles = sorted({d['title'] for d in queued})
+        self.assertEqual(titles, ['Event briefing', 'Mercenary Prestige — ending reminder'])
+        text = ron.alert_text('Event briefing', next(d for d in queued if d['title'] == 'Event briefing')['data'])
+        self.assertIn('\n• **Mercenary Prestige**', text)
+        self.assertNotIn('action required', text)
+        text2 = ron.alert_text('Mercenary Prestige — ending reminder',
+                               next(d for d in queued if d['title'].endswith('ending reminder'))['data'])
+        self.assertIn('action required', text2)
+
 
 if __name__ == '__main__':
     unittest.main()
