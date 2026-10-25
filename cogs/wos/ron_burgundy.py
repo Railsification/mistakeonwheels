@@ -1,11 +1,17 @@
 # cogs/wos/ron_burgundy.py
 from __future__ import annotations
-__version__ = '1.4.4'
+__version__ = '1.5.0'
 """HotBot-side Ron control; the Raspberry Pi initiates every connection.
 
 Ron is configured independently in every HotBot guild. Existing Pi clients
 that omit guild_id continue to work; their observations fan out to configured
 guilds, each with independent alerts, jobs and council feature channels.
+
+v1.5.0: no guild is "primary" for Ron any more. WoS Alliance Chat readings and
+Pi capabilities fan out to every configured guild, /ron chat_send and
+/ron chat_recent work in every configured guild, and one shared tablet job queue
+is de-duplicated across guilds. Adds simple `!ron ...` prefix commands for
+everyday use and Help All controls (Discord and an officer-armed WoS chat form).
 """
 import asyncio
 import hashlib
@@ -29,6 +35,11 @@ from core.logger import info, err
 
 DATA = 'ron_control.json'
 JOBS = {'calendar', 'mail', 'task_list', 'chat', 'help', 'notice', 'personal', 'chat_send'}
+# Jobs that carry their own payload and are never offered as a plain /ron check.
+CONTROL_JOBS = {'help_control'}
+ALL_JOBS = JOBS | CONTROL_JOBS
+HELPALL_ARM_MAX_MINUTES = 24 * 60
+HELPALL_ARM_DEFAULT_MINUTES = 30
 DEFAULT_SCHEDULE = {
  'calendar': {'enabled': True, 'cadence': 'daily', 'utc_hour': 0, 'utc_minute': 5},
  'mail': {'enabled': True, 'cadence': 'hourly', 'utc_minute': 0},
@@ -61,7 +72,9 @@ def baseline():
          'events': {}, 'receipts': {}, 'updated_ids': {}, 'research': {},
          'channel_id': 0, 'last_seen': None, 'deliveries': {},
          'event_baseline_at': None, 'plans': {}, 'plan_editors': [], 'proposals': {},
-         'chat_messages': {}, 'chat_command_seen': {}, 'bridge_capabilities': {}}
+         'chat_messages': {}, 'chat_command_seen': {}, 'bridge_capabilities': {},
+         'helpall': {'armed_until': None, 'armed_by': '', 'desired': None,
+                     'updated_utc': None, 'updated_by': ''}}
 
 
 def normalize(raw):
@@ -211,13 +224,17 @@ def alert_text(title, data):
 
 
 CHAT_COMMAND = re.compile(r'^!ron\s+(help|status|events|bear|fortress|calendar|mail|task)\s*[.!]?$',re.I)
+# Help All control from WoS chat. Anyone can read the state; changing it works only
+# while a Discord officer has armed it (see helpall_armed()). OCR never proves WHO
+# typed a line, so the authority comes from the Discord officer, not the chat name.
+HELPALL_COMMAND = re.compile(r'^!ron\s+help\s*all\s+(on|off|status)\s*[.!]?$',re.I)
 CHAT_TEXT = re.compile(r'^[A-Za-z0-9 .,!?@#:/()_+=-]{1,180}$')
 
 
 def chat_reply(verb, b):
  """Only public, read-only responses; no player authority inferred from OCR."""
  if verb == 'help':
-  return 'Ron commands: !ron help, status, events, bear, fortress. Officers control scans in Discord.'
+  return 'Ron commands: !ron help, status, events, bear, fortress, helpall status. Officers control scans in Discord.'
  if verb == 'status':
   stamp=parsed_utc(b.get('last_seen'))
   return 'Ron connected to Discord.' if stamp and datetime.now(timezone.utc)-stamp < timedelta(minutes=5) else 'Ron is reconnecting.'
@@ -229,6 +246,50 @@ def chat_reply(verb, b):
  if verb in ('bear','fortress'):
   return 'Please check your alliance schedule or ask an R4 for confirmed times.'
  return 'For security, only Discord officers can request tablet scans.'
+
+
+def helpall_armed(b, now=None):
+    """True while a Discord officer has opened the Help All chat-control window."""
+    row = b.get('helpall') if isinstance(b, dict) else None
+    until = parsed_utc(row.get('armed_until')) if isinstance(row, dict) else None
+    return bool(until and until > (now or datetime.now(timezone.utc)))
+
+
+_ASCII_FIXES = str.maketrans({
+ '\u2018': None, '\u2019': None, '\u201c': None, '\u201d': None, '`': None,
+ '\u2013': '-', '\u2014': '-', '\u2026': '...', '\u00a0': ' ',
+ '\n': ' ', '\r': ' ', '\t': ' ',
+})
+CHAT_TEXT_HELP = ('Use 1-180 characters: letters, numbers, spaces and . , ! ? @ # : / ( ) _ + = - only '
+                  '(apostrophes and quotes are removed automatically).')
+
+
+def wos_chat_text(message):
+    """Normalise a Discord message into what the tablet keyboard can type, or None."""
+    if not isinstance(message, str):
+        return None
+    cleaned = ' '.join(message.translate(_ASCII_FIXES).split())
+    return cleaned if CHAT_TEXT.fullmatch(cleaned) else None
+
+
+def expire_stale_jobs(b, now=None):
+    """Mark queued/running tablet-message jobs past their expiry as failed.
+
+    Without this a message the Pi never collected stayed 'queued' for ever and
+    blocked every later /ron chat_send ("already queued").  Returns True if changed.
+    """
+    now = now or datetime.now(timezone.utc)
+    changed = False
+    for job in b.get('jobs', []):
+        if (isinstance(job, dict) and job.get('kind') in ('chat_send', 'help_control')
+                and job.get('state') in ('queued', 'running')):
+            expiry = parsed_utc(job.get('expires_utc'))
+            if expiry is not None and expiry <= now:
+                job['state'] = 'failed'
+                job['detail'] = 'Expired before the Pi completed it'
+                job['updated_utc'] = utcnow()
+                changed = True
+    return changed
 
 
 def routine_chat_reminder(item, now=None):
@@ -297,7 +358,7 @@ class RonBurgundyCog(commands.Cog):
   'title': 'Ron Burgundy monitoring',
   'summary': 'View detected WoS events, control alerts and queue Pi checks.',
   'goal': 'Keep WoS schedule and Discord announcements in sync.',
-  'how_to_play': 'Use /council feature_channel_add with feature ron; use /ron events, /ron alert, /ron check, and /ron schedule.',
+  'how_to_play': 'Use /council feature_channel_add with feature ron; use /ron events, /ron alert, /ron check, and /ron schedule. Everyday shortcuts: !ron status, !ron say <message>, !ron helpall on|off.',
   'rules': 'Server managers manage their own server. The Pi only pushes changed facts.',
   'details': 'No Discord command accesses the tablet directly; the Pi collects queued requests.',
  }
@@ -452,14 +513,20 @@ class RonBurgundyCog(commands.Cog):
     if stamp is None or (now - stamp).total_seconds() > 180:
      b['last_seen'] = utcnow()
      self._save(b, gid)
+    if expire_stale_jobs(b):
+     self._save(b, gid)
     jobs = [
      {**{'id': j['id'], 'kind': j['kind'], 'guild_id': gid},
       **({'text': j['text'], 'expires_utc': j['expires_utc']}
-         if j.get('kind')=='chat_send' else {})}
+         if j.get('kind')=='chat_send' else {}),
+      **({'enabled': j['enabled'], 'expires_utc': j['expires_utc']}
+         if j.get('kind')=='help_control' else {})}
     for j in b['jobs'] if isinstance(j, dict) and j.get('state') == 'queued'
-     and isinstance(j.get('id'), str) and j.get('kind') in JOBS
+     and isinstance(j.get('id'), str) and j.get('kind') in ALL_JOBS
      and (j.get('kind')!='chat_send' or
-          (isinstance(j.get('text'),str) and isinstance(j.get('expires_utc'),str)))]
+          (isinstance(j.get('text'),str) and isinstance(j.get('expires_utc'),str)))
+     and (j.get('kind')!='help_control' or
+          (type(j.get('enabled')) is bool and isinstance(j.get('expires_utc'),str)))]
     all_jobs.extend(jobs)
     guilds[str(gid)] = {
      'revision': b['revision'], 'alerts': b['alerts'],
@@ -496,7 +563,9 @@ class RonBurgundyCog(commands.Cog):
    if pressed:capabilities['healer_last_pressed_utc']=pressed.isoformat()
    b['bridge_capabilities']=capabilities
   elif kind == 'chat':
-   # Alliance chat is private to the Pi's designated primary guild.
+   # The tablet's Alliance Chat is mirrored to every configured guild's own Ron
+   # channels. Replies to in-game commands are decided once per reading, in
+   # _chat_followups(), because there is only one tablet to type with.
    line=str(data.get('text') or '').strip()
    source=data.get('source')
    observed=parsed_utc(data.get('observed_utc'))
@@ -516,22 +585,6 @@ class RonBurgundyCog(commands.Cog):
     b['deliveries'].setdefault(key,{'id':ident,'channel_id':int(cid),
      'title':'Alliance Chat','data':{'notice_type':'chat_mirror','text':safe_line},
      'state':'queued'})
-   found=CHAT_COMMAND.fullmatch(line)
-   if found:
-    verb=found.group(1).casefold()
-    previous=parsed_utc(b['chat_command_seen'].get(verb))
-    if previous is None or datetime.now(timezone.utc)-previous >= timedelta(minutes=10):
-     b['chat_command_seen'][verb]=utcnow()
-     if len(b['chat_command_seen'])>30:
-      for old in list(b['chat_command_seen'])[:-20]:b['chat_command_seen'].pop(old,None)
-     reply=chat_reply(verb,b)
-     if CHAT_TEXT.fullmatch(reply):
-      b['jobs'].append({'id':'chat_'+secrets.token_hex(12),'kind':'chat_send',
-                       'text':reply,'created_utc':utcnow(),'state':'queued',
-                       'expires_utc':(datetime.now(timezone.utc)+timedelta(minutes=5)).isoformat()})
-      b['revision']+=1
-      self._change.set()
-      self._change=asyncio.Event()
   elif kind == 'event':
    title = data.get('title', '')
    if not safe_title(title):
@@ -652,11 +705,7 @@ class RonBurgundyCog(commands.Cog):
      continue
     item_target = self._requested_guild(request, item) if 'guild_id' in item else target_guild
     # Status receipts from legacy Pi clients are routed by job ID when possible.
-    if item.get('kind') in ('chat','capabilities'):
-     # Private WoS chat belongs only to the Pi's primary configured guild,
-     # even when a malformed update supplies another guild_id.
-     targets = [self.guild_id] if self.guild_id in guild_ids else []
-    elif item_target is not None:
+    if item_target is not None:
      targets = [item_target]
     elif item.get('kind') == 'status':
      job_id = item.get('data', {}).get('job_id') if isinstance(item.get('data'), dict) else None
@@ -668,6 +717,8 @@ class RonBurgundyCog(commands.Cog):
     else:
      targets = guild_ids
     accepted = True
+    was_new = item.get('kind') == 'chat' and any(
+     item.get('id') not in states.setdefault(gid, self._read(gid))['updated_ids'] for gid in targets)
     for gid in targets:
      b = states.setdefault(gid, self._read(gid))
      result = self._apply_update(b, item, gid)
@@ -677,24 +728,28 @@ class RonBurgundyCog(commands.Cog):
       changed.add(gid)
     if accepted and targets:
      ack.append(item['id'])
+     if was_new:
+      # One tablet, one reply: decided once across every configured guild.
+      changed.update(self._chat_followups(item, states, guild_ids))
      # Send the same Stamina reminder to WoS Alliance Chat as well as every
-     # Council-configured Ron Discord channel. Only the single Pi's primary
-     # job queue can own a game-chat send, regardless of Discord server.
+     # Council-configured Ron Discord channel. There is one tablet, so the
+     # in-game message is queued exactly once, in the first participating guild.
      reminder = routine_chat_reminder(item)
-     if (reminder is not None and self.guild_id in guild_ids
-         and any(states[gid]['alerts'].get('Stamina',False)
-                 and self.bot.settings.feature_channels(gid,'ron')
-                 for gid in targets)):
-      home = states.setdefault(self.guild_id, self._read(self.guild_id))
+     participants = [gid for gid in targets
+                     if states[gid]['alerts'].get('Stamina',False)
+                     and self.bot.settings.feature_channels(gid,'ron')]
+     if reminder is not None and participants:
       job_id='chat_stamina_'+hashlib.sha256(item['id'].encode('utf-8')).hexdigest()[:24]
-      if not any(isinstance(j,dict) and j.get('id')==job_id for j in home['jobs']):
+      if not any(isinstance(j,dict) and j.get('id')==job_id
+                 for gid in guild_ids for j in states.setdefault(gid, self._read(gid))['jobs']):
+       home = states[participants[0]]
        message, expires = reminder
        home['jobs'].append({'id':job_id,'kind':'chat_send',
                            'text':message,'expires_utc':expires,
                            'created_utc':utcnow(),'state':'queued'})
        home['jobs']=home['jobs'][-250:]
        home['revision']+=1
-       changed.add(self.guild_id)
+       changed.add(participants[0])
        self._change.set()
        self._change=asyncio.Event()
    # All guild state (including queued deliveries) is durable before ack.
@@ -702,6 +757,206 @@ class RonBurgundyCog(commands.Cog):
     self._save(states[gid], gid)
   await self._deliver_pending()
   return web.json_response({'ack': ack})
+
+
+ # ---- shared tablet helpers (one Pi, one tablet, every configured guild) ----
+
+ def _job_home(self, states, guild_ids):
+  """Guild whose queue carries a tablet job: first with Ron channels, else first."""
+  for gid in guild_ids:
+   if self.bot.settings.feature_channels(gid, 'ron'):
+    return gid
+  return guild_ids[0] if guild_ids else self.guild_id
+
+ def _active_tablet_job(self, kind, states=None):
+  """Any queued/running job of this kind in ANY guild (single shared tablet)."""
+  for gid in self._guild_ids():
+   b = (states or {}).get(gid) or self._read(gid)
+   if any(isinstance(j, dict) and j.get('kind') == kind and j.get('state') in ('queued', 'running')
+          for j in b['jobs']):
+    return True
+  return False
+
+ def _capabilities_for(self, guild_ids):
+  """Newest-known Pi capabilities; every guild receives the same report."""
+  merged = {}
+  for gid in guild_ids:
+   merged.update({k: v for k, v in (self._read(gid).get('bridge_capabilities') or {}).items()})
+  return merged
+
+ def _append_chat_job(self, b, text, minutes=5, ident=None):
+  b['jobs'].append({'id': ident or 'chat_' + secrets.token_hex(12), 'kind': 'chat_send',
+                    'text': text, 'state': 'queued', 'created_utc': utcnow(),
+                    'expires_utc': (datetime.now(timezone.utc) + timedelta(minutes=minutes)).isoformat()})
+  b['jobs'] = b['jobs'][-250:]
+  b['revision'] = int(b['revision']) + 1
+  self._change.set()
+  self._change = asyncio.Event()
+
+ def _append_help_job(self, b, enabled, source):
+  b['jobs'].append({'id': 'help_' + secrets.token_hex(12), 'kind': 'help_control',
+                    'enabled': bool(enabled), 'source': source, 'state': 'queued',
+                    'created_utc': utcnow(),
+                    'expires_utc': (datetime.now(timezone.utc) + timedelta(minutes=10)).isoformat()})
+  b['jobs'] = b['jobs'][-250:]
+  state = b.setdefault('helpall', baseline()['helpall'])
+  state['desired'] = bool(enabled)
+  state['updated_utc'] = utcnow()
+  state['updated_by'] = str(source)[:80]
+  b['revision'] = int(b['revision']) + 1
+  self._change.set()
+  self._change = asyncio.Event()
+
+ def _chat_followups(self, item, states, guild_ids):
+  """One decision per WoS chat reading: read-only replies and Help All control.
+
+  Returns the set of guild IDs whose state changed.  The reply job is queued once,
+  in a single guild, because every guild shares the same Pi tablet.
+  """
+  changed = set()
+  data = item.get('data') if isinstance(item.get('data'), dict) else {}
+  line = str(data.get('text') or '').strip()
+  observed = parsed_utc(data.get('observed_utc'))
+  now = datetime.now(timezone.utc)
+  if (data.get('source') != 'alliance_chat' or observed is None
+      or abs((now - observed).total_seconds()) > 600 or not line.startswith('!')):
+   return changed
+  home_gid = self._job_home(states, guild_ids)
+  home = states.setdefault(home_gid, self._read(home_gid))
+
+  def seen_recently(key, minutes):
+   stamps = [parsed_utc((states.setdefault(g, self._read(g)).get('chat_command_seen') or {}).get(key))
+             for g in guild_ids]
+   latest = max((x for x in stamps if x), default=None)
+   return latest is not None and now - latest < timedelta(minutes=minutes)
+
+  def remember(key):
+   seen = home.setdefault('chat_command_seen', {})
+   seen[key] = utcnow()
+   if len(seen) > 30:
+    for old in list(seen)[:-20]:
+     seen.pop(old, None)
+   changed.add(home_gid)
+
+  def say(text):
+   caps = self._capabilities_for(guild_ids)
+   if caps and not caps.get('chat_send_calibrated'):
+    return  # Never queue replies the tablet cannot type.
+   if CHAT_TEXT.fullmatch(text):
+    self._append_chat_job(home, text)
+    changed.add(home_gid)
+
+  found = CHAT_COMMAND.fullmatch(line)
+  if found:
+   verb = found.group(1).casefold()
+   if not seen_recently(verb, 10):
+    remember(verb)
+    say(chat_reply(verb, home))
+   return changed
+  found = HELPALL_COMMAND.fullmatch(line)
+  if not found:
+   return changed
+  action = found.group(1).casefold()
+  caps = self._capabilities_for(guild_ids)
+  if action == 'status':
+   if not seen_recently('helpall_status', 2):
+    remember('helpall_status')
+    say('Help All is ' + ('ON' if caps.get('healer_enabled') else 'OFF')
+        + '. Officers can change it from Discord.')
+   return changed
+  armed = any(helpall_armed(states.setdefault(g, self._read(g)), now) for g in guild_ids)
+  if not armed:
+   if not seen_recently('helpall_denied', 10):
+    remember('helpall_denied')
+    say('Help All control is locked. A Discord officer must arm it first.')
+   return changed
+  key = 'helpall_' + action
+  if seen_recently(key, 1) or self._active_tablet_job('help_control', states):
+   return changed
+  remember(key)
+  self._append_help_job(home, action == 'on', 'wos_chat')
+  say('Help All ' + action.upper() + ' requested.')
+  return changed
+
+ async def _queue_chat_message(self, guild_id, message):
+  """Queue one Alliance Chat message for the shared tablet; returns user feedback."""
+  text = wos_chat_text(message)
+  if text is None:
+   return CHAT_TEXT_HELP
+  async with self._lock:
+   b = self._read(guild_id)
+   caps = self._capabilities_for(self._guild_ids())
+   if caps and not caps.get('chat_send_calibrated'):
+    return 'WoS chat Send is not calibrated on the Pi yet. No message queued.'
+   for gid in self._guild_ids():
+    other = self._read(gid)
+    if expire_stale_jobs(other):
+     self._save(other, gid)
+    if gid == guild_id:
+     b = other
+   if self._active_tablet_job('chat_send'):
+    return 'A WoS chat message is already waiting for the tablet. Try again in a minute, or check status.'
+   self._append_chat_job(b, text)
+   self._signal(b, guild_id)
+  return 'Queued for WoS Alliance Chat: ' + discord.utils.escape_mentions(text) + '\nThis is NOT confirmation it was sent; check status.'
+
+ async def _queue_check(self, guild_id, kind):
+  async with self._lock:
+   b = self._read(guild_id)
+   active = next((j for j in b['jobs'] if isinstance(j, dict) and
+                  j.get('kind') == kind and j.get('state') in ('queued', 'running', 'processing')), None)
+   if active:
+    return 'Already queued'
+   b['jobs'].append({'id': 'check_' + secrets.token_hex(12), 'kind': kind,
+                     'state': 'queued', 'created_utc': utcnow()})
+   self._signal(b, guild_id)
+  return 'Queued'
+
+ async def _set_helpall(self, guild_id, enabled, author_id):
+  async with self._lock:
+   b = self._read(guild_id)
+   for gid in self._guild_ids():
+    other = self._read(gid)
+    if expire_stale_jobs(other):
+     self._save(other, gid)
+    if gid == guild_id:
+     b = other
+   if self._active_tablet_job('help_control'):
+    return 'A Help All change is already waiting for the Pi.'
+   self._append_help_job(b, enabled, 'discord:' + str(author_id))
+   self._signal(b, guild_id)
+  return (f'Help All **{"ON" if enabled else "OFF"}** requested. The Pi applies it within a minute; '
+          'use `!ron status` to confirm. Turning it ON works best while the Pi can reach the Help page '
+          '(see status).')
+
+ def _status_lines(self, guild_id):
+  b = self._read(guild_id)
+  jobs = [j for j in b['jobs'] if isinstance(j, dict) and j.get('kind') in ALL_JOBS]
+  pending = sum(j.get('state') in ('queued', 'running', 'processing') for j in jobs)
+  caps = self._capabilities_for(self._guild_ids())
+  delivery_errors = sum(x.get('state') in ('failed', 'uncertain')
+                        for x in b['deliveries'].values() if isinstance(x, dict))
+  lines = [f"Pi last contact: {b['last_seen'] or 'Never'}",
+           f"Active/pending checks: {pending}",
+           f"Saved calendar records (including history): {len(b['events'])}"]
+  if jobs:
+   lines.append('Recent checks:')
+   for job in jobs[-5:][::-1]:
+    name = str(job.get('kind', '?')).replace('_', ' ').title()
+    detail = discord.utils.escape_mentions(str(job.get('detail') or '')[:180])
+    lines.append(f"- {name}: **{job.get('state', '?')}**" + (f' — {detail}' if detail else ''))
+  chat_state = ('Ready for calibrated sends' if caps.get('chat_send_calibrated')
+                else 'Needs chat input/Send calibration')
+  lines.append(f'Chat reading: {"enabled" if caps.get("chat_capture_enabled") else "not yet confirmed"}; sending: {chat_state}')
+  healer = 'ON' if caps.get('healer_enabled') else 'OFF'
+  healer_ready = 'calibrated' if caps.get('healer_calibrated') else 'no Help icon calibration (Help page must be open or Alliance/Help buttons taught)'
+  lines.append(f'Alliance Help All: {healer} ({healer_ready})')
+  if caps.get('healer_last_pressed_utc'):
+   lines.append(f'Last Help All tap: {caps["healer_last_pressed_utc"]}')
+  lines.append('WoS chat Help All control: ' + ('ARMED until ' + str(b['helpall'].get('armed_until'))
+               if helpall_armed(b) else 'locked (officer arms it with !ron helpall arm)'))
+  lines.append(f'Failed/uncertain notification deliveries: {delivery_errors}')
+  return lines
 
  async def _deliver_pending(self, limit=12):
   """Resume unsent notifications across guilds; do not replay uncertain sends."""
@@ -981,33 +1236,8 @@ class RonBurgundyCog(commands.Cog):
  async def status_cmd(self, interaction: discord.Interaction):
   if not await self._manager(interaction):
    return
-  gid = interaction.guild_id
-  b = self._read(gid)
-  jobs = [j for j in b['jobs'] if isinstance(j, dict) and j.get('kind') in JOBS]
-  pending = sum(j.get('state') in ('queued', 'running', 'processing') for j in jobs)
-  delivery_errors = sum(x.get('state') in ('failed', 'uncertain')
-                        for x in b['deliveries'].values() if isinstance(x, dict))
-  lines = [f"Pi last contact: {b['last_seen'] or 'Never'}",
-           f"Active/pending checks: {pending}",
-           f"Saved calendar records (including history): {len(b['events'])}"]
-  if jobs:
-   lines.append('Recent checks:')
-   for job in jobs[-5:][::-1]:
-    kind = str(job.get('kind', '?')).replace('_', ' ').title()
-    status = str(job.get('state', '?'))
-    detail = discord.utils.escape_mentions(str(job.get('detail') or '')[:180])
-    lines.append(f'- {kind}: **{status}**' + (f' — {detail}' if detail else ''))
-  capabilities=b.get('bridge_capabilities') or {}
-  chat_state=('Ready for calibrated sends' if capabilities.get('chat_send_calibrated')
-              else 'Needs chat input/Send calibration')
-  lines.append(f'Chat reading: {"enabled" if capabilities.get("chat_capture_enabled") else "not yet confirmed"}; sending: {chat_state}')
-  healer = 'ON' if capabilities.get('healer_enabled') else 'OFF'
-  healer_ready = 'calibrated' if capabilities.get('healer_calibrated') else 'needs active Help icon calibration'
-  lines.append(f'Alliance healer: {healer} ({healer_ready})')
-  if capabilities.get('healer_last_pressed_utc'):
-   lines.append(f'Last Help tap: {capabilities["healer_last_pressed_utc"]}')
-  lines.append(f'Failed/uncertain notification deliveries: {delivery_errors}')
-  await interaction.response.send_message('\n'.join(lines)[:1900], ephemeral=True)
+  await interaction.response.send_message(
+   '\n'.join(self._status_lines(interaction.guild_id))[:1900], ephemeral=True)
 
  @ron.command(name='events', description='Show verified WoS events; request fresh scan if needed')
  async def events_cmd(self, interaction: discord.Interaction):
@@ -1226,27 +1456,9 @@ class RonBurgundyCog(commands.Cog):
  @ron.command(name='chat_send',description='Send one approved message to WoS Alliance Chat')
  async def chat_send_cmd(self,interaction:discord.Interaction,message:str):
   if not await self._manager(interaction):return
-  if interaction.guild_id != self.guild_id:
-   await interaction.response.send_message('Only the primary Ron guild can send to the tablet Alliance Chat.',ephemeral=True)
-   return
-  if not CHAT_TEXT.fullmatch(message):
-   await interaction.response.send_message(
-    'Use 1-180 plain ASCII characters; only standard letters, numbers and punctuation are supported by tablet typing.',ephemeral=True)
-   return
-  async with self._lock:
-   b=self._read(interaction.guild_id)
-   if b.get('bridge_capabilities') and not b['bridge_capabilities'].get('chat_send_calibrated'):
-    msg='WoS chat Send is not calibrated on the Pi yet. No message queued.'
-   elif any(j.get('kind')=='chat_send' and j.get('state') in ('queued','running')
-          for j in b['jobs'] if isinstance(j,dict)):
-    msg='A WoS chat message is already queued. Check /ron status.'
-   else:
-    b['jobs'].append({'id':'chat_'+secrets.token_hex(12),'kind':'chat_send',
-       'text':message,'state':'queued','created_utc':utcnow(),
-       'expires_utc':(datetime.now(timezone.utc)+timedelta(minutes=5)).isoformat()})
-    self._signal(b,interaction.guild_id)
-    msg='Queued WoS chat message. This is NOT confirmation it was sent; check /ron status.'
-  await interaction.response.send_message(msg,ephemeral=True)
+  # Works in every configured HotBot server; the single tablet queue is shared.
+  msg=await self._queue_chat_message(interaction.guild_id,message)
+  await interaction.response.send_message(msg[:1900],ephemeral=True)
 
  @ron.command(name='diagnose',description='Queue Chat, Task List, Mail, Calendar and Help checks')
  async def diagnose_cmd(self,interaction:discord.Interaction):
@@ -1271,9 +1483,6 @@ class RonBurgundyCog(commands.Cog):
  @ron.command(name='chat_recent',description='Review recent OCR chat readings privately')
  async def chat_recent_cmd(self,interaction:discord.Interaction):
   if not await self._manager(interaction):return
-  if interaction.guild_id != self.guild_id:
-   await interaction.response.send_message('Alliance chat readings belong to the primary Ron guild.',ephemeral=True)
-   return
   b=self._read(interaction.guild_id)
   rows=list(b['chat_messages'].values())[-12:]
   result='\n'.join(discord.utils.escape_mentions(str(x.get('text',''))[:220]) for x in rows)
@@ -1323,6 +1532,145 @@ class RonBurgundyCog(commands.Cog):
    self._signal(b, gid)
   await interaction.response.send_message(
    f'{kind.value} schedule: {old}. Saved on HotBot; Pi will sync.', ephemeral=True)
+
+
+ # ---- simple Discord !commands (same permission as the /ron slash commands) ----
+
+ PREFIX_CHECKS = {'calendar': 'calendar', 'mail': 'mail', 'task': 'task_list', 'tasks': 'task_list',
+                  'task_list': 'task_list', 'chat': 'chat', 'help': 'help', 'notice': 'notice',
+                  'personal': 'personal'}
+ PREFIX_HELP = ('**Ron commands** (Manage Server permission, any configured HotBot server)\n'
+                '`!ron status` — Pi health, recent checks, Help All state\n'
+                '`!ron say <message>` — post a message in WoS Alliance Chat\n'
+                '`!ron chat` — DM you the latest WoS chat readings\n'
+                '`!ron check <calendar|mail|task|chat|help|notice>` — queue one scan\n'
+                '`!ron diagnose` — queue Chat, Task List, Mail, Calendar and Help checks\n'
+                '`!ron helpall on|off|status` — control Alliance Help All on the Pi\n'
+                '`!ron helpall arm [minutes]` / `disarm` — let alliance members type '
+                '`!ron helpall on|off` in WoS chat for a limited time\n'
+                'Slash versions: `/ron status`, `/ron chat_send`, `/ron check`, `/ron events` …')
+
+ async def _prefix_manager(self, ctx):
+  member = ctx.author
+  if (ctx.guild is None or ctx.guild.id not in self._guild_ids()
+      or not isinstance(member, discord.Member)
+      or not (member.guild_permissions.manage_guild or member.guild_permissions.administrator)):
+   await ctx.send('Manage Server permission is required in a configured HotBot server.',
+                  allowed_mentions=discord.AllowedMentions.none())
+   return False
+  return True
+
+ @commands.group(name='ron', invoke_without_command=True)
+ @commands.guild_only()
+ async def ron_prefix(self, ctx: commands.Context):
+  if await self._prefix_manager(ctx):
+   await ctx.send(self.PREFIX_HELP, allowed_mentions=discord.AllowedMentions.none())
+
+ @ron_prefix.command(name='commands', aliases=['help'])
+ async def ron_prefix_commands(self, ctx: commands.Context):
+  if await self._prefix_manager(ctx):
+   await ctx.send(self.PREFIX_HELP, allowed_mentions=discord.AllowedMentions.none())
+
+ @ron_prefix.command(name='status')
+ async def ron_prefix_status(self, ctx: commands.Context):
+  if await self._prefix_manager(ctx):
+   await ctx.send('\n'.join(self._status_lines(ctx.guild.id))[:1900],
+                  allowed_mentions=discord.AllowedMentions.none())
+
+ @ron_prefix.command(name='say', aliases=['send'])
+ async def ron_prefix_say(self, ctx: commands.Context, *, message: str = ''):
+  if not await self._prefix_manager(ctx):
+   return
+  if not message.strip():
+   await ctx.send('Usage: `!ron say <message for WoS Alliance Chat>`')
+   return
+  await ctx.send((await self._queue_chat_message(ctx.guild.id, message))[:1900],
+                 allowed_mentions=discord.AllowedMentions.none())
+
+ @ron_prefix.command(name='chat', aliases=['recent'])
+ async def ron_prefix_chat(self, ctx: commands.Context):
+  if not await self._prefix_manager(ctx):
+   return
+  rows = list(self._read(ctx.guild.id)['chat_messages'].values())[-12:]
+  text = '\n'.join(discord.utils.escape_mentions(str(x.get('text', ''))[:220]) for x in rows)
+  try:
+   # Alliance chat is private to the alliance, so it goes to the officer's DMs.
+   await ctx.author.send((text or 'No recent recognised WoS chat yet.')[:1900])
+   await ctx.send('Sent the latest WoS chat readings to your DMs.')
+  except (discord.Forbidden, discord.HTTPException):
+   await ctx.send('I could not DM you. Enable DMs from this server, or use `/ron chat_recent`.')
+
+ @ron_prefix.command(name='check', aliases=['scan'])
+ async def ron_prefix_check(self, ctx: commands.Context, kind: str = ''):
+  if not await self._prefix_manager(ctx):
+   return
+  job = self.PREFIX_CHECKS.get(kind.strip().casefold())
+  if job is None:
+   await ctx.send('Usage: `!ron check calendar|mail|task|chat|help|notice`')
+   return
+  result = await self._queue_check(ctx.guild.id, job)
+  await ctx.send(f'{result}: {job}. Use `!ron status` for progress.')
+
+ @ron_prefix.command(name='diagnose')
+ async def ron_prefix_diagnose(self, ctx: commands.Context):
+  if not await self._prefix_manager(ctx):
+   return
+  done = [await self._queue_check(ctx.guild.id, k) for k in ('chat', 'task_list', 'mail', 'calendar', 'help')]
+  await ctx.send(f"Diagnosis requested ({', '.join(done)}). The Pi runs one tablet action at a time; "
+                 'use `!ron status` for results.')
+
+ @ron_prefix.group(name='helpall', invoke_without_command=True)
+ async def ron_prefix_helpall(self, ctx: commands.Context):
+  if await self._prefix_manager(ctx):
+   await ctx.send('Usage: `!ron helpall on|off|status|arm [minutes]|disarm`')
+
+ @ron_prefix_helpall.command(name='on')
+ async def ron_helpall_on(self, ctx: commands.Context):
+  if await self._prefix_manager(ctx):
+   await ctx.send(await self._set_helpall(ctx.guild.id, True, ctx.author.id),
+                  allowed_mentions=discord.AllowedMentions.none())
+
+ @ron_prefix_helpall.command(name='off')
+ async def ron_helpall_off(self, ctx: commands.Context):
+  if await self._prefix_manager(ctx):
+   await ctx.send(await self._set_helpall(ctx.guild.id, False, ctx.author.id),
+                  allowed_mentions=discord.AllowedMentions.none())
+
+ @ron_prefix_helpall.command(name='status')
+ async def ron_helpall_status(self, ctx: commands.Context):
+  if not await self._prefix_manager(ctx):
+   return
+  b = self._read(ctx.guild.id)
+  caps = self._capabilities_for(self._guild_ids())
+  armed = ('ARMED until ' + str(b['helpall'].get('armed_until'))) if helpall_armed(b) else 'locked'
+  await ctx.send(f"Help All is **{'ON' if caps.get('healer_enabled') else 'OFF'}** on the Pi "
+                 f"({'calibrated' if caps.get('healer_calibrated') else 'no Help icon calibration'}). "
+                 f"WoS chat control: {armed}. Last tap: {caps.get('healer_last_pressed_utc') or 'never'}.")
+
+ @ron_prefix_helpall.command(name='arm')
+ async def ron_helpall_arm(self, ctx: commands.Context, minutes: int = HELPALL_ARM_DEFAULT_MINUTES):
+  if not await self._prefix_manager(ctx):
+   return
+  minutes = max(1, min(HELPALL_ARM_MAX_MINUTES, int(minutes)))
+  async with self._lock:
+   b = self._read(ctx.guild.id)
+   row = b.setdefault('helpall', baseline()['helpall'])
+   row['armed_until'] = (datetime.now(timezone.utc) + timedelta(minutes=minutes)).isoformat()
+   row['armed_by'] = str(ctx.author.id)
+   self._signal(b, ctx.guild.id)
+  await ctx.send(f'WoS chat Help All control is **armed for {minutes} minute(s)**. Alliance members can type '
+                 '`!ron helpall on` or `!ron helpall off` in Alliance Chat until then. '
+                 'Disarm early with `!ron helpall disarm`.')
+
+ @ron_prefix_helpall.command(name='disarm')
+ async def ron_helpall_disarm(self, ctx: commands.Context):
+  if not await self._prefix_manager(ctx):
+   return
+  async with self._lock:
+   b = self._read(ctx.guild.id)
+   b.setdefault('helpall', baseline()['helpall'])['armed_until'] = None
+   self._signal(b, ctx.guild.id)
+  await ctx.send('WoS chat Help All control is locked again.')
 
 
 async def setup(bot: commands.Bot):
