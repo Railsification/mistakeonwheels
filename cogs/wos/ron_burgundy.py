@@ -1,6 +1,6 @@
 # cogs/wos/ron_burgundy.py
 from __future__ import annotations
-__version__ = '1.6.0'
+__version__ = '1.6.1'
 """HotBot-side Ron control; the Raspberry Pi initiates every connection.
 
 Ron is configured independently in every HotBot guild. Existing Pi clients
@@ -12,6 +12,8 @@ Pi capabilities fan out to every configured guild, /ron chat_send and
 /ron chat_recent work in every configured guild, and one shared tablet job queue
 is de-duplicated across guilds. Adds simple `!ron ...` prefix commands for
 everyday use and Help All controls (Discord and an officer-armed WoS chat form).
+v1.6.1: reminders cover every event: major events + all stores by default, `!ron remind all on`
+for the rest, `add`/`remove` per event.
 v1.6.0: adjustable event reminders. `!ron remind ...` sets the daily "Event briefing", the
 "ends in 24 h / 1 h" warnings (per event or for all), which events get them, and Frostdragon-style
 store reminders ("finalise your purchases"). Settings travel to the Pi in `rules['__reminders__']`
@@ -1738,14 +1740,16 @@ class RonBurgundyCog(commands.Cog):
  # ---- adjustable event reminders (!ron remind ...) -------------------------------------
  REMIND_KEY = '__reminders__'
  REMIND_DEFAULTS = {'end_hours': [24, 1],
-                    'selected': ['Mercenary Prestige', 'Frostdragon Tyrant', "Dragonborn's Truck"],
+                    'all': {'on': False, 'hours': [1]},
                     'digest': {'on': True, 'hour': 0, 'minute': 30, 'ahead_days': 3, 'ending_hours': 36},
                     'store': {'on': True, 'hours': [1], 'with_daily': True}}
  REMIND_HELP = ('**Event reminders** (all times UTC; Manage Server)\n'
                 '`!ron remind` — show the current settings\n'
                 '`!ron remind hours 24 1` — warn this many hours before a selected event ends (up to 6 values; 0.5 = 30 min)\n'
                 '`!ron remind eventhours "Mercenary Prestige" 24 12 1` — different hours for one event (`default` clears it)\n'
-                '`!ron remind add "Event"` / `remove "Event"` — choose which events get end warnings\n'
+                '`!ron remind add "Event"` / `remove "Event"` — turn end warnings on/off for one event (`default` puts it back: `!ron remind default "Event"`)\n'
+                '`!ron remind all on|off` — end warnings for EVERY event (`all hours 1` sets the hours for the non-major ones)\n'
+                'Default: the major events and every store event. The full list is on the Pi dashboard under Settings → Event reminders.\n'
                 '`!ron remind briefing on|off` — the daily "Event briefing" (what ends soon, open stores, what is coming)\n'
                 '`!ron remind briefing time 00:30` · `briefing days 3` (look-ahead) · `briefing ending 36` (hours)\n'
                 '`!ron remind store on|off` · `store hours 1` · `store daily on|off` (add the store line to the Stamina/Arena reminders)\n'
@@ -1757,10 +1761,9 @@ class RonBurgundyCog(commands.Cog):
   saved = b['rules'].get(self.REMIND_KEY)
   saved = saved if isinstance(saved, dict) else {}
   cfg = json.loads(json.dumps(self.REMIND_DEFAULTS))
-  for k in ('end_hours', 'selected'):
-   if isinstance(saved.get(k), list):
-    cfg[k] = saved[k]
-  for k in ('digest', 'store'):
+  if isinstance(saved.get('end_hours'), list):
+   cfg['end_hours'] = saved['end_hours']
+  for k in ('digest', 'store', 'all'):
    if isinstance(saved.get(k), dict):
     cfg[k].update(saved[k])
   return cfg
@@ -1803,7 +1806,9 @@ class RonBurgundyCog(commands.Cog):
   lines = ['**Event reminders** (times are UTC)',
            f"Daily briefing: **{'ON' if d['on'] else 'OFF'}** at {int(d['hour']):02d}:{int(d['minute']):02d} — "
            f"ending within {d['ending_hours']} h, open stores, events starting in {d['ahead_days']} days",
-           f"End warnings: {fmt(c['end_hours'])} before the end, for: " + (', '.join(c['selected']) or '(none)'),
+           f"End warnings: {fmt(c['end_hours'])} before the end for the major events (Mercenary Prestige, Alliance Mobilization, "
+           f"State of Power, King of Icefield, Flame and Fangs …). All-events mode: **{'ON' if c['all']['on'] else 'OFF'}**"
+           f" ({fmt(c['all']['hours'])} for the rest)",
            f"Store events: **{'ON' if st['on'] else 'OFF'}** — {fmt(st['hours'])} before the store closes; "
            f"also added to the daily Stamina/Arena reminders: {'yes' if st['with_daily'] else 'no'}"]
   over = [f"{k}: " + ', '.join(f'{a}={v}' for a, v in r.items() if a in ('end_hours', 'end_on', 'shop_window_hours'))
@@ -1863,38 +1868,69 @@ class RonBurgundyCog(commands.Cog):
    return discord.utils.escape_mentions(msg)
   await self._remind_edit(ctx, mutate)
 
- @ron_prefix_remind.command(name='add')
- async def ron_remind_add(self, ctx: commands.Context, *, event: str):
-  if not await self._prefix_manager(ctx):
-   return
+ async def _remind_event_flag(self, ctx, event, value):
   event = event.strip().strip('"')
   if not safe_title(event) or event.startswith('__'):
-   await ctx.send('Give the event name, e.g. `!ron remind add "Frostwind Journey"`.')
+   await ctx.send('Give the event name, e.g. `!ron remind add "Lucky Wheel"`.')
    return
   def mutate(saved, b):
-   chosen = list(self._remind_cfg(b)['selected'])
-   if event not in chosen:
-    chosen.append(event)
-   saved['selected'] = chosen
    rule = dict(b['rules'].get(event) or {})
-   rule.pop('end_on', None)
+   if value is None:
+    rule.pop('end_on', None)
+    msg = f'**{event}** is back to its default (major and store events warn; others only in all-events mode).'
+   else:
+    rule['end_on'] = value
+    msg = f"**{event}** end warnings: **{'ON' if value else 'OFF'}**."
    if rule:
     b['rules'][event] = rule
-   return discord.utils.escape_mentions(f'**{event}** will get end warnings. Selected: ' + ', '.join(chosen))
+   else:
+    b['rules'].pop(event, None)
+   return discord.utils.escape_mentions(msg)
   await self._remind_edit(ctx, mutate)
+
+ @ron_prefix_remind.command(name='add')
+ async def ron_remind_add(self, ctx: commands.Context, *, event: str):
+  if await self._prefix_manager(ctx):
+   await self._remind_event_flag(ctx, event, True)
 
  @ron_prefix_remind.command(name='remove')
  async def ron_remind_remove(self, ctx: commands.Context, *, event: str):
+  if await self._prefix_manager(ctx):
+   await self._remind_event_flag(ctx, event, False)
+
+ @ron_prefix_remind.command(name='default')
+ async def ron_remind_default(self, ctx: commands.Context, *, event: str):
+  if await self._prefix_manager(ctx):
+   await self._remind_event_flag(ctx, event, None)
+
+ @ron_prefix_remind.group(name='all', invoke_without_command=True)
+ async def ron_remind_all(self, ctx: commands.Context, state: str = ''):
   if not await self._prefix_manager(ctx):
    return
-  event = event.strip().strip('"')
-  if not safe_title(event) or event.startswith('__'):
-   await ctx.send('Give the event name, e.g. `!ron remind remove "Dragonborn\'s Truck"`.')
+  if state.lower() not in ('on', 'off'):
+   await ctx.send('Usage: `!ron remind all on|off` or `!ron remind all hours 1`.')
    return
   def mutate(saved, b):
-   chosen = [x for x in self._remind_cfg(b)['selected'] if x.casefold() != event.casefold()]
-   saved['selected'] = chosen
-   return discord.utils.escape_mentions(f'**{event}** no longer gets end warnings. Selected: ' + (', '.join(chosen) or '(none)'))
+   a = dict(saved.get('all') or {})
+   a['on'] = state.lower() == 'on'
+   saved['all'] = a
+   return f"All-events mode **{'ON' if a['on'] else 'OFF'}**: " + (
+    'every event with a confirmed end time now gets an end warning.' if a['on'] else 'only major and store events warn.')
+  await self._remind_edit(ctx, mutate)
+
+ @ron_remind_all.command(name='hours')
+ async def ron_remind_all_hours(self, ctx: commands.Context, *values: str):
+  if not await self._prefix_manager(ctx):
+   return
+  hours = self._parse_hours(values)
+  if hours is None:
+   await ctx.send('Give 1-6 numbers of hours, e.g. `!ron remind all hours 1`.')
+   return
+  def mutate(saved, b):
+   a = dict(saved.get('all') or {})
+   a['hours'] = hours
+   saved['all'] = a
+   return 'Non-major events (all-events mode): ' + ' + '.join(f'{h:g} h' for h in hours) + ' before the end.'
   await self._remind_edit(ctx, mutate)
 
  @ron_prefix_remind.group(name='briefing', invoke_without_command=True)
