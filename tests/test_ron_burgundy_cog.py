@@ -1,7 +1,7 @@
 # tests/test_ron_burgundy_cog.py
 from __future__ import annotations
 
-__version__ = '1.0.0'
+__version__ = '1.1.0'
 
 """Offline tests for cogs/wos/ron_burgundy.py (HotBot side of Ron Burgundy).
 
@@ -561,6 +561,112 @@ class RemindCommandTests(RonCogTests):
         text2 = ron.alert_text('Mercenary Prestige — ending reminder',
                                next(d for d in queued if d['title'].endswith('ending reminder'))['data'])
         self.assertIn('action required', text2)
+
+
+    # ---- post-Tyrant "like for gems" reminder ------------------------------------------
+    def likes(self, gid=111):
+        return ron.tyrant_likes_cfg(self.cog._read(gid))
+
+    def tyrant_item(self, ident, battle, **extra):
+        data = {'title': 'Frostdragon Tyrant', 'summary': 'Frostdragon Tyrant battle starts soon.',
+                'action_required': True, 'deadline_utc': battle.isoformat(), **extra}
+        return {'id': ident, 'kind': 'notification', 'data': data}
+
+    def test_tyrant_battle_notice_opens_the_like_window_on_its_utc_day(self):
+        battle = datetime.now(timezone.utc).replace(hour=18, minute=0, second=0, microsecond=0)
+        self.sync(self.tyrant_item('tyrant_battle_01', battle))
+        for gid in (111, 222):
+            self.assertEqual(self.likes(gid)['start_date'], battle.date().isoformat())
+        # 23:30 UTC battle finishes after reset, so its first like day is the next UTC day
+        late = battle.replace(hour=23, minute=30) + timedelta(days=1)
+        self.sync(self.tyrant_item('tyrant_battle_02', late))
+        self.assertEqual(self.likes()['start_date'], (late.date() + timedelta(days=1)).isoformat())
+
+    def test_store_end_and_signup_notices_do_not_open_the_window(self):
+        soon = datetime.now(timezone.utc) + timedelta(hours=2)
+        self.sync(self.tyrant_item('tyrant_store_001', soon, summary='Frostdragon Tyrant store closes in 1 h'),
+                  {'id': 'tyrant_end_00001', 'kind': 'notification', 'data': {
+                      'title': 'Frostdragon Tyrant — ending reminder', 'summary': 'ends in about 1 h.',
+                      'action_required': True, 'deadline_utc': soon.isoformat()}},
+                  self.tyrant_item('tyrant_sign_0001', soon, summary='Sign up for Frostdragon Tyrant'),
+                  self.tyrant_item('tyrant_old_00001', soon - timedelta(days=5)))
+        self.assertIsNone(self.likes()['start_date'])
+
+    def test_like_reminder_posts_once_per_day_at_the_set_time_in_every_guild(self):
+        day = datetime(2026, 10, 25, tzinfo=timezone.utc)
+        for gid in (111, 222):
+            b = self.cog._read(gid)
+            b['tyrant_likes'].update(start_date='2026-10-25')
+            self.cog._save(b, gid)
+        self.sync({'id': 'caps_0000000001', 'kind': 'capabilities', 'data': {'chat_send_calibrated': True}})
+        run(self.cog._tyrant_likes_tick(day.replace(hour=23, minute=44)))
+        self.assertEqual(self.bot.channels[1110].sent, [])  # not yet 23:45
+        run(self.cog._tyrant_likes_tick(day.replace(hour=23, minute=45, second=10)))
+        for cid in (1110, 2220):
+            self.assertEqual(len(self.bot.channels[cid].sent), 1)
+            self.assertIn('Frostdragon Tyrant likes: action required', self.bot.channels[cid].sent[0])
+            self.assertIn('Day 1 of 3', self.bot.channels[cid].sent[0])
+            reset = int(datetime(2026, 10, 26, tzinfo=timezone.utc).timestamp())
+            self.assertIn(f'<t:{reset}:F>', self.bot.channels[cid].sent[0])
+        chat = [j for j in self.jobs('chat_send') if j['id'].startswith('chat_tyrantlike_')]
+        self.assertEqual(len(chat), 1)  # one tablet, typed once
+        self.assertTrue(ron.CHAT_TEXT.fullmatch(chat[0]['text']))
+        self.assertEqual(chat[0]['expires_utc'], '2026-10-26T00:00:00+00:00')
+        # restart: a fresh cog reading the same files does not post the day again
+        self.cog = ron.RonBurgundyCog(self.bot)
+        run(self.cog._tyrant_likes_tick(day.replace(hour=23, minute=50)))
+        self.assertEqual(len(self.bot.channels[1110].sent), 1)
+        self.assertEqual(len([j for j in self.jobs('chat_send') if j['id'].startswith('chat_tyrantlike_')]), 1)
+        # day 3 posts; day 4 is outside the window
+        run(self.cog._tyrant_likes_tick(day.replace(day=27, hour=23, minute=46)))
+        self.assertIn('Day 3 of 3', self.bot.channels[1110].sent[-1])
+        run(self.cog._tyrant_likes_tick(day.replace(day=28, hour=23, minute=46)))
+        self.assertEqual(len(self.bot.channels[1110].sent), 2)
+
+    def test_no_chat_line_when_send_is_not_calibrated_or_chat_is_off(self):
+        self.sync({'id': 'caps_0000000001', 'kind': 'capabilities', 'data': {'chat_send_calibrated': False}})
+        b = self.cog._read(111)
+        b['tyrant_likes'].update(start_date='2026-10-25')
+        self.cog._save(b, 111)
+        run(self.cog._tyrant_likes_tick(datetime(2026, 10, 25, 23, 46, tzinfo=timezone.utc)))
+        self.assertEqual(len(self.bot.channels[1110].sent), 1)
+        self.assertEqual(self.bot.channels[2220].sent, [])  # no window in that guild
+        self.assertEqual(self.jobs('chat_send'), [])
+
+    def test_likes_commands_need_manager_and_persist(self):
+        ctx = FakeCtx(222)
+        today = datetime.now(timezone.utc).date()
+        run(self.cog.ron_likes_days.callback(self.cog, ctx, '4'))
+        run(self.cog.ron_likes_time.callback(self.cog, ctx, '23:30'))
+        run(self.cog.ron_likes_start.callback(self.cog, ctx, ''))
+        cfg = self.likes(222)
+        self.assertEqual((cfg['days'], cfg['hour'], cfg['minute'], cfg['start_date']),
+                         (4, 23, 30, today.isoformat()))
+        self.assertIsNone(self.likes(111)['start_date'])  # per guild
+        run(self.cog.ron_likes_start.callback(self.cog, ctx, 'not-a-date'))
+        self.assertIn('YYYY-MM-DD', ctx.sent[-1])
+        run(self.cog.ron_likes_days.callback(self.cog, ctx, '40'))
+        self.assertEqual(self.likes(222)['days'], 4)
+        run(self.cog.ron_likes_stop.callback(self.cog, ctx))
+        self.assertIsNone(self.likes(222)['start_date'])
+        # a stopped window is not reopened by a later notice for the same battle
+        battle = datetime.combine(today, datetime.min.time(), timezone.utc) + timedelta(hours=12)
+        self.sync(self.tyrant_item('tyrant_battle_09', battle))
+        self.assertIsNone(self.likes(222)['start_date'])
+        denied = FakeCtx(222, manager=False)
+        run(self.cog.ron_prefix_likes.callback(self.cog, denied, 'off'))
+        self.assertTrue(self.likes(222)['on'])
+        run(self.cog.ron_prefix_likes.callback(self.cog, ctx, 'off'))
+        self.assertFalse(self.likes(222)['on'])
+        run(self.cog.ron_prefix_likes.callback(self.cog, ctx, ''))
+        self.assertIn('Frostdragon Tyrant likes reminder', ctx.sent[-1])
+
+    def test_old_saved_state_without_likes_loads_with_defaults(self):
+        b = self.cog._read(111)
+        b.pop('tyrant_likes')
+        ron.save_guild_json(111, ron.DATA, b)
+        cfg = self.likes(111)
+        self.assertEqual((cfg['on'], cfg['days'], cfg['hour'], cfg['minute']), (True, 3, 23, 45))
 
 
 if __name__ == '__main__':

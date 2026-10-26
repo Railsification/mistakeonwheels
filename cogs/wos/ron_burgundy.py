@@ -1,6 +1,6 @@
 # cogs/wos/ron_burgundy.py
 from __future__ import annotations
-__version__ = '1.6.1'
+__version__ = '1.7.0'
 """HotBot-side Ron control; the Raspberry Pi initiates every connection.
 
 Ron is configured independently in every HotBot guild. Existing Pi clients
@@ -12,6 +12,11 @@ Pi capabilities fan out to every configured guild, /ron chat_send and
 /ron chat_recent work in every configured guild, and one shared tablet job queue
 is de-duplicated across guilds. Adds simple `!ron ...` prefix commands for
 everyday use and Help All controls (Discord and an officer-armed WoS chat form).
+v1.7.0: post-Frostdragon-Tyrant "like for gems" reminder. Every day of the like window
+(default 3 days, starting the UTC day the Tyrant battle finishes) Ron posts in each Ron channel at
+23:45 UTC (15 min before reset) and types one line in WoS Alliance Chat. It starts itself from Pi
+Tyrant battle notices, or with `!ron likes start`; adjust with `!ron likes days|time|chat|stop`.
+Runs on HotBot alone; no Pi change.
 v1.6.1: reminders cover every event: major events + all stores by default, `!ron remind all on`
 for the rest, `add`/`remove` per event.
 v1.6.0: adjustable event reminders. `!ron remind ...` sets the daily "Event briefing", the
@@ -33,7 +38,7 @@ import json
 import os
 import re
 import secrets
-from datetime import datetime, timezone, timedelta
+from datetime import datetime, timezone, timedelta, date as date_cls, time as time_cls
 from typing import Any
 
 import discord
@@ -75,6 +80,66 @@ DEFAULT_ALERTS = {
 }
 
 
+# After a Frostdragon Tyrant battle the alliance can "like" the Tyrant for gems
+# for a few days. Ron reminds 15 minutes before each daily reset in that window.
+TYRANT_LIKES_DEFAULTS = {'on': True, 'chat': True, 'days': 3, 'hour': 23, 'minute': 45,
+                         'start_date': None, 'stopped_date': None, 'source': '',
+                         'updated_utc': None, 'sent': {}}
+TYRANT_LIKES_TITLE = 'Frostdragon Tyrant likes'
+TYRANT_LIKES_CHAT = 'Reminder: like the Frostdragon Tyrant for free gems before reset at 00:00 UTC.'
+TYRANT_BATTLE_TITLE = re.compile(r'frost\s*dragon\s+tyrant', re.I)
+# Pi notices about the Tyrant store, sign-up or event end are not the battle itself.
+TYRANT_NOT_BATTLE = re.compile(r'\b(end|ends|ending|ended|store|shop|spend|purchase|closes?|sign[ -]?up|regist\w*)\b', re.I)
+
+
+def tyrant_likes_cfg(b):
+ """Saved like-window settings merged over the defaults, with sane types."""
+ saved = b.get('tyrant_likes') if isinstance(b.get('tyrant_likes'), dict) else {}
+ cfg = {**json.loads(json.dumps(TYRANT_LIKES_DEFAULTS)), **saved}
+ cfg['on'], cfg['chat'] = bool(cfg['on']), bool(cfg['chat'])
+ for key, low, high, fallback in (('days', 1, 14, 3), ('hour', 0, 23, 23), ('minute', 0, 59, 45)):
+  value = cfg.get(key)
+  cfg[key] = value if type(value) is int and low <= value <= high else fallback
+ for key in ('start_date', 'stopped_date'):
+  if not (isinstance(cfg.get(key), str) and PLAN_DATE.fullmatch(cfg[key])):
+   cfg[key] = None
+ cfg['sent'] = {k: v for k, v in cfg['sent'].items() if isinstance(k, str)} if isinstance(cfg['sent'], dict) else {}
+ return cfg
+
+
+def tyrant_like_due(cfg, now):
+ """UTC day (YYYY-MM-DD) whose like reminder is due now, or None.
+
+ Due from the configured time until that day's 00:00 UTC reset, once per day,
+ for `days` consecutive UTC days starting on the battle's UTC day.
+ """
+ if not cfg.get('on') or not cfg.get('start_date'):
+  return None
+ start = date_cls.fromisoformat(cfg['start_date'])
+ today = now.astimezone(timezone.utc).date()
+ if not 0 <= (today - start).days < cfg['days']:
+  return None
+ if now < datetime.combine(today, time_cls(cfg['hour'], cfg['minute']), timezone.utc):
+  return None
+ return None if today.isoformat() in cfg['sent'] else today.isoformat()
+
+
+def tyrant_battle_day(kind, data, now):
+ """UTC day a Pi-reported Tyrant battle finishes, or None if this is not one."""
+ if kind not in ('task', 'notification') or not isinstance(data, dict):
+  return None
+ title = str(data.get('title') or '')
+ text = ' '.join(str(data.get(k) or '') for k in ('title', 'summary', 'purpose', 'text'))
+ if (not TYRANT_BATTLE_TITLE.search(title) or 'like' in title.casefold()
+     or data.get('currency') or TYRANT_NOT_BATTLE.search(text)):
+  return None
+ battle = parsed_utc(data.get('deadline_utc')) or parsed_utc(data.get('start_utc'))
+ if battle is None or not (now - timedelta(days=2) <= battle <= now + timedelta(days=3)):
+  return None
+ # A battle runs well under an hour; one starting at 23:30 UTC finishes the next day.
+ return (battle + timedelta(hours=1)).date().isoformat()
+
+
 def utcnow():
  return datetime.now(timezone.utc).isoformat()
 
@@ -87,7 +152,8 @@ def baseline():
          'event_baseline_at': None, 'plans': {}, 'plan_editors': [], 'proposals': {},
          'chat_messages': {}, 'chat_command_seen': {}, 'bridge_capabilities': {},
          'helpall': {'chat_locked': False, 'armed_until': None, 'armed_by': '', 'desired': None,
-                     'updated_utc': None, 'updated_by': ''}}
+                     'updated_utc': None, 'updated_by': ''},
+         'tyrant_likes': json.loads(json.dumps(TYRANT_LIKES_DEFAULTS))}
 
 
 def normalize(raw):
@@ -113,6 +179,7 @@ def normalize(raw):
   if task.get('cadence') == 'trigger':
    task['cadence'] = 'hybrid'
   b['schedules']['task_list'] = task
+ b['tyrant_likes'] = tyrant_likes_cfg(b)
  return b
 
 
@@ -400,6 +467,7 @@ class RonBurgundyCog(commands.Cog):
   self._lock = asyncio.Lock()
   self._research_lock = asyncio.Lock()
   self._change = asyncio.Event()
+  self._likes_task = None
   bind_public_cog(self, bot)
   # Mark interrupted sends uncertain; never replay them automatically.
   for guild_id in self._guild_ids():
@@ -433,6 +501,9 @@ class RonBurgundyCog(commands.Cog):
   self._change = asyncio.Event()
 
  async def cog_load(self):
+  # The like reminder needs only Discord (plus the Pi for the in-game line),
+  # so it runs even when the Pi bridge is not configured.
+  self._likes_task = asyncio.create_task(self._tyrant_likes_loop())
   if not self.secret or not self._guild_ids() or not self.port:
    info('Ron bridge inactive: configure RON_BRIDGE_SECRET, guild IDs and Railway PORT')
    return
@@ -454,6 +525,9 @@ class RonBurgundyCog(commands.Cog):
   info('Ron bridge enabled on Railway PORT (multi-guild)')
 
  async def cog_unload(self):
+  if self._likes_task:
+   self._likes_task.cancel()
+   self._likes_task = None
   if self._runner:
    await self._runner.cleanup()
    self._runner = None
@@ -578,6 +652,7 @@ class RonBurgundyCog(commands.Cog):
    return None
   if ident in b['updated_ids']:
    return ident
+  self._note_tyrant_battle(b, kind, data)
 
   should_notify = False
   notice = data
@@ -786,6 +861,115 @@ class RonBurgundyCog(commands.Cog):
   await self._deliver_pending()
   return web.json_response({'ack': ack})
 
+
+ # ---- post-Tyrant "like for gems" reminder ------------------------------------------
+
+ def _note_tyrant_battle(self, b, kind, data, now=None):
+  """Open (or move forward) the like window when the Pi reports a Tyrant battle."""
+  now = now or datetime.now(timezone.utc)
+  day = tyrant_battle_day(kind, data, now)
+  if day is None:
+   return
+  cfg = tyrant_likes_cfg(b)
+  # Never reopen a window an officer stopped, and never move it backwards.
+  if not cfg['on'] or cfg['stopped_date'] == day or (cfg['start_date'] and cfg['start_date'] >= day):
+   return
+  cfg.update(start_date=day, source='Pi Tyrant battle notice', updated_utc=utcnow())
+  b['tyrant_likes'] = cfg
+
+ async def _tyrant_likes_tick(self, now=None):
+  """Queue today's like reminder in every guild whose window is due. Idempotent."""
+  now = now or datetime.now(timezone.utc)
+  queued = False
+  async with self._lock:
+   guild_ids = self._guild_ids()
+   chat = None
+   for gid in guild_ids:
+    b = self._read(gid)
+    cfg = tyrant_likes_cfg(b)
+    day = tyrant_like_due(cfg, now)
+    if day is None:
+     continue
+    # Mark the day first: a restart can never post the same day twice.
+    cfg['sent'][day] = utcnow()
+    for old in sorted(cfg['sent'])[:-20]:
+     cfg['sent'].pop(old, None)
+    b['tyrant_likes'] = cfg
+    reset = datetime.combine(date_cls.fromisoformat(day) + timedelta(days=1), time_cls(0), timezone.utc)
+    number = (date_cls.fromisoformat(day) - date_cls.fromisoformat(cfg['start_date'])).days + 1
+    payload = {'title': TYRANT_LIKES_TITLE, 'notice_type': 'urgent_text', 'action_required': True,
+               'source': 'tyrant_likes', 'deadline_utc': reset.isoformat(),
+               'summary': (f'Like the Frostdragon Tyrant for free gems before the daily reset. '
+                           f'Day {number} of {cfg["days"]}.')}
+    notice_id = 'tyrantlikes_' + day.replace('-', '')
+    channels = list(dict.fromkeys(self.bot.settings.feature_channels(gid, 'ron')))
+    for cid in channels:
+     b['deliveries'].setdefault(notice_id + ':' + str(cid), {
+      'id': notice_id, 'channel_id': int(cid), 'title': TYRANT_LIKES_TITLE,
+      'data': payload, 'state': 'queued'})
+     queued = True
+    if cfg['chat'] and channels and chat is None:
+     chat = (gid, day, reset)
+    self._save(b, gid)
+   if chat is not None:
+    gid, day, reset = chat
+    job_id = 'chat_tyrantlike_' + day.replace('-', '')
+    caps = self._capabilities_for(guild_ids)
+    exists = any(isinstance(j, dict) and j.get('id') == job_id
+                 for g in guild_ids for j in self._read(g)['jobs'])
+    # One tablet: typed once for every guild, and only if Send is calibrated.
+    if not exists and (not caps or caps.get('chat_send_calibrated')):
+     home = self._read(gid)
+     home['jobs'].append({'id': job_id, 'kind': 'chat_send', 'text': TYRANT_LIKES_CHAT,
+                          'expires_utc': reset.isoformat(), 'created_utc': utcnow(),
+                          'state': 'queued'})
+     home['jobs'] = home['jobs'][-250:]
+     self._signal(home, gid)
+  if queued:
+   await self._deliver_pending()
+
+ async def _tyrant_likes_loop(self):
+  wait_ready = getattr(self.bot, 'wait_until_ready', None)
+  if wait_ready:
+   await wait_ready()
+  await self._deliver_pending()  # resume anything queued before a restart
+  while True:
+   try:
+    await self._tyrant_likes_tick()
+   except asyncio.CancelledError:
+    raise
+   except Exception as exc:
+    err('Ron Tyrant like reminder check failed: ' + type(exc).__name__)
+   await asyncio.sleep(30)
+
+ def _tyrant_likes_summary(self, b, now=None):
+  now = now or datetime.now(timezone.utc)
+  cfg = tyrant_likes_cfg(b)
+  at = f"{cfg['hour']:02d}:{cfg['minute']:02d} UTC"
+  lines = ['**Frostdragon Tyrant likes reminder**',
+           f"Reminders: **{'ON' if cfg['on'] else 'OFF'}** — daily at {at} for **{cfg['days']}** day(s) "
+           'from the UTC day the Tyrant battle finishes',
+           f"Also typed in WoS Alliance Chat: **{'yes' if cfg['chat'] else 'no'}**"]
+  if cfg['start_date']:
+   start = date_cls.fromisoformat(cfg['start_date'])
+   last = start + timedelta(days=cfg['days'] - 1)
+   state = 'active' if start <= now.date() <= last else 'finished' if now.date() > last else 'upcoming'
+   lines.append(f"Window: {start.isoformat()} to {last.isoformat()} UTC (**{state}**)"
+                + (f" — started by {cfg['source']}" if cfg['source'] else ''))
+  else:
+   lines.append('Window: none. It starts automatically from a Pi Tyrant battle notice, or use `!ron likes start`.')
+  lines.append('Change: `!ron likes start [YYYY-MM-DD]` · `stop` · `days 3` · `time 23:45` · `chat on|off` · `on|off`')
+  return discord.utils.escape_mentions('\n'.join(lines))[:1900]
+
+ async def _likes_edit(self, ctx, mutate):
+  async with self._lock:
+   b = self._read(ctx.guild.id)
+   cfg = tyrant_likes_cfg(b)
+   reply = mutate(cfg)
+   cfg['updated_utc'] = utcnow()
+   b['tyrant_likes'] = cfg
+   self._save(b, ctx.guild.id)
+  await ctx.send(discord.utils.escape_mentions(reply), allowed_mentions=discord.AllowedMentions.none())
 
  # ---- shared tablet helpers (one Pi, one tablet, every configured guild) ----
 
@@ -1028,6 +1212,10 @@ class RonBurgundyCog(commands.Cog):
    lines.append(f'Last Help All tap: {caps["healer_last_pressed_utc"]}')
   lines.append('WoS chat Help All control: ' + ('open to anyone typing in Alliance Chat'
                if helpall_chat_allowed(b) else 'LOCKED (unlock with !ron helpall unlock)'))
+  likes = tyrant_likes_cfg(b)
+  lines.append('Tyrant likes reminder: ' + ('OFF' if not likes['on'] else
+               f"window from {likes['start_date']} UTC for {likes['days']} day(s)" if likes['start_date']
+               else 'ON, waiting for the next Tyrant battle'))
   lines.append(f'Failed/uncertain notification deliveries: {delivery_errors}')
   return lines
 
@@ -1627,6 +1815,7 @@ class RonBurgundyCog(commands.Cog):
                 '`!ron diagnose` — queue Chat, Task List, Mail, Calendar and Help checks\n'
                 '`!ron monitor on|off|status` — start or stop the Pi monitor\n'
                 '`!ron remind` — event reminders: daily briefing, "ends in 24 h/1 h", store reminders (`!ron remind help`)\n'
+                '`!ron likes` — daily "like the Frostdragon Tyrant for gems" reminder after Tyrant (15 min before reset)\n'
                 '`!ron helpall on|off|status` — control Alliance Help All on the Pi\n'
                 'In WoS Alliance Chat, R4/R5 can type `!ron helpall on|off` any time.\n'
                 '`!ron helpall lock` / `unlock` — block or allow that chat control\n'
@@ -1755,6 +1944,7 @@ class RonBurgundyCog(commands.Cog):
                 '`!ron remind store on|off` · `store hours 1` · `store daily on|off` (add the store line to the Stamina/Arena reminders)\n'
                 '`!ron remind storewindow "Frostdragon Tyrant" 55` — hours the store stays open at the end of that event\n'
                 '`!ron remind reset` — back to the defaults\n'
+                '`!ron likes` — the post-Tyrant "like for gems" reminder (see `!ron likes`)\n'
                 'Mute one event completely with `/ron alert`; mute only its end warnings with `/ron alert "<Event> — ending reminder"`.')
 
  def _remind_cfg(self, b):
@@ -2059,6 +2249,93 @@ class RonBurgundyCog(commands.Cog):
       r.pop(a, None)
    return 'Event reminders are back to the defaults.'
   await self._remind_edit(ctx, mutate)
+
+ @ron_prefix.group(name='likes', aliases=['like', 'tyrantlikes'], invoke_without_command=True)
+ async def ron_prefix_likes(self, ctx: commands.Context, state: str = ''):
+  if not await self._prefix_manager(ctx):
+   return
+  value = state.strip().lower()
+  if not value:
+   await ctx.send(self._tyrant_likes_summary(self._read(ctx.guild.id)),
+                  allowed_mentions=discord.AllowedMentions.none())
+   return
+  if value not in ('on', 'off'):
+   await ctx.send('Usage: `!ron likes`, `!ron likes on|off`, `start [YYYY-MM-DD]`, `stop`, `days 3`, '
+                  '`time 23:45`, `chat on|off`.')
+   return
+  def mutate(cfg):
+   cfg['on'] = value == 'on'
+   return f"Tyrant likes reminders **{'ON' if cfg['on'] else 'OFF'}**."
+  await self._likes_edit(ctx, mutate)
+
+ @ron_prefix_likes.command(name='start')
+ async def ron_likes_start(self, ctx: commands.Context, day: str = ''):
+  if not await self._prefix_manager(ctx):
+   return
+  today = datetime.now(timezone.utc).date()
+  try:
+   start = date_cls.fromisoformat(day.strip()) if day.strip() else today
+  except ValueError:
+   start = None
+  if start is None or not (today - timedelta(days=14) <= start <= today + timedelta(days=14)):
+   await ctx.send('Give the UTC day the Tyrant battle finished as YYYY-MM-DD (within 14 days), '
+                  'or nothing for today (UTC).')
+   return
+  def mutate(cfg):
+   cfg.update(on=True, start_date=start.isoformat(), stopped_date=None,
+              source='Discord officer')
+   last = start + timedelta(days=cfg['days'] - 1)
+   return (f"Tyrant likes window set: {start.isoformat()} to {last.isoformat()} UTC. "
+           f"Reminder daily at {cfg['hour']:02d}:{cfg['minute']:02d} UTC (15 min before reset by default).")
+  await self._likes_edit(ctx, mutate)
+
+ @ron_prefix_likes.command(name='stop', aliases=['end'])
+ async def ron_likes_stop(self, ctx: commands.Context):
+  if not await self._prefix_manager(ctx):
+   return
+  def mutate(cfg):
+   if not cfg['start_date']:
+    return 'No Tyrant likes window is open.'
+   cfg['stopped_date'], cfg['start_date'] = cfg['start_date'], None
+   return 'Tyrant likes window stopped. The next Tyrant battle starts a new one.'
+  await self._likes_edit(ctx, mutate)
+
+ @ron_prefix_likes.command(name='days')
+ async def ron_likes_days(self, ctx: commands.Context, days: str = ''):
+  if not await self._prefix_manager(ctx):
+   return
+  if not days.isdigit() or not 1 <= int(days) <= 14:
+   await ctx.send('Give the number of days liking stays open (1-14), e.g. `!ron likes days 3`.')
+   return
+  def mutate(cfg):
+   cfg['days'] = int(days)
+   return f'Tyrant likes reminders run for **{cfg["days"]}** day(s), starting the day of the battle.'
+  await self._likes_edit(ctx, mutate)
+
+ @ron_prefix_likes.command(name='time')
+ async def ron_likes_time(self, ctx: commands.Context, hhmm: str = ''):
+  if not await self._prefix_manager(ctx):
+   return
+  m = re.fullmatch(r'([01]?\d|2[0-3]):([0-5]\d)', hhmm.strip())
+  if not m:
+   await ctx.send('Give the time as HH:MM in UTC, e.g. `!ron likes time 23:45` (15 minutes before reset).')
+   return
+  def mutate(cfg):
+   cfg['hour'], cfg['minute'] = int(m.group(1)), int(m.group(2))
+   return f"Tyrant likes reminder time: **{cfg['hour']:02d}:{cfg['minute']:02d} UTC**."
+  await self._likes_edit(ctx, mutate)
+
+ @ron_prefix_likes.command(name='chat')
+ async def ron_likes_chat(self, ctx: commands.Context, state: str = ''):
+  if not await self._prefix_manager(ctx):
+   return
+  if state.lower() not in ('on', 'off'):
+   await ctx.send('Usage: `!ron likes chat on|off` (also type the reminder in WoS Alliance Chat).')
+   return
+  def mutate(cfg):
+   cfg['chat'] = state.lower() == 'on'
+   return f"Tyrant likes reminder in WoS Alliance Chat: **{'ON' if cfg['chat'] else 'OFF'}**."
+  await self._likes_edit(ctx, mutate)
 
  @ron_prefix.group(name='helpall', invoke_without_command=True)
  async def ron_prefix_helpall(self, ctx: commands.Context):
