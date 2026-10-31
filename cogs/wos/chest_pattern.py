@@ -18,7 +18,7 @@ All version 1 data (totals, order stats, hashes, image count, last order) is
 kept in the same file and the version 1 key counts are used as a half-weight
 prior until enough confirmed boards exist.
 """
-__version__ = "2.0.2"
+__version__ = "2.1.0"
 
 import asyncio
 import csv
@@ -84,6 +84,9 @@ LEARNED_MIN_KEY = 6
 LEARNED_MIN_OTHER = 12
 AUTO_SAVE_MIN_SAMPLES = 40
 BOARD_ID = re.compile(r"^[0-9a-f]{12}$")
+ACCOUNT_NAME = re.compile(r"^[a-z0-9][a-z0-9 _.-]{0,23}$")
+UNTAGGED = "untagged"
+COMPARE_MIN_BOARDS = 5
 
 
 def import_image_libs():
@@ -143,6 +146,7 @@ def fresh_guild_data():
         "legacy": {"key_counts": {str(p): 0 for p in POSITIONS}, "images": 0},
         "boards": [],
         "pending": {},
+        "accounts": {},
         "samples": [],
         "dhashes": [],
     }
@@ -242,6 +246,8 @@ def ensure_guild_data(data, guild_key):
             g[name] = default()
     if not isinstance(g.get("pending"), dict):
         g["pending"] = {}
+    if not isinstance(g.get("accounts"), dict):
+        g["accounts"] = {}
 
     return g
 
@@ -525,14 +531,37 @@ def valid_keys(keys):
     return ks
 
 
-def verified_boards(guild_data):
+def clean_account(name):
+    """Account labels are lower-case, 1-24 chars: letters, digits, space _ . -"""
+    name = " ".join(str(name or "").strip().lower().split())
+    return name if ACCOUNT_NAME.fullmatch(name) else None
+
+
+def board_account(board):
+    return board.get("account") or UNTAGGED
+
+
+def verified_boards(guild_data, account=None):
+    """Key pairs of confirmed boards; `account` limits them to one account."""
     out = []
     for b in guild_data.get("boards", []):
         if isinstance(b, dict):
+            if account is not None and board_account(b) != account:
+                continue
             ks = valid_keys(b.get("keys", []))
             if ks:
                 out.append(ks)
     return out
+
+
+def account_names(guild_data):
+    names = []
+    for b in guild_data.get("boards", []):
+        if isinstance(b, dict) and valid_keys(b.get("keys", [])):
+            name = board_account(b)
+            if name not in names:
+                names.append(name)
+    return names
 
 
 def chi2_sf(x, df):
@@ -570,8 +599,10 @@ def chi2_sf(x, df):
     return max(0.0, min(1.0, math.exp(-z + a * math.log(z) - gln) * h))
 
 
-def build_model(guild_data):
-    boards = verified_boards(guild_data)
+def build_model(guild_data, account=None):
+    """Key odds for all accounts (master), or for one account when given.
+    Version 1 scans have no account, so they only feed the master table."""
+    boards = verified_boards(guild_data, account)
     n = len(boards)
     key_counts = {p: 0 for p in POSITIONS}
     pair = {p: {q: 0 for q in POSITIONS} for p in POSITIONS}
@@ -581,7 +612,7 @@ def build_model(guild_data):
         pair[a][b] += 1
         pair[b][a] += 1
 
-    legacy = guild_data.get("legacy", {}) or {}
+    legacy = (guild_data.get("legacy", {}) or {}) if account is None else {}
     legacy_counts = {p: max(0, _int(legacy.get("key_counts", {}).get(str(p), 0))) for p in POSITIONS}
     legacy_images = max(0, _int(legacy.get("images", 0)))
     # A board can only ever show two keys; cap v1 boards that over-read keys.
@@ -617,7 +648,64 @@ def build_model(guild_data):
         "legacy_weight": lw,
         "chi2": chi2,
         "p_value": p_value,
+        "account": account,
     }
+
+
+def compare_accounts(guild_data):
+    """Side-by-side key counts per account plus a chi-square test of whether
+    the accounts' key spots differ (accounts x 12 targets contingency table)."""
+    rows = []
+    for name in account_names(guild_data):
+        model = build_model(guild_data, name)
+        rows.append({"account": name, "boards": model["boards"],
+                     "counts": model["key_counts"], "order": model["order"]})
+    tested = [r for r in rows if r["boards"] >= COMPARE_MIN_BOARDS]
+    chi2 = p_value = None
+    df = 0
+    if len(tested) >= 2:
+        cols = [p for p in POSITIONS if sum(r["counts"][p] for r in tested) > 0]
+        total = sum(r["counts"][p] for r in tested for p in cols)
+        if len(cols) >= 2 and total:
+            chi2 = 0.0
+            for r in tested:
+                row_total = sum(r["counts"][p] for p in cols)
+                for p in cols:
+                    col_total = sum(t["counts"][p] for t in tested)
+                    expected = row_total * col_total / total
+                    if expected:
+                        chi2 += (r["counts"][p] - expected) ** 2 / expected
+            df = (len(tested) - 1) * (len(cols) - 1)
+            p_value = chi2_sf(chi2, df)
+    return {"rows": rows, "tested": len(tested), "chi2": chi2, "df": df, "p_value": p_value}
+
+
+def compare_text(result):
+    rows = result["rows"]
+    if not rows:
+        return "No confirmed boards yet."
+    lines = ["**Dead Shot — accounts side by side**",
+             "Key spots most often → least often (boards):"]
+    for r in rows:
+        often = sorted(POSITIONS, key=lambda p: (-r["counts"][p], p))
+        top = [str(p) for p in often if r["counts"][p] > 0][:4]
+        lines.append(f"**{r['account']}** ({r['boards']}): keys most at "
+                     + (", ".join(top) if top else "—")
+                     + " · safest first: " + " → ".join(str(p) for p in r["order"][:4]))
+    pv = result["p_value"]
+    if pv is None:
+        lines.append(f"Difference test needs at least two accounts with {COMPARE_MIN_BOARDS}+ "
+                     "boards each. Until then they're pooled in the master table.")
+    elif pv < 0.01:
+        lines.append(f"Test: **accounts clearly differ** (p={pv:.3f}). Use `!ds mine` for your account's own odds.")
+    elif pv < 0.05:
+        lines.append(f"Test: **accounts may differ** (p={pv:.3f}). Keep logging to confirm; "
+                     "`!ds mine` shows your account's own odds.")
+    else:
+        lines.append(f"Test: **no sign the accounts differ** (p={pv:.2f}) — the master table "
+                     "(`!ds`) is the better guide because it has more boards.")
+    lines.append("Small samples swing a lot; differences under ~30 boards per account are mostly noise.")
+    return "\n".join(lines)[:1990]
 
 
 def second_key_odds(model, first):
@@ -719,7 +807,8 @@ def build_summary(
     legacy = ""
     if model["legacy_images"]:
         legacy = f" + {model['legacy_images']} older auto-read scans at low weight"
-    lines.append(f"Confirmed boards: `{model['boards']}`{legacy}")
+    scope = "all accounts" if not model.get("account") else f"account **{model['account']}**"
+    lines.append(f"Confirmed boards ({scope}): `{model['boards']}`{legacy}")
     lines.append("Chance each target hides a key (lower = safer):")
     lines.append(odds_grid(model["prob"]))
     lines.append("**Shoot order (safest first):** " + " → ".join(str(p) for p in model["order"]))
@@ -951,6 +1040,7 @@ def record_board(guild_data, pending, keys, author_id, found=None):
         "by": str(pending.get("by") or author_id),
         "t": utcnow(),
         "src": pending.get("src", "image"),
+        "account": clean_account(pending.get("account")),
         "totals_added": True,
     }
 
@@ -1043,6 +1133,9 @@ def saved_text(board, model, note=""):
         keys_txt = f"first key **{k[0]}**, second key **{k[1]}**"
     else:
         keys_txt = f"keys at **{k[0]}** and **{k[1]}**"
+    acc = board.get("account")
+    if acc:
+        keys_txt += f" · account **{acc}**"
     lines = [
         f"✅ **Saved Dead Shot board** — {keys_txt}. "
         f"Confirmed boards: `{model['boards']}`.",
@@ -1134,6 +1227,9 @@ PREFIX_HELP = (
     "`!ds 7` — first key found at 7: safest next shots\n"
     "`!ds 3 10` — record a finished board: first key 3, second key 10 (type them in find order)\n"
     "`!ds undo` — remove the last board you recorded\n"
+    "`!ds account <name>` — set the game account you're playing; boards get tagged with it\n"
+    "`!ds mine` — odds for your current account only · `!ds compare` — accounts side by side\n"
+    "`!ds tag <name>` — tag your boards that have no account yet\n"
     "Screenshots: drop finished-board screenshots in the Dead Shot channel "
     "(council feature `chest_pattern`) or use `/chest_pattern`. Check the keys and press Save."
 )
@@ -1206,6 +1302,7 @@ class ChestPatternCog(commands.Cog):
             "id": pid, "by": str(author_id), "t": utcnow(), "src": "image",
             "keys": read["keys"], "symbols": read["symbols"], "feats": read["feats"],
             "hash": file_hash, "dhash": dhash, "method": read["method"],
+            "account": guild_data["accounts"].get(str(author_id)),
         }
         if isinstance(exact_order, list) and len(exact_order) == 12:
             pending["exact_order"] = list(exact_order)
@@ -1431,6 +1528,63 @@ class ChestPatternCog(commands.Cog):
             return
         if words and words[0] in ("after", "next", "first"):
             words = words[1:]
+        if words and words[0] in ("account", "acc"):
+            name = clean_account(" ".join(words[1:])) if len(words) > 1 else None
+            async with self._lock:
+                key, data, g = self._guild(ctx.guild.id)
+                if len(words) == 1:
+                    current = g["accounts"].get(str(ctx.author.id))
+                    known = account_names(g)
+                    msg = (f"Your current account: **{current or 'not set'}**."
+                           + (f" Accounts with boards: {', '.join(known)}." if known else "")
+                           + " Set it with `!ds account <name>`.")
+                elif name is None or name == UNTAGGED:
+                    msg = "Account names: 1–24 letters/numbers (spaces, - _ . allowed), not 'untagged'."
+                else:
+                    g["accounts"][str(ctx.author.id)] = name
+                    self._save(key, data)
+                    untagged = sum(1 for b in g["boards"] if isinstance(b, dict)
+                                   and b.get("by") == str(ctx.author.id) and not b.get("account"))
+                    msg = f"Account set to **{name}**. Boards you record now are tagged **{name}**."
+                    if untagged:
+                        msg += (f"\nYou have {untagged} older board(s) with no account. If they were all "
+                                f"from one account, tag them with `!ds tag <that account>`.")
+            await ctx.send(msg, allowed_mentions=none)
+            return
+        if words and words[0] == "tag":
+            name = clean_account(" ".join(words[1:])) if len(words) > 1 else None
+            if name is None or name == UNTAGGED:
+                await ctx.send("Use `!ds tag <account name>`.", allowed_mentions=none)
+                return
+            async with self._lock:
+                key, data, g = self._guild(ctx.guild.id)
+                count = 0
+                for b in g["boards"]:
+                    if isinstance(b, dict) and b.get("by") == str(ctx.author.id) and not b.get("account"):
+                        b["account"] = name
+                        count += 1
+                if count:
+                    self._save(key, data)
+            await ctx.send(f"Tagged {count} of your board(s) with account **{name}**."
+                           if count else "You have no untagged boards.", allowed_mentions=none)
+            return
+        if words and words[0] in ("compare", "accounts", "vs"):
+            _, _, g = self._guild(ctx.guild.id)
+            await ctx.send(compare_text(compare_accounts(g)), allowed_mentions=none)
+            return
+        if words and words[0] in ("mine", "me", "my"):
+            _, _, g = self._guild(ctx.guild.id)
+            current = g["accounts"].get(str(ctx.author.id))
+            if not current:
+                await ctx.send("Set your account first: `!ds account <name>`.", allowed_mentions=none)
+                return
+            model = build_model(g, current)
+            summary = build_summary(
+                ranked=[], uploads=0, learned=0, dupes=0, total_images=g["images"], bad_files=[],
+                latest_rows=[], used_previous_order=False, exact_order_applied=False, model=model)
+            await ctx.send((summary + "\n(First-key buttons use the master table.)")[:1995],
+                           view=helper_view(), allowed_mentions=none)
+            return
         if words and words[0] == "undo":
             async with self._lock:
                 key, data, g = self._guild(ctx.guild.id)
@@ -1463,7 +1617,9 @@ class ChestPatternCog(commands.Cog):
             async with self._lock:
                 key, data, g = self._guild(ctx.guild.id)
                 board = record_board(g, {"by": str(ctx.author.id), "src": "manual",
-                                         "id": new_board_id(g)}, keys, ctx.author.id, found=nums)
+                                         "id": new_board_id(g),
+                                         "account": g["accounts"].get(str(ctx.author.id))},
+                                     keys, ctx.author.id, found=nums)
                 self._save(key, data)
                 model = build_model(g)
             await ctx.send(saved_text(board, model), view=saved_view(board["id"]), allowed_mentions=none)

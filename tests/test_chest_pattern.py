@@ -1,7 +1,7 @@
 # tests/test_chest_pattern.py
 from __future__ import annotations
 
-__version__ = '1.0.2'
+__version__ = '1.1.0'
 
 """Offline tests for cogs/wos/chest_pattern.py (Dead Shot helper).
 
@@ -454,6 +454,114 @@ class ButtonTests(TempDataMixin, unittest.TestCase):
         self.assertTrue(ntpl.fullmatch('dsn:12'))
         self.assertFalse(ntpl.fullmatch('dsn:0'))
         self.assertEqual(len(cp.pending_view('0123456789ab', [1, 2]).children), 14)
+
+
+class AccountTests(TempDataMixin, unittest.TestCase):
+    def record(self, g, keys, account, n=1, by=1):
+        for _ in range(n):
+            cp.record_board(g, {'src': 'manual', 'account': account}, keys, by, found=keys)
+
+    def test_master_and_account_tables(self):
+        g = cp.ensure_guild_data({'guilds': {'1': legacy_v1_file()}}, '1')
+        self.record(g, [1, 2], 'main', 6)
+        self.record(g, [11, 12], 'alt', 4)
+        self.assertEqual(cp.build_model(g)['boards'], 10)
+        main = cp.build_model(g, 'main')
+        self.assertEqual(main['boards'], 6)
+        self.assertEqual(main['legacy_images'], 0)
+        self.assertEqual(set(main['order'][-2:]), {1, 2})
+        self.assertEqual(cp.build_model(g, 'alt')['boards'], 4)
+        self.assertIn('account **main**', cp.build_summary([], 0, 0, 0, 0, [], [], False, False, model=main))
+        self.assertIn('all accounts', cp.build_summary([], 0, 0, 0, 0, [], [], False, False,
+                                                      model=cp.build_model(g)))
+
+    def test_untagged_boards_are_their_own_group(self):
+        g = cp.ensure_guild_data({'guilds': {}}, '1')
+        self.record(g, [3, 4], None, 2)
+        self.record(g, [5, 6], 'alt', 1)
+        self.assertEqual(cp.account_names(g), ['untagged', 'alt'])
+        self.assertEqual(cp.build_model(g, 'untagged')['boards'], 2)
+
+    def test_clean_account(self):
+        self.assertEqual(cp.clean_account('  Main  Farm '), 'main farm')
+        self.assertIsNone(cp.clean_account(''))
+        self.assertIsNone(cp.clean_account('x' * 30))
+        self.assertIsNone(cp.clean_account('bad@name'))
+
+    def test_compare_detects_real_difference(self):
+        g = cp.ensure_guild_data({'guilds': {}}, '1')
+        rng = random.Random(4)
+        for _ in range(40):
+            self.record(g, sorted(rng.sample([1, 2, 3], 2)), 'a')
+            self.record(g, sorted(rng.sample([10, 11, 12], 2)), 'b')
+        result = cp.compare_accounts(g)
+        self.assertEqual(result['tested'], 2)
+        self.assertLess(result['p_value'], 0.01)
+        self.assertIn('accounts clearly differ', cp.compare_text(result))
+
+    def test_compare_same_random_source_not_flagged(self):
+        g = cp.ensure_guild_data({'guilds': {}}, '1')
+        rng = random.Random(9)
+        for _ in range(80):
+            self.record(g, rng.sample(cp.POSITIONS, 2), 'a')
+            self.record(g, rng.sample(cp.POSITIONS, 2), 'b')
+        result = cp.compare_accounts(g)
+        self.assertGreater(result['p_value'], 0.01)
+
+    def test_compare_needs_enough_boards(self):
+        g = cp.ensure_guild_data({'guilds': {}}, '1')
+        self.record(g, [1, 2], 'a', 6)
+        self.record(g, [3, 4], 'b', 2)
+        result = cp.compare_accounts(g)
+        self.assertIsNone(result['p_value'])
+        self.assertIn('needs at least two accounts', cp.compare_text(result))
+        self.assertLess(len(cp.compare_text(result)), 2000)
+
+    def test_fix_keeps_account(self):
+        g = cp.ensure_guild_data({'guilds': {}}, '1')
+        board = cp.record_board(g, {'src': 'manual', 'account': 'alt'}, [1, 2], 1)
+        cp.record_board(g, {'replaces': board['id']}, [3, 4], 1)
+        self.assertEqual(g['boards'][0]['account'], 'alt')
+        self.assertIn('account **alt**', cp.saved_text(g['boards'][0], cp.build_model(g)))
+
+
+class FakeCtx:
+    def __init__(self, uid, guild_id=5):
+        self.author = types.SimpleNamespace(id=uid)
+        self.guild = types.SimpleNamespace(id=guild_id)
+        self.sent = []
+
+    async def send(self, content, view=None, allowed_mentions=None):
+        self.sent.append(content)
+
+
+@unittest.skipIf('discord' in sys.modules and hasattr(sys.modules['discord'], '__version__'),
+                 'prefix callbacks are wrapped by real discord.py')
+class PrefixTests(TempDataMixin, unittest.TestCase):
+    def ds(self, uid, *words):
+        ctx = FakeCtx(uid)
+        asyncio.run(cp.ChestPatternCog(FakeBot()).ds_prefix(ctx, *words))
+        return ctx.sent[-1]
+
+    def test_account_flow_survives_restart(self):
+        self.assertIn('not set', self.ds(10, 'account'))
+        self.ds(10, '3', '9')
+        self.assertIn('1 older board', self.ds(10, 'account', 'Main'))
+        self.assertIn('Tagged 1', self.ds(10, 'tag', 'main'))
+        self.ds(10, 'account', 'alt', 'one')
+        self.assertIn('account **alt one**', self.ds(10, '11', '4'))
+        _, _, g = cp.ChestPatternCog(FakeBot())._guild(5)
+        self.assertEqual([b['account'] for b in g['boards']], ['main', 'alt one'])
+        self.assertEqual(g['boards'][1]['found'], [11, 4])
+        self.assertIn('account **alt one**', self.ds(10, 'mine'))
+        self.assertIn('side by side', self.ds(10, 'compare'))
+        # Another member's account is separate.
+        self.assertIn('not set', self.ds(20, 'account'))
+        self.assertIn('Set your account first', self.ds(20, 'mine'))
+
+    def test_bad_account_name(self):
+        self.assertIn('Account names', self.ds(10, 'account', 'untagged'))
+        self.assertIn('Use `!ds tag', self.ds(10, 'tag'))
 
 
 @unittest.skipUnless(HAVE_CV, 'OpenCV/numpy not installed')
