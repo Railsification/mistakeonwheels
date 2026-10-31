@@ -18,7 +18,7 @@ All version 1 data (totals, order stats, hashes, image count, last order) is
 kept in the same file and the version 1 key counts are used as a half-weight
 prior until enough confirmed boards exist.
 """
-__version__ = "2.1.0"
+__version__ = "2.2.0"
 
 import asyncio
 import csv
@@ -708,6 +708,175 @@ def compare_text(result):
     return "\n".join(lines)[:1990]
 
 
+# ---------------------------------------------------------------------------
+# Clock / sequence tests ("is the layout tied to time or attempt number?")
+# ---------------------------------------------------------------------------
+
+TIME_MIN_BOARDS = 30
+
+
+def board_time(board):
+    try:
+        t = datetime.fromisoformat(str(board.get("t")))
+    except (TypeError, ValueError):
+        return None
+    return t if t.tzinfo else t.replace(tzinfo=timezone.utc)
+
+
+def timed_boards(guild_data, account=None):
+    """Confirmed boards with a usable timestamp, oldest first."""
+    out = []
+    for b in guild_data.get("boards", []):
+        if not isinstance(b, dict):
+            continue
+        if account is not None and board_account(b) != account:
+            continue
+        keys = valid_keys(b.get("keys", []))
+        t = board_time(b)
+        if keys and t is not None:
+            out.append({"keys": keys, "t": t, "account": board_account(b)})
+    out.sort(key=lambda r: r["t"])
+    seq = {}
+    for r in out:
+        seq[r["account"]] = seq.get(r["account"], 0) + 1
+        r["attempt"] = seq[r["account"]]
+    return out
+
+
+def contingency_test(groups):
+    """Chi-square: do key spots differ between groups? groups = {label: [keys,...]}"""
+    rows = {g: {p: 0 for p in POSITIONS} for g, boards in groups.items() if len(boards) >= 3}
+    for g in rows:
+        for keys in groups[g]:
+            for k in keys:
+                rows[g][k] += 1
+    if len(rows) < 2:
+        return None, 0
+    cols = [p for p in POSITIONS if sum(r[p] for r in rows.values()) > 0]
+    total = sum(r[p] for r in rows.values() for p in cols)
+    if len(cols) < 2 or not total:
+        return None, 0
+    chi2 = 0.0
+    for r in rows.values():
+        row_total = sum(r[p] for p in cols)
+        for p in cols:
+            expected = row_total * sum(t[p] for t in rows.values()) / total
+            if expected:
+                chi2 += (r[p] - expected) ** 2 / expected
+    df = (len(rows) - 1) * (len(cols) - 1)
+    return chi2_sf(chi2, df), df
+
+
+# Overlap between two independent random boards: P(0,1,2 shared key spots)
+OVERLAP_PROBS = {0: 45 / 66, 1: 20 / 66, 2: 1 / 66}
+
+
+def time_analysis(guild_data, account=None):
+    boards = timed_boards(guild_data, account)
+    result = {"boards": len(boards), "tests": [], "sequence": None}
+    if len(boards) < TIME_MIN_BOARDS:
+        return result
+
+    def split(label, fn):
+        groups = {}
+        for r in boards:
+            groups.setdefault(fn(r), []).append(r["keys"])
+        pv, df = contingency_test(groups)
+        if pv is not None:
+            result["tests"].append({"name": label, "p": pv, "groups": len(groups)})
+
+    split("Hour of day (4-hour blocks)", lambda r: r["t"].hour // 4)
+    split("Minute of the hour (15-min blocks)", lambda r: r["t"].minute // 15)
+    split("Seconds on the clock (15-s blocks)", lambda r: r["t"].second // 15)
+    split("Even/odd second", lambda r: r["t"].second % 2)
+    split("Day of week", lambda r: r["t"].weekday())
+    split("Attempt number, odd/even (per account)", lambda r: r["attempt"] % 2)
+    split("Attempt number, every 3rd (per account)", lambda r: r["attempt"] % 3)
+    split("Early vs later attempts (per account)", lambda r: min(r["attempt"] // 20, 3))
+
+    # Does a board copy spots from the previous board on the same account?
+    prev = {}
+    shared = {0: 0, 1: 0, 2: 0}
+    for r in boards:
+        last = prev.get(r["account"])
+        if last is not None:
+            shared[len(set(last) & set(r["keys"]))] += 1
+        prev[r["account"]] = r["keys"]
+    pairs = sum(shared.values())
+    if pairs >= 20:
+        chi2 = sum((shared[k] - pairs * OVERLAP_PROBS[k]) ** 2 / (pairs * OVERLAP_PROBS[k])
+                   for k in shared)
+        result["sequence"] = {"pairs": pairs, "shared": shared, "p": chi2_sf(chi2, 2),
+                              "mean": (shared[1] + 2 * shared[2]) / pairs}
+
+    # Many tests at once: correct for it so chance hits aren't reported as finds.
+    count = len(result["tests"]) + (1 if result["sequence"] else 0)
+    for t in result["tests"]:
+        t["p_adj"] = min(1.0, t["p"] * count)
+    if result["sequence"]:
+        result["sequence"]["p_adj"] = min(1.0, result["sequence"]["p"] * count)
+    return result
+
+
+def time_text(result, account=None):
+    scope = f"account **{account}**" if account else "all accounts"
+    n = result["boards"]
+    if n < TIME_MIN_BOARDS:
+        return (f"**Dead Shot — clock & sequence check** ({scope})\n"
+                f"Needs {TIME_MIN_BOARDS} logged boards; has `{n}`. Keep logging every stage straight away "
+                "(the time saved is when you type it).")
+
+    def verdict(p_adj):
+        if p_adj < 0.01:
+            return "🔴 **LINK FOUND**"
+        if p_adj < 0.05:
+            return "🟠 possible link"
+        return "⚪ no link"
+
+    lines = [f"**Dead Shot — clock & sequence check** ({scope}, `{n}` boards)"]
+    for t in result["tests"]:
+        lines.append(f"{verdict(t['p_adj'])} — {t['name']} (p={t['p_adj']:.3f})")
+    seq = result["sequence"]
+    if seq:
+        lines.append(f"{verdict(seq['p_adj'])} — Repeats spots from the previous board "
+                     f"(avg {seq['mean']:.2f} shared vs 0.33 by chance, p={seq['p_adj']:.3f})")
+    found = [t for t in result["tests"] if t["p_adj"] < 0.05] + \
+        ([seq] if seq and seq["p_adj"] < 0.05 else [])
+    if found:
+        lines.append("Something lines up with time/attempt order — keep logging to confirm it isn't chance.")
+    else:
+        lines.append("Nothing lines up with time or attempt order so far.")
+    lines.append("p-values are corrected for running several tests. Times are when you logged each board.")
+    return "\n".join(lines)[:1990]
+
+
+def export_csv(guild_data):
+    """Every confirmed board, one row each, for outside analysis."""
+    s = io.StringIO()
+    w = csv.writer(s)
+    w.writerow(["board_id", "account", "logged_utc", "logged_brisbane", "attempt_on_account",
+                "key_a", "key_b", "first_key", "second_key", "source", "logged_by"]
+               + [f"t{p}" for p in POSITIONS])
+    seq = {}
+    rows = []
+    for b in guild_data.get("boards", []):
+        if isinstance(b, dict) and valid_keys(b.get("keys", [])):
+            rows.append(b)
+    rows.sort(key=lambda b: str(b.get("t", "")))
+    for b in rows:
+        acc = board_account(b)
+        seq[acc] = seq.get(acc, 0) + 1
+        t = board_time(b)
+        found = b.get("found") if b.get("found") else ["", ""]
+        syms = b.get("symbols") or {}
+        w.writerow([b.get("id", ""), acc, t.isoformat() if t else "",
+                    (t + timedelta(hours=10)).strftime("%Y-%m-%d %H:%M:%S") if t else "",
+                    seq[acc], b["keys"][0], b["keys"][1], found[0], found[1],
+                    b.get("src", ""), b.get("by", "")]
+                   + [syms.get(str(p), "") for p in POSITIONS])
+    return s.getvalue()
+
+
 def second_key_odds(model, first):
     """P(second key at j | first key found at `first`), for every other cell."""
     first = int(first)
@@ -1230,6 +1399,8 @@ PREFIX_HELP = (
     "`!ds account <name>` — set the game account you're playing; boards get tagged with it\n"
     "`!ds mine` — odds for your current account only · `!ds compare` — accounts side by side\n"
     "`!ds tag <name>` — tag your boards that have no account yet\n"
+    "`!ds time` — test whether keys line up with the clock or attempt order (`!ds time mine` for one account)\n"
+    "`!ds export` — download every logged board as a CSV spreadsheet\n"
     "Screenshots: drop finished-board screenshots in the Dead Shot channel "
     "(council feature `chest_pattern`) or use `/chest_pattern`. Check the keys and press Save."
 )
@@ -1567,6 +1738,24 @@ class ChestPatternCog(commands.Cog):
                     self._save(key, data)
             await ctx.send(f"Tagged {count} of your board(s) with account **{name}**."
                            if count else "You have no untagged boards.", allowed_mentions=none)
+            return
+        if words and words[0] in ("time", "clock"):
+            _, _, g = self._guild(ctx.guild.id)
+            account = None
+            if len(words) > 1 and words[1] in ("mine", "me", "my"):
+                account = g["accounts"].get(str(ctx.author.id))
+                if not account:
+                    await ctx.send("Set your account first: `!ds account <name>`.", allowed_mentions=none)
+                    return
+            await ctx.send(time_text(time_analysis(g, account), account), allowed_mentions=none)
+            return
+        if words and words[0] in ("export", "csv", "data"):
+            _, _, g = self._guild(ctx.guild.id)
+            data_bytes = export_csv(g).encode("utf-8")
+            count = len(verified_boards(g))
+            await ctx.send(f"All `{count}` logged Dead Shot boards (times in UTC and Brisbane).",
+                           file=discord.File(io.BytesIO(data_bytes), filename="dead_shot_boards.csv"),
+                           allowed_mentions=none)
             return
         if words and words[0] in ("compare", "accounts", "vs"):
             _, _, g = self._guild(ctx.guild.id)

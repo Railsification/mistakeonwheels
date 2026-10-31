@@ -1,7 +1,7 @@
 # tests/test_chest_pattern.py
 from __future__ import annotations
 
-__version__ = '1.1.0'
+__version__ = '1.2.0'
 
 """Offline tests for cogs/wos/chest_pattern.py (Dead Shot helper).
 
@@ -525,14 +525,84 @@ class AccountTests(TempDataMixin, unittest.TestCase):
         self.assertIn('account **alt**', cp.saved_text(g['boards'][0], cp.build_model(g)))
 
 
+class TimeTests(TempDataMixin, unittest.TestCase):
+    def make(self, n, keys_fn, start=None, step=None, account='main'):
+        from datetime import datetime, timedelta, timezone
+        g = cp.ensure_guild_data({'guilds': {}}, '1')
+        t = start or datetime(2026, 10, 31, 0, 0, 0, tzinfo=timezone.utc)
+        rng = random.Random(11)
+        prev = None
+        for i in range(n):
+            t = t + (step(i, rng) if step else timedelta(seconds=rng.randint(40, 400)))
+            keys = keys_fn(i, t, rng, prev)
+            b = cp.record_board(g, {'src': 'manual', 'account': account}, keys, 1, found=keys)
+            b['t'] = t.isoformat()
+            prev = sorted(keys)
+        return g
+
+    def test_needs_enough_boards(self):
+        g = self.make(10, lambda i, t, r, p: r.sample(cp.POSITIONS, 2))
+        text = cp.time_text(cp.time_analysis(g))
+        self.assertIn('Needs 30', text)
+
+    def test_random_boards_show_no_link(self):
+        g = self.make(200, lambda i, t, r, p: r.sample(cp.POSITIONS, 2))
+        res = cp.time_analysis(g)
+        self.assertGreaterEqual(len(res['tests']), 6)
+        self.assertTrue(all(t['p_adj'] >= 0.01 for t in res['tests']))
+        self.assertIn('Repeats spots', cp.time_text(res))
+        self.assertLess(len(cp.time_text(res)), 2000)
+
+    def test_clock_seeded_layout_is_caught(self):
+        def by_minute(i, t, r, p):
+            block = t.minute // 15
+            return [[1, 2], [5, 6], [9, 10], [3, 12]][block]
+        g = self.make(80, by_minute)
+        res = cp.time_analysis(g)
+        minute = [t for t in res['tests'] if t['name'].startswith('Minute')][0]
+        self.assertLess(minute['p_adj'], 0.01)
+        self.assertIn('LINK FOUND', cp.time_text(res))
+
+    def test_attempt_sequence_is_caught(self):
+        def alternate(i, t, r, p):
+            return [1, 2] if i % 2 else [11, 12]
+        g = self.make(60, alternate)
+        res = cp.time_analysis(g)
+        parity = [t for t in res['tests'] if 'odd/even' in t['name'] and 'Attempt' in t['name']][0]
+        self.assertLess(parity['p_adj'], 0.01)
+
+    def test_repeat_of_previous_board_is_caught(self):
+        def sticky(i, t, r, p):
+            return p if p and r.random() < 0.7 else r.sample(cp.POSITIONS, 2)
+        g = self.make(80, sticky)
+        seq = cp.time_analysis(g)['sequence']
+        self.assertGreater(seq['mean'], 0.33)
+        self.assertLess(seq['p_adj'], 0.01)
+
+    def test_export_has_every_board_and_brisbane_time(self):
+        import csv as _csv, io as _io
+        from datetime import datetime, timezone
+        g = self.make(3, lambda i, t, r, p: [4, 11],
+                      start=datetime(2026, 10, 31, 1, 0, 0, tzinfo=timezone.utc))
+        rows = list(_csv.reader(_io.StringIO(cp.export_csv(g))))
+        self.assertEqual(rows[0][:6], ['board_id', 'account', 'logged_utc', 'logged_brisbane',
+                                      'attempt_on_account', 'key_a'])
+        self.assertEqual(len(rows), 4)
+        self.assertEqual(rows[1][4], '1')
+        self.assertEqual(rows[3][4], '3')
+        self.assertTrue(rows[1][3].startswith('2026-10-31 11:'))
+        self.assertEqual(rows[1][7:9], ['4', '11'])
+
+
 class FakeCtx:
     def __init__(self, uid, guild_id=5):
         self.author = types.SimpleNamespace(id=uid)
         self.guild = types.SimpleNamespace(id=guild_id)
         self.sent = []
 
-    async def send(self, content, view=None, allowed_mentions=None):
+    async def send(self, content, view=None, allowed_mentions=None, file=None):
         self.sent.append(content)
+        self.file = file
 
 
 @unittest.skipIf('discord' in sys.modules and hasattr(sys.modules['discord'], '__version__'),
@@ -558,6 +628,17 @@ class PrefixTests(TempDataMixin, unittest.TestCase):
         # Another member's account is separate.
         self.assertIn('not set', self.ds(20, 'account'))
         self.assertIn('Set your account first', self.ds(20, 'mine'))
+
+    def test_time_and_export_commands(self):
+        self.ds(10, 'account', 'main')
+        self.ds(10, '11', '4')
+        self.assertIn('Needs 30', self.ds(10, 'time'))
+        self.assertIn('account **main**', self.ds(10, 'time', 'mine'))
+        self.assertIn('Set your account first', self.ds(20, 'time', 'mine'))
+        ctx = FakeCtx(10)
+        asyncio.run(cp.ChestPatternCog(FakeBot()).ds_prefix(ctx, 'export'))
+        self.assertIn('All `1` logged', ctx.sent[-1])
+        self.assertEqual(ctx.file.filename, 'dead_shot_boards.csv')
 
     def test_bad_account_name(self):
         self.assertIn('Account names', self.ds(10, 'account', 'untagged'))
