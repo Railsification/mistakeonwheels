@@ -1,7 +1,7 @@
 # tests/test_chest_pattern.py
 from __future__ import annotations
 
-__version__ = '1.2.0'
+__version__ = '1.3.0'
 
 """Offline tests for cogs/wos/chest_pattern.py (Dead Shot helper).
 
@@ -592,6 +592,51 @@ class TimeTests(TempDataMixin, unittest.TestCase):
         self.assertEqual(rows[3][4], '3')
         self.assertTrue(rows[1][3].startswith('2026-10-31 11:'))
         self.assertEqual(rows[1][7:9], ['4', '11'])
+
+
+class RecencyTests(TempDataMixin, unittest.TestCase):
+    def board(self, g, keys, account, minute):
+        b = cp.record_board(g, {'src': 'manual', 'account': account}, keys, 1, found=keys)
+        b['t'] = f'2026-10-31T01:{minute:02d}:00+00:00'
+        return b
+
+    def test_recent_partner_shot_first_after_first_key(self):
+        g = cp.ensure_guild_data({'guilds': {}}, '1')
+        self.board(g, [5, 9], 'spy', 1)
+        self.board(g, [2, 5], 'spy', 2)
+        m = cp.play_model(g, 'spy')
+        odds, recent = cp.second_key_odds(m, 5)
+        self.assertEqual(recent, 2)
+        order = sorted(odds, key=lambda p: (odds[p], p))
+        self.assertEqual(set(order[:2]), {2, 9})
+        self.assertAlmostEqual(sum(odds.values()), 1.0)
+        text = cp.second_key_text(m, 5)
+        self.assertIn('Account **spy**', text)
+
+    def test_other_account_history_not_used(self):
+        g = cp.ensure_guild_data({'guilds': {}}, '1')
+        self.board(g, [5, 9], 'red', 1)
+        m = cp.play_model(g, 'spy')
+        self.assertNotIn('pair_weight', m)
+        self.assertIn('Set your account', cp.build_summary([], 0, 0, 0, 0, [], [], False, False,
+                                                          model=cp.play_model(g, None)))
+
+    def test_window_limits_history(self):
+        g = cp.ensure_guild_data({'guilds': {}}, '1')
+        for i in range(cp.RECENT_WINDOW + 5):
+            self.board(g, [1, 2] if i == 0 else [3 + i % 9, 12], 'a', i % 60)
+        # Sort by time only matters within an hour here; use the helper directly.
+        recent = cp.recent_pairs(g, 'a')
+        self.assertEqual(len(recent), cp.RECENT_WINDOW)
+
+    def test_probabilities_sum_to_two_keys(self):
+        g = cp.ensure_guild_data({'guilds': {}}, '1')
+        self.board(g, [3, 4], 'a', 1)
+        m = cp.play_model(g, 'a')
+        self.assertAlmostEqual(sum(m['prob'].values()), 2.0)
+        self.assertEqual(m['order'][:2], [3, 4])
+        self.assertIn("account **a**'s last 1 boards", cp.build_summary(
+            [], 0, 0, 0, 0, [], [], False, False, model=m))
 
 
 class FakeCtx:

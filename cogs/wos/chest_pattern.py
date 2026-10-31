@@ -18,7 +18,7 @@ All version 1 data (totals, order stats, hashes, image count, last order) is
 kept in the same file and the version 1 key counts are used as a half-weight
 prior until enough confirmed boards exist.
 """
-__version__ = "2.2.0"
+__version__ = "2.3.0"
 
 import asyncio
 import csv
@@ -877,10 +877,59 @@ def export_csv(guild_data):
     return s.getvalue()
 
 
+# ---------------------------------------------------------------------------
+# Repeat avoidance (found in the logged data, 31 Oct 2026, 139 boards):
+# on each account the same key PAIR comes back far less often than chance
+# (within 20 boards: 7 repeats vs 21.5 expected; random would be that low
+# <0.01% of the time). Shooting spots that were recently paired with the
+# first key BEFORE the others gave 7.41 reward shots per stage in a replay of
+# those boards vs 6.67 by pure luck.
+# ---------------------------------------------------------------------------
+
+RECENT_WINDOW = 40     # boards on the same account that count as "recent"
+RECENT_WEIGHT = 0.3    # a recently used pair is ~30% as likely as a fresh one
+ALL_PAIRS = [(a, b) for a in POSITIONS for b in POSITIONS if a < b]
+
+
+def recent_pairs(guild_data, account, window=RECENT_WINDOW):
+    if not account:
+        return []
+    return [tuple(r["keys"]) for r in timed_boards(guild_data, account)[-window:]]
+
+
+def apply_recency(model, guild_data, account):
+    """Re-rank the shoot order for one account using pairs it had recently."""
+    recent = recent_pairs(guild_data, account)
+    if not recent:
+        return model
+    used = set(recent)
+    weights = {pr: (RECENT_WEIGHT if pr in used else 1.0) for pr in ALL_PAIRS}
+    total = sum(weights.values())
+    prob = {p: sum(w for pr, w in weights.items() if p in pr) / total for p in POSITIONS}
+    out = dict(model)
+    out["prob"] = prob
+    out["order"] = sorted(POSITIONS, key=lambda p: (prob[p], p))
+    out["pair_weight"] = weights
+    out["recent_account"] = account
+    out["recent_count"] = len(recent)
+    return out
+
+
+def play_model(guild_data, account=None, own_table=False):
+    """The model used for advice: key stats plus the account's repeat history."""
+    base = build_model(guild_data, account if own_table else None)
+    return apply_recency(base, guild_data, account)
+
+
 def second_key_odds(model, first):
     """P(second key at j | first key found at `first`), for every other cell."""
     first = int(first)
     others = [p for p in POSITIONS if p != first]
+    if model.get("pair_weight"):
+        w = {p: model["pair_weight"][tuple(sorted((first, p)))] for p in others}
+        total = sum(w.values()) or 1.0
+        recent_with_first = sum(1 for p in others if w[p] < 1.0)
+        return {p: w[p] / total for p in others}, recent_with_first
     marg = {p: model["prob"][p] for p in others}
     total = sum(marg.values()) or 1.0
     prior = {p: marg[p] / total for p in others}
@@ -903,8 +952,8 @@ def pattern_verdict(model):
     if pv < 0.05:
         return (f"Pattern check: **some evidence** keys favour certain spots "
                 f"(p={pv:.3f}, {n} boards). Keep adding boards to confirm.")
-    return (f"Pattern check: **no evidence of a pattern** so far (p={pv:.2f}, {n} boards) — "
-            "key spots look random, so no order beats any other yet.")
+    return (f"Spot check: **no evidence of a favourite spot** (p={pv:.2f}, {n} boards) — "
+            "every target gets keys about equally often.")
 
 
 def build_ranked_order(guild_data):
@@ -988,6 +1037,12 @@ def build_summary(
         lines.append("Unopened in latest screenshot: " + ", ".join(str(p) for p in rem))
 
     lines.append(pattern_verdict(model))
+    if model.get("recent_account"):
+        lines.append(f"Order uses account **{model['recent_account']}**'s last {model['recent_count']} boards: "
+                     "key pairs it just had rarely come back, so their spots go first.")
+    else:
+        lines.append("Set your account (`!ds account <name>`) — the order then uses that account's "
+                     "recent boards, which is where the real pattern is.")
     lines.append("Found your first key? Tap its number below (or `!ds <number>`) for the safest next shots.")
 
     if bad_files:
@@ -1081,9 +1136,14 @@ def second_key_text(model, first, shoot_order=None):
                      f"({round(values[0] * 100)}% each) — any of them is as safe as another.")
     else:
         lines.append("**Shoot next (safest first):** " + " → ".join(str(p) for p in order))
-    lines.append(
-        f"Based on `{seen}` confirmed board{'s' if seen != 1 else ''} with a key at {first}"
-        + (" — too few to trust; this is close to the overall odds." if seen < 10 else "."))
+    if model.get("pair_weight"):
+        lines.append(
+            f"Account **{model['recent_account']}**: {seen} spot{'s' if seen != 1 else ''} paired with "
+            f"{first} in its last {model['recent_count']} boards — those rarely repeat, so they're shot first.")
+    else:
+        lines.append(
+            f"Based on `{seen}` confirmed board{'s' if seen != 1 else ''} with a key at {first}"
+            + (" — too few to trust; this is close to the overall odds." if seen < 10 else "."))
     lines.append(f"When the stage ends, record it: `!ds {first} <second key>`")
     return "\n".join(lines)
 
@@ -1495,7 +1555,7 @@ class ChestPatternCog(commands.Cog):
             for att in attachments:
                 results.append(await self._read_attachment(att, g, author_id, cv2, np, prior))
             self._save(key, data)
-            model = build_model(g)
+            model = play_model(g, g["accounts"].get(str(author_id)))
         return (results, model), None
 
     # ----- slash commands (names and parameters unchanged) -----
@@ -1571,7 +1631,8 @@ class ChestPatternCog(commands.Cog):
         summary = build_summary(
             ranked=ranked, uploads=0, learned=0, dupes=0, total_images=g["images"],
             bad_files=[], latest_rows=[], used_previous_order=False,
-            exact_order_applied=False, model=build_model(g))
+            exact_order_applied=False,
+            model=play_model(g, g["accounts"].get(str(interaction.user.id))))
         await interaction.followup.send(content=summary, file=make_csv(ranked),
                                         view=helper_view(), ephemeral=True)
 
@@ -1635,7 +1696,8 @@ class ChestPatternCog(commands.Cog):
                         board = record_board(g, pend, pend["keys"], interaction.user.id)
                         g["pending"].pop(pid, None)
                         self._save(key, data)
-                        content, view = saved_text(board, build_model(g)), saved_view(board["id"])
+                        content, view = saved_text(board, play_model(g, board.get("account"))), \
+                            saved_view(board["id"])
                 else:
                     pos = int(act[1:])
                     # Track tap order so the board remembers which key was found first.
@@ -1657,7 +1719,7 @@ class ChestPatternCog(commands.Cog):
 
     async def handle_next_button(self, interaction, first):
         _, _, g = self._guild(interaction.guild_id)
-        model = build_model(g)
+        model = play_model(g, g["accounts"].get(str(interaction.user.id)))
         await interaction.response.send_message(
             second_key_text(model, first, followed_order(g, model)), ephemeral=True)
 
@@ -1767,11 +1829,11 @@ class ChestPatternCog(commands.Cog):
             if not current:
                 await ctx.send("Set your account first: `!ds account <name>`.", allowed_mentions=none)
                 return
-            model = build_model(g, current)
+            model = play_model(g, current, own_table=True)
             summary = build_summary(
                 ranked=[], uploads=0, learned=0, dupes=0, total_images=g["images"], bad_files=[],
                 latest_rows=[], used_previous_order=False, exact_order_applied=False, model=model)
-            await ctx.send((summary + "\n(First-key buttons use the master table.)")[:1995],
+            await ctx.send(summary[:1995],
                            view=helper_view(), allowed_mentions=none)
             return
         if words and words[0] == "undo":
@@ -1810,12 +1872,12 @@ class ChestPatternCog(commands.Cog):
                                          "account": g["accounts"].get(str(ctx.author.id))},
                                      keys, ctx.author.id, found=nums)
                 self._save(key, data)
-                model = build_model(g)
+                model = play_model(g, board.get("account"))
             await ctx.send(saved_text(board, model), view=saved_view(board["id"]), allowed_mentions=none)
             return
 
         _, _, g = self._guild(ctx.guild.id)
-        model = build_model(g)
+        model = play_model(g, g["accounts"].get(str(ctx.author.id)))
         if len(nums) == 1:
             await ctx.send(second_key_text(model, nums[0], followed_order(g, model)),
                            allowed_mentions=none)
