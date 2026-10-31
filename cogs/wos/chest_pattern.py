@@ -18,7 +18,7 @@ All version 1 data (totals, order stats, hashes, image count, last order) is
 kept in the same file and the version 1 key counts are used as a half-weight
 prior until enough confirmed boards exist.
 """
-__version__ = "2.0.1"
+__version__ = "2.0.2"
 
 import asyncio
 import csv
@@ -864,11 +864,44 @@ def find_board(guild_data, board_id):
     return None
 
 
-def record_board(guild_data, pending, keys, author_id):
-    """Turn a pending read into a confirmed board. Returns the board record."""
+def found_order(keys, found):
+    """The two keys in the order they were found (first key, second key).
+
+    `keys` stays sorted for the statistics; `found` is what the player typed or
+    tapped. Falls back to sorted order when the find order is unknown."""
+    keys = valid_keys(keys) or []
+    try:
+        found = [int(k) for k in (found or [])]
+    except (TypeError, ValueError):
+        found = []
+    if len(found) == 2 and sorted(found) == keys:
+        return found
+    return list(keys)
+
+
+def board_found(board):
+    return found_order(board.get("keys", []), board.get("found"))
+
+
+def record_board(guild_data, pending, keys, author_id, found=None):
+    """Turn a pending read into a confirmed board. Returns the board record.
+
+    `found` (optional) is the order the keys were found in; the board keeps
+    `keys` sorted for the model and stores the find order in `found`."""
+    found = found if found is not None else pending.get("found")
     keys = valid_keys(keys)
     if not keys:
         raise ValueError("Pick exactly two keys.")
+    # Store the find order only when the player gave it (typed or tapped).
+    given = found
+    found = None
+    if given:
+        try:
+            given = [int(k) for k in given]
+        except (TypeError, ValueError):
+            given = []
+        if len(given) == 2 and sorted(given) == keys:
+            found = given
 
     replaces = pending.get("replaces")
     if replaces:
@@ -894,6 +927,7 @@ def record_board(guild_data, pending, keys, author_id):
                     guild_data["totals"][cell][new[str(p)]] += 1
                 board["symbols"] = new
             board["keys"] = keys
+            board["found"] = found
             board["fixed_by"] = str(author_id)
             board["fixed_utc"] = utcnow()
             guild_data["last_order"] = [pos_to_cell(p) for p in build_model(guild_data)["order"]]
@@ -912,6 +946,7 @@ def record_board(guild_data, pending, keys, author_id):
     board = {
         "id": pending.get("id") or new_board_id(guild_data),
         "keys": keys,
+        "found": found,
         "symbols": symbols,
         "by": str(pending.get("by") or author_id),
         "t": utcnow(),
@@ -983,12 +1018,17 @@ def board_grid(symbols, keys):
 
 
 def pending_text(pending, note=""):
-    keys = pending.get("keys") or []
+    keys = found_order(pending.get("keys") or [], pending.get("found")) \
+        if len(pending.get("keys") or []) == 2 else (pending.get("keys") or [])
     head = "**Dead Shot board — check the keys**" if not pending.get("replaces") else \
         "**Dead Shot board — fixing a saved board**"
     lines = [head, board_grid(pending.get("symbols"), keys)]
     if len(keys) == 2:
-        lines.append(f"Keys read at **{keys[0]}** and **{keys[1]}**. If that's right, press **Save**.")
+        if pending.get("found"):
+            lines.append(f"Keys: **{keys[0]}** found first, then **{keys[1]}**. If that's right, press **Save**.")
+        else:
+            lines.append(f"Keys read at **{keys[0]}** and **{keys[1]}**. If that's right, press **Save**.")
+        lines.append("To change which was found first, tap both off and tap them on in find order.")
     else:
         lines.append(f"Read {len(keys)} key(s). Tap the numbers so exactly **two** keys are red, then **Save**.")
     lines.append("Only finished boards (both keys found) can be saved.")
@@ -998,9 +1038,13 @@ def pending_text(pending, note=""):
 
 
 def saved_text(board, model, note=""):
-    k = board["keys"]
+    k = board_found(board)
+    if board.get("found"):
+        keys_txt = f"first key **{k[0]}**, second key **{k[1]}**"
+    else:
+        keys_txt = f"keys at **{k[0]}** and **{k[1]}**"
     lines = [
-        f"✅ **Saved Dead Shot board** — keys at **{k[0]}** and **{k[1]}**. "
+        f"✅ **Saved Dead Shot board** — {keys_txt}. "
         f"Confirmed boards: `{model['boards']}`.",
         "Shoot order now: " + " → ".join(str(p) for p in model["order"]),
     ]
@@ -1088,7 +1132,7 @@ PREFIX_HELP = (
     "**Dead Shot helper**\n"
     "`!ds` — key odds, safest shoot order and pattern check\n"
     "`!ds 7` — first key found at 7: safest next shots\n"
-    "`!ds 3 10` — record a finished board (keys at 3 and 10), no screenshot needed\n"
+    "`!ds 3 10` — record a finished board: first key 3, second key 10 (type them in find order)\n"
     "`!ds undo` — remove the last board you recorded\n"
     "Screenshots: drop finished-board screenshots in the Dead Shot channel "
     "(council feature `chest_pattern`) or use `/chest_pattern`. Check the keys and press Save."
@@ -1299,6 +1343,7 @@ class ChestPatternCog(commands.Cog):
                     edit_id = new_board_id(g)
                     pend = {"id": edit_id, "replaces": pid, "by": board.get("by"), "t": utcnow(),
                             "src": board.get("src", "image"), "keys": list(board["keys"]),
+                            "found": board_found(board) if board.get("found") else None,
                             "symbols": board.get("symbols") or {}}
                     g["pending"][edit_id] = pend
                     prune_pending(g)
@@ -1325,13 +1370,15 @@ class ChestPatternCog(commands.Cog):
                         content, view = saved_text(board, build_model(g)), saved_view(board["id"])
                 else:
                     pos = int(act[1:])
-                    keys = list(pend.get("keys", []))
+                    # Track tap order so the board remembers which key was found first.
+                    keys = list(pend.get("found") or pend.get("keys", []))
                     if pos in keys:
                         keys.remove(pos)
                     elif len(keys) < 2:
                         keys.append(pos)
                     else:
                         keys = [keys[-1], pos]
+                    pend["found"] = keys
                     pend["keys"] = sorted(keys)
                     self._save(key, data)
                     content, view = pending_text(pend), pending_view(pid, pend["keys"])
@@ -1393,7 +1440,8 @@ class ChestPatternCog(commands.Cog):
                 else:
                     remove_board(g, mine[-1]["id"])
                     self._save(key, data)
-                    msg = (f"Removed your last board (keys {mine[-1]['keys'][0]} and {mine[-1]['keys'][1]}). "
+                    k = board_found(mine[-1])
+                    msg = (f"Removed your last board (keys {k[0]} and {k[1]}). "
                            f"Confirmed boards: `{build_model(g)['boards']}`.")
             await ctx.send(msg, allowed_mentions=none)
             return
@@ -1415,7 +1463,7 @@ class ChestPatternCog(commands.Cog):
             async with self._lock:
                 key, data, g = self._guild(ctx.guild.id)
                 board = record_board(g, {"by": str(ctx.author.id), "src": "manual",
-                                         "id": new_board_id(g)}, keys, ctx.author.id)
+                                         "id": new_board_id(g)}, keys, ctx.author.id, found=nums)
                 self._save(key, data)
                 model = build_model(g)
             await ctx.send(saved_text(board, model), view=saved_view(board["id"]), allowed_mentions=none)

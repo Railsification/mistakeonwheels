@@ -1,7 +1,7 @@
 # tests/test_chest_pattern.py
 from __future__ import annotations
 
-__version__ = '1.0.1'
+__version__ = '1.0.2'
 
 """Offline tests for cogs/wos/chest_pattern.py (Dead Shot helper).
 
@@ -275,6 +275,24 @@ class ModelTests(TempDataMixin, unittest.TestCase):
         line = [l for l in mixed.splitlines() if l.startswith('**Shoot next')][0]
         self.assertTrue(line.rstrip().endswith('6'))
 
+    def test_find_order_kept_stats_unchanged(self):
+        g = cp.ensure_guild_data({'guilds': {}}, '1')
+        board = cp.record_board(g, {'src': 'manual'}, [11, 4], 1, found=[11, 4])
+        self.assertEqual(board['keys'], [4, 11])
+        self.assertEqual(board['found'], [11, 4])
+        self.assertIn('first key **11**, second key **4**', cp.saved_text(board, cp.build_model(g)))
+        m = cp.build_model(g)
+        self.assertEqual(m['key_counts'][4], 1)
+        self.assertEqual(m['pair'][4][11], 1)
+
+    def test_image_board_has_no_invented_find_order(self):
+        g = cp.ensure_guild_data({'guilds': {}}, '1')
+        board = cp.record_board(g, {'src': 'image'}, [3, 9], 1)
+        self.assertIsNone(board['found'])
+        self.assertIn('keys at **3** and **9**', cp.saved_text(board, cp.build_model(g)))
+        self.assertEqual(cp.board_found({'keys': [3, 9], 'found': [9, 2]}), [3, 9])
+        self.assertEqual(cp.board_found({'keys': [3, 9]}), [3, 9])
+
     def test_record_keeps_v1_totals_and_order_stats(self):
         g = cp.ensure_guild_data({'guilds': {}}, '1')
         order = cp.all_cells()
@@ -359,6 +377,25 @@ class ButtonTests(TempDataMixin, unittest.TestCase):
         self.assertEqual(g['images'], 1)
         self.assertEqual(len(g['samples']), 12)
         self.assertEqual(sum(1 for s in g['samples'] if s['label'] == 'KEY'), 2)
+
+    def test_tap_order_becomes_find_order(self):
+        pid = self._pending([])
+        cog = cp.ChestPatternCog(FakeBot())
+        for act in ('k11', 'k4', 'save'):
+            cog = cp.ChestPatternCog(FakeBot())
+            inter = FakeInteraction(5, FakeUser(10))
+            self.run_async(cog.handle_board_button(inter, pid, act))
+        self.assertIn('first key **11**, second key **4**', inter.response.edits[-1][0])
+        _, _, g = cog._guild(5)
+        self.assertEqual(g['boards'][0]['found'], [11, 4])
+        bid = g['boards'][0]['id']
+        self.run_async(cog.handle_board_button(FakeInteraction(5, FakeUser(10)), bid, 'fix'))
+        _, _, g = cog._guild(5)
+        fix = [v for v in g['pending'].values() if v.get('replaces') == bid][0]
+        self.assertEqual(fix['found'], [11, 4])
+        self.run_async(cog.handle_board_button(FakeInteraction(5, FakeUser(10)), fix['id'], 'save'))
+        _, _, g = cog._guild(5)
+        self.assertEqual(g['boards'][0]['found'], [11, 4])
 
     def test_save_needs_two_keys(self):
         pid = self._pending([3])
