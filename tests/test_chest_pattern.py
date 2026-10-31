@@ -1,7 +1,7 @@
 # tests/test_chest_pattern.py
 from __future__ import annotations
 
-__version__ = '1.0.0'
+__version__ = '1.0.1'
 
 """Offline tests for cogs/wos/chest_pattern.py (Dead Shot helper).
 
@@ -247,6 +247,33 @@ class ModelTests(TempDataMixin, unittest.TestCase):
         self.assertEqual(set(m['order'][-2:]), {1, 2})
         # Opened-but-not-key (3) and unopened cells are equally safe.
         self.assertAlmostEqual(m['prob'][3], m['prob'][12])
+
+    def test_first_key_skips_targets_already_shot(self):
+        g = cp.ensure_guild_data({'guilds': {}}, '1')
+        m = cp.build_model(g)
+        order = cp.followed_order(g, m)
+        self.assertEqual(order, list(range(1, 13)))
+        text = cp.second_key_text(m, 5, order)
+        self.assertIn('1, 2, 3, 4 already open', text)
+        self.assertIn('Shoot next:** 6', text)
+        self.assertIn('All 7 targets left are equal (14% each)', text)
+        self.assertNotIn('1 → 2', text)
+        self.assertIn('!ds 5 <second key>', text)
+        first = cp.second_key_text(m, 1, order)
+        self.assertIn('the key was your first shot', first)
+
+    def test_first_key_ranks_remaining_by_pairs(self):
+        g = cp.ensure_guild_data({'guilds': {}}, '1')
+        for _ in range(30):
+            cp.record_board(g, {'src': 'manual'}, [5, 6], 1)
+        m = cp.build_model(g)
+        text = cp.second_key_text(m, 5, cp.followed_order(g, m))
+        # Keys always at 5 and 6, so 5 and 6 come last in the order: once 5 is
+        # hit, every other target has been shot and only 6 remains.
+        self.assertIn('Only 6 is left', text)
+        mixed = cp.second_key_text(m, 5, list(range(1, 13)))
+        line = [l for l in mixed.splitlines() if l.startswith('**Shoot next')][0]
+        self.assertTrue(line.rstrip().endswith('6'))
 
     def test_record_keeps_v1_totals_and_order_stats(self):
         g = cp.ensure_guild_data({'guilds': {}}, '1')

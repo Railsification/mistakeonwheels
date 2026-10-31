@@ -18,7 +18,7 @@ All version 1 data (totals, order stats, hashes, image count, last order) is
 kept in the same file and the version 1 key counts are used as a half-weight
 prior until enough confirmed boards exist.
 """
-__version__ = "2.0.0"
+__version__ = "2.0.1"
 
 import asyncio
 import csv
@@ -788,16 +788,45 @@ def make_csv(ranked):
     )
 
 
-def second_key_text(model, first):
+def followed_order(guild_data, model=None):
+    """The shoot order `!ds` currently shows. It only changes when a board is
+    recorded (between stages), so it is the order a player was following when
+    they hit their first key."""
+    return list((model or build_model(guild_data))["order"])
+
+
+def second_key_text(model, first, shoot_order=None):
+    """Second-key advice. With `shoot_order`, everything shot before the first
+    key is treated as already opened (safe) and only the rest are ranked."""
+    first = int(first)
     odds, seen = second_key_odds(model, first)
+    opened = []
+    if shoot_order and first in shoot_order:
+        opened = list(shoot_order[:shoot_order.index(first)])
+        left = {p: odds[p] for p in odds if p not in opened}
+        total = sum(left.values()) or 1.0
+        odds = {p: v / total for p, v in left.items()}
     order = sorted(odds, key=lambda p: (odds[p], p))
-    lines = [
-        f"**First key at {first}** — chance the second key is at each target:",
-        odds_grid(odds, mark={first: "KEY"}),
-        "**Shoot next (safest first):** " + " → ".join(str(p) for p in order),
+    mark = {first: "KEY"}
+    mark.update({p: "open" for p in opened})
+    lines = [f"**First key at {first}** — chance the second key is at each target left:"]
+    if shoot_order:
+        lines.append("Assuming you shot in the order shown: "
+                     + (", ".join(str(p) for p in opened) + " already open." if opened
+                        else "the key was your first shot."))
+    lines.append(odds_grid(odds, mark=mark))
+    values = sorted({round(v, 6) for v in odds.values()})
+    if len(order) == 1:
+        lines.append(f"**Only {order[0]} is left** — it must be the second key.")
+    elif len(values) == 1:
+        lines.append(f"**Shoot next:** {order[0]}. All {len(order)} targets left are equal "
+                     f"({round(values[0] * 100)}% each) — any of them is as safe as another.")
+    else:
+        lines.append("**Shoot next (safest first):** " + " → ".join(str(p) for p in order))
+    lines.append(
         f"Based on `{seen}` confirmed board{'s' if seen != 1 else ''} with a key at {first}"
-        + (" — too few to trust; this is close to the overall odds." if seen < 10 else "."),
-    ]
+        + (" — too few to trust; this is close to the overall odds." if seen < 10 else "."))
+    lines.append(f"When the stage ends, record it: `!ds {first} <second key>`")
     return "\n".join(lines)
 
 
@@ -1313,7 +1342,9 @@ class ChestPatternCog(commands.Cog):
 
     async def handle_next_button(self, interaction, first):
         _, _, g = self._guild(interaction.guild_id)
-        await interaction.response.send_message(second_key_text(build_model(g), first), ephemeral=True)
+        model = build_model(g)
+        await interaction.response.send_message(
+            second_key_text(model, first, followed_order(g, model)), ephemeral=True)
 
     # ----- channel drop: screenshots posted in the Dead Shot channel -----
     @commands.Cog.listener("on_message")
@@ -1393,7 +1424,8 @@ class ChestPatternCog(commands.Cog):
         _, _, g = self._guild(ctx.guild.id)
         model = build_model(g)
         if len(nums) == 1:
-            await ctx.send(second_key_text(model, nums[0]), allowed_mentions=none)
+            await ctx.send(second_key_text(model, nums[0], followed_order(g, model)),
+                           allowed_mentions=none)
             return
         summary = build_summary(
             ranked=[], uploads=0, learned=0, dupes=0, total_images=g["images"], bad_files=[],
