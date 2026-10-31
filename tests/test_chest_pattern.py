@@ -1,7 +1,7 @@
 # tests/test_chest_pattern.py
 from __future__ import annotations
 
-__version__ = '1.3.0'
+__version__ = '1.3.1'
 
 """Offline tests for cogs/wos/chest_pattern.py (Dead Shot helper).
 
@@ -27,6 +27,15 @@ sys.path.insert(0, str(ROOT))
 
 
 def _install_stubs():
+    # GitHub CI installs no packages: core.logger needs colorama.
+    try:
+        import colorama  # noqa: F401
+    except ImportError:
+        m = types.ModuleType('colorama')
+        m.init = lambda **k: None
+        m.Fore = types.SimpleNamespace(GREEN='', YELLOW='', RED='', CYAN='')
+        m.Style = types.SimpleNamespace(RESET_ALL='')
+        sys.modules['colorama'] = m
     try:
         import discord  # noqa: F401
         return
