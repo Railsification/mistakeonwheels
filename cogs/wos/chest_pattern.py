@@ -18,7 +18,7 @@ All version 1 data (totals, order stats, hashes, image count, last order) is
 kept in the same file and the version 1 key counts are used as a half-weight
 prior until enough confirmed boards exist.
 """
-__version__ = "2.8.2"
+__version__ = "2.8.3"
 
 import asyncio
 import csv
@@ -69,7 +69,7 @@ EXACT_WEIGHTS = {
 
 FEATURE_NAME = "chest_pattern"
 # Shown in the Dead Shot channel once when this version first goes live.
-RELEASE_NOTE = "full clears are now flagged when logged; `!ds wins` lists every full-clear path."
+RELEASE_NOTE = "`!ds path <12 numbers>` sets your next stage's path (e.g. to replay a full clear) and still records it."
 POSITIONS = list(range(1, 13))
 KEYS_PER_BOARD = 2
 KEY_RATE = KEYS_PER_BOARD / 12.0
@@ -1826,6 +1826,7 @@ PREFIX_HELP = (
     "`!ds 3 10` — record a finished board: first key 3, second key 10 (type them in find order)\n"
     "`!ds algo` — the game's measured rules so far (key chance on each shot)\n"
     "`!ds wins` — every full-clear path recorded\n"
+    "`!ds path 10 3 9 4 6 7 8 12 11 5 1 2` — use your own path for the next stage (still recorded)\n"
     "`!ds undo` — remove the last board you recorded\n"
     "`!ds account <name>` — set the game account you're playing; boards get tagged with it\n"
     "`!ds mine` — odds for your current account only · `!ds compare` — accounts side by side\n"
@@ -2257,6 +2258,22 @@ class ChestPatternCog(commands.Cog):
                     self._save(key, data)
             await ctx.send(f"Tagged {count} of your board(s) with account **{name}**."
                            if count else "You have no untagged boards.", allowed_mentions=none)
+            return
+        if words and words[0] in ("path", "replay", "set"):
+            nums = [w for w in words[1:] if w.isdigit()]
+            order = [int(n) for n in nums]
+            if len(order) != 12 or sorted(order) != POSITIONS:
+                await ctx.send("Give all 12 targets once each, e.g. "
+                               "`!ds path 10 3 9 4 6 7 8 12 11 5 1 2`.", allowed_mentions=none)
+                return
+            async with self._lock:
+                key, data, g = self._guild(ctx.guild.id)
+                set_plan(g, ctx.author.id, order)
+                g["plans"][str(ctx.author.id)]["fixed"] = PLAY_MODE
+                g["plans"][str(ctx.author.id)]["custom"] = True
+                self._save(key, data)
+            await ctx.send(fixed_stage_text(order) + "\n(Your own path for this stage — the next stage goes "
+                           "back to the bot's order unless you set it again.)", allowed_mentions=none)
             return
         if words and words[0] in ("wins", "win", "clears", "jackpots"):
             _, _, g = self._guild(ctx.guild.id)

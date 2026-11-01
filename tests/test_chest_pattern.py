@@ -1,7 +1,7 @@
 # tests/test_chest_pattern.py
 from __future__ import annotations
 
-__version__ = '1.8.3'
+__version__ = '1.8.4'
 
 """Offline tests for cogs/wos/chest_pattern.py (Dead Shot helper).
 
@@ -949,6 +949,19 @@ class PrefixTests(TempDataMixin, unittest.TestCase):
         wins = self.ds(10, 'wins')
         self.assertIn('full clears** (1)', wins)
         self.assertIn(' → '.join(str(p) for p in shown), wins)
+
+    def test_custom_path_recorded(self):
+        self.assertIn('Give all 12', self.ds(10, 'path', '1', '2'))
+        self.assertIn('Give all 12', self.ds(10, 'path', *['1'] * 12))
+        path = ['10', '3', '9', '4', '6', '7', '8', '12', '11', '5', '1', '2']
+        msg = self.ds(10, 'path', *path)
+        self.assertIn('**10 → 3 → 9', msg)
+        self.assertIn('**10 → 3 → 9', self.ds(10))        # !ds keeps it until logged
+        self.assertIn('Keep going in the same order: 11 → 5', self.ds(10, '12'))
+        reply = self.ds(10, '12', '2')
+        self.assertIn('FULL CLEAR', reply)
+        _, _, g = cp.ChestPatternCog(FakeBot())._guild(5)
+        self.assertEqual(g['boards'][-1]['shots'], [int(x) for x in path])
 
     def test_bad_account_name(self):
         self.assertIn('Account names', self.ds(10, 'account', 'untagged'))
