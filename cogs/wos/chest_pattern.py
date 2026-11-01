@@ -18,7 +18,7 @@ All version 1 data (totals, order stats, hashes, image count, last order) is
 kept in the same file and the version 1 key counts are used as a half-weight
 prior until enough confirmed boards exist.
 """
-__version__ = "2.3.1"
+__version__ = "2.4.0"
 
 import asyncio
 import csv
@@ -884,6 +884,9 @@ def export_csv(guild_data):
 # <0.01% of the time). Shooting spots that were recently paired with the
 # first key BEFORE the others gave 7.41 reward shots per stage in a replay of
 # those boards vs 6.67 by pure luck.
+# 1 Nov 2026 re-test: using the member's last 40 boards across ALL their game
+# accounts (in time order) did better again: 7.63 per stage, and it gives a
+# new account an edge from its first stage.
 # ---------------------------------------------------------------------------
 
 RECENT_WINDOW = 40     # boards on the same account that count as "recent"
@@ -897,14 +900,38 @@ def recent_pairs(guild_data, account, window=RECENT_WINDOW):
     return [tuple(r["keys"]) for r in timed_boards(guild_data, account)[-window:]]
 
 
-def apply_recency(model, guild_data, account):
-    """Re-rank the shoot order for one account using pairs it had recently."""
-    recent = recent_pairs(guild_data, account)
+def member_recent_pairs(guild_data, member_id, window=RECENT_WINDOW):
+    """Key pairs of the last `window` boards one Discord member logged, across
+    all their game accounts, oldest first."""
+    if member_id is None:
+        return []
+    rows = []
+    for b in guild_data.get("boards", []):
+        if not isinstance(b, dict) or str(b.get("by")) != str(member_id):
+            continue
+        keys = valid_keys(b.get("keys", []))
+        t = board_time(b)
+        if keys and t is not None:
+            rows.append((t, tuple(keys)))
+    rows.sort(key=lambda r: r[0])
+    return [pr for _, pr in rows[-window:]]
+
+
+def apply_recency(model, guild_data, account, member=None):
+    """Re-rank the shoot order using recently used key pairs: the member's
+    boards across all their accounts when `member` is given, otherwise the
+    one account's boards."""
+    if member is not None:
+        recent = member_recent_pairs(guild_data, member)
+        scope = "all"
+    else:
+        recent = recent_pairs(guild_data, account)
+        scope = "account"
     if not recent:
-        if not account:
+        if not account and member is None:
             return model
         out = dict(model)
-        out["new_account"] = account
+        out["new_account"] = account or ""
         return out
     used = set(recent)
     weights = {pr: (RECENT_WEIGHT if pr in used else 1.0) for pr in ALL_PAIRS}
@@ -914,15 +941,17 @@ def apply_recency(model, guild_data, account):
     out["prob"] = prob
     out["order"] = sorted(POSITIONS, key=lambda p: (prob[p], p))
     out["pair_weight"] = weights
-    out["recent_account"] = account
+    out["recent_account"] = account if scope == "account" else None
+    out["recent_scope"] = scope
     out["recent_count"] = len(recent)
     return out
 
 
-def play_model(guild_data, account=None, own_table=False):
-    """The model used for advice: key stats plus the account's repeat history."""
+def play_model(guild_data, account=None, own_table=False, member=None):
+    """The model used for advice: key stats plus recent repeat history
+    (the member's boards on every account when `member` is given)."""
     base = build_model(guild_data, account if own_table else None)
-    return apply_recency(base, guild_data, account)
+    return apply_recency(base, guild_data, account, member)
 
 
 def second_key_odds(model, first):
@@ -1041,12 +1070,16 @@ def build_summary(
         lines.append("Unopened in latest screenshot: " + ", ".join(str(p) for p in rem))
 
     lines.append(pattern_verdict(model))
-    if model.get("recent_account"):
+    if model.get("recent_scope") == "all":
+        lines.append(f"Order uses your last {model['recent_count']} boards across all your accounts: "
+                     "key pairs used recently rarely come back, so their spots go first.")
+    elif model.get("recent_account"):
         lines.append(f"Order uses account **{model['recent_account']}**'s last {model['recent_count']} boards: "
                      "key pairs it just had rarely come back, so their spots go first.")
-    elif model.get("new_account"):
-        lines.append(f"Account **{model['new_account']}** has no boards yet, so there's no edge on this stage — "
-                     "it starts helping once this account has logged a few. Log every stage.")
+    elif "new_account" in model:
+        who = f"Account **{model['new_account']}** has" if model["new_account"] else "You have"
+        lines.append(f"{who} no boards yet, so there's no edge on this stage — "
+                     "it starts helping once a few are logged. Log every stage.")
     else:
         lines.append("Set your account (`!ds account <name>`) — the order then uses that account's "
                      "recent boards, which is where the real pattern is.")
@@ -1143,7 +1176,11 @@ def second_key_text(model, first, shoot_order=None):
                      f"({round(values[0] * 100)}% each) — any of them is as safe as another.")
     else:
         lines.append("**Shoot next (safest first):** " + " → ".join(str(p) for p in order))
-    if model.get("pair_weight"):
+    if model.get("pair_weight") and model.get("recent_scope") == "all":
+        lines.append(
+            f"{seen} spot{'s' if seen != 1 else ''} paired with {first} in your last "
+            f"{model['recent_count']} boards (all accounts) — those rarely repeat, so they're shot first.")
+    elif model.get("pair_weight"):
         lines.append(
             f"Account **{model['recent_account']}**: {seen} spot{'s' if seen != 1 else ''} paired with "
             f"{first} in its last {model['recent_count']} boards — those rarely repeat, so they're shot first.")
@@ -1562,7 +1599,7 @@ class ChestPatternCog(commands.Cog):
             for att in attachments:
                 results.append(await self._read_attachment(att, g, author_id, cv2, np, prior))
             self._save(key, data)
-            model = play_model(g, g["accounts"].get(str(author_id)))
+            model = play_model(g, g["accounts"].get(str(author_id)), member=author_id)
         return (results, model), None
 
     # ----- slash commands (names and parameters unchanged) -----
@@ -1639,7 +1676,7 @@ class ChestPatternCog(commands.Cog):
             ranked=ranked, uploads=0, learned=0, dupes=0, total_images=g["images"],
             bad_files=[], latest_rows=[], used_previous_order=False,
             exact_order_applied=False,
-            model=play_model(g, g["accounts"].get(str(interaction.user.id))))
+            model=play_model(g, g["accounts"].get(str(interaction.user.id)), member=interaction.user.id))
         await interaction.followup.send(content=summary, file=make_csv(ranked),
                                         view=helper_view(), ephemeral=True)
 
@@ -1703,7 +1740,8 @@ class ChestPatternCog(commands.Cog):
                         board = record_board(g, pend, pend["keys"], interaction.user.id)
                         g["pending"].pop(pid, None)
                         self._save(key, data)
-                        content, view = saved_text(board, play_model(g, board.get("account"))), \
+                        content, view = saved_text(board, play_model(g, board.get("account"),
+                                                                     member=board.get("by"))), \
                             saved_view(board["id"])
                 else:
                     pos = int(act[1:])
@@ -1726,7 +1764,7 @@ class ChestPatternCog(commands.Cog):
 
     async def handle_next_button(self, interaction, first):
         _, _, g = self._guild(interaction.guild_id)
-        model = play_model(g, g["accounts"].get(str(interaction.user.id)))
+        model = play_model(g, g["accounts"].get(str(interaction.user.id)), member=interaction.user.id)
         await interaction.response.send_message(
             second_key_text(model, first, followed_order(g, model)), ephemeral=True)
 
@@ -1879,12 +1917,12 @@ class ChestPatternCog(commands.Cog):
                                          "account": g["accounts"].get(str(ctx.author.id))},
                                      keys, ctx.author.id, found=nums)
                 self._save(key, data)
-                model = play_model(g, board.get("account"))
+                model = play_model(g, board.get("account"), member=ctx.author.id)
             await ctx.send(saved_text(board, model), view=saved_view(board["id"]), allowed_mentions=none)
             return
 
         _, _, g = self._guild(ctx.guild.id)
-        model = play_model(g, g["accounts"].get(str(ctx.author.id)))
+        model = play_model(g, g["accounts"].get(str(ctx.author.id)), member=ctx.author.id)
         if len(nums) == 1:
             await ctx.send(second_key_text(model, nums[0], followed_order(g, model)),
                            allowed_mentions=none)

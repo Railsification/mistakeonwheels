@@ -1,7 +1,7 @@
 # tests/test_chest_pattern.py
 from __future__ import annotations
 
-__version__ = '1.3.2'
+__version__ = '1.4.0'
 
 """Offline tests for cogs/wos/chest_pattern.py (Dead Shot helper).
 
@@ -645,6 +645,33 @@ class RecencyTests(TempDataMixin, unittest.TestCase):
         self.assertIn('Account **main** has no boards yet', text)
         self.assertNotIn('Set your account', text)
         self.assertNotIn('pair_weight', m)
+
+    def test_member_history_crosses_accounts(self):
+        g = cp.ensure_guild_data({'guilds': {}}, '1')
+        self.board(g, [5, 9], 'spy', 1)          # logged by member 1
+        m = cp.play_model(g, 'main', member=1)   # brand-new account, same member
+        self.assertEqual(m['recent_scope'], 'all')
+        odds, recent = cp.second_key_odds(m, 5)
+        self.assertEqual(recent, 1)
+        self.assertEqual(min(odds, key=odds.get), 9)
+        self.assertIn('across all your accounts', cp.build_summary(
+            [], 0, 0, 0, 0, [], [], False, False, model=m))
+        self.assertIn('(all accounts)', cp.second_key_text(m, 5))
+
+    def test_other_members_boards_not_used(self):
+        g = cp.ensure_guild_data({'guilds': {}}, '1')
+        self.board(g, [5, 9], 'spy', 1)
+        m = cp.play_model(g, None, member=2)
+        self.assertNotIn('pair_weight', m)
+        self.assertIn('You have no boards yet', cp.build_summary(
+            [], 0, 0, 0, 0, [], [], False, False, model=m))
+
+    def test_member_window_is_time_ordered(self):
+        g = cp.ensure_guild_data({'guilds': {}}, '1')
+        self.board(g, [1, 2], 'a', 30)
+        self.board(g, [3, 4], 'b', 10)
+        self.assertEqual(cp.member_recent_pairs(g, 1), [(3, 4), (1, 2)])
+        self.assertEqual(cp.member_recent_pairs(g, 1, window=1), [(1, 2)])
 
     def test_probabilities_sum_to_two_keys(self):
         g = cp.ensure_guild_data({'guilds': {}}, '1')
