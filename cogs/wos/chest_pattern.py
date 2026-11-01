@@ -18,7 +18,7 @@ All version 1 data (totals, order stats, hashes, image count, last order) is
 kept in the same file and the version 1 key counts are used as a half-weight
 prior until enough confirmed boards exist.
 """
-__version__ = "2.7.3"
+__version__ = "2.7.4"
 
 import asyncio
 import csv
@@ -1203,13 +1203,29 @@ def stage_plan(guild_data, member_id, model, reuse=False):
     if (reuse and isinstance(plan, dict) and plan.get("fixed") == PLAY_MODE
             and plan.get("order")):
         return list(plan["order"]), None
-    order = list(build_model(guild_data)["order"])
+    order = rotating_order(guild_data, member_id)
     set_plan(guild_data, member_id, order)
     guild_data["plans"][str(member_id)]["fixed"] = PLAY_MODE
     return list(order), None
 
 
-PLAY_MODE = "fewest_keys_first"   # plans from older modes are not reused
+PLAY_MODE = "rotate_recent_keys"   # plans from older modes are not reused
+ROTATE_STAGES = 3                  # keys from this many recent stages go to the back
+
+
+def rotating_order(guild_data, member_id):
+    """Fewest-keys-first order, but targets that were keys in the member's
+    last ROTATE_STAGES stages go to the back (most recent key last), so the
+    order changes every stage."""
+    base = list(build_model(guild_data)["order"])
+    recent = member_recent_pairs(guild_data, member_id, window=ROTATE_STAGES)
+    back = []
+    for pair in recent:                      # oldest first
+        for p in pair:
+            if p in back:
+                back.remove(p)
+            back.append(p)
+    return [p for p in base if p not in back] + back
 
 
 def fixed_stage_text(order):
