@@ -18,7 +18,7 @@ All version 1 data (totals, order stats, hashes, image count, last order) is
 kept in the same file and the version 1 key counts are used as a half-weight
 prior until enough confirmed boards exist.
 """
-__version__ = "2.7.1"
+__version__ = "2.7.2"
 
 import asyncio
 import csv
@@ -1195,13 +1195,14 @@ def stage_plan(guild_data, member_id, model, reuse=False):
         set_plan(guild_data, member_id, order)
         guild_data["plans"][str(member_id)]["test"] = arm
         return list(order), arm
-    # Data-collection mode (1 Nov 2026): the order test proved keys are decided
-    # as you shoot, so the bot gives a fresh random order each stage. That
-    # separates "which shot" from "which target" in the data.
+    # Play order (1 Nov 2026, member's call): back to the 31 Oct order —
+    # targets with the fewest keys so far first, from all logged boards —
+    # which averaged ~5.5 rewards per stage, against 2.8 for the recent-pairs
+    # order. The whole stage is shot in this order; every shot is recorded.
     plan = guild_data.get("plans", {}).get(str(member_id))
     if reuse and isinstance(plan, dict) and plan.get("fixed") and plan.get("order"):
         return list(plan["order"]), None
-    order = secrets.SystemRandom().sample(POSITIONS, len(POSITIONS))
+    order = list(build_model(guild_data)["order"])
     set_plan(guild_data, member_id, order)
     guild_data["plans"][str(member_id)]["fixed"] = True
     return list(order), None

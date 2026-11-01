@@ -1,7 +1,7 @@
 # tests/test_chest_pattern.py
 from __future__ import annotations
 
-__version__ = '1.7.1'
+__version__ = '1.7.2'
 
 """Offline tests for cogs/wos/chest_pattern.py (Dead Shot helper).
 
@@ -858,6 +858,13 @@ class PrefixTests(TempDataMixin, unittest.TestCase):
         self.assertIn('Next stage — shoot in this order', self.ds(10))
         self.assertIn('test **on**', self.ds(10, 'test', 'on'))
         self.assertIn('Test stage 3/60', self.ds(10))
+
+    def test_play_order_is_fewest_keys_first(self):
+        self.ds(10, '1', '2')
+        _, _, g = cp.ChestPatternCog(FakeBot())._guild(5)
+        order = g['plans']['10']['order']
+        self.assertEqual(order[-2:], [1, 2])
+        self.assertEqual(order[:10], list(range(3, 13)))
 
     def test_bad_account_name(self):
         self.assertIn('Account names', self.ds(10, 'account', 'untagged'))
