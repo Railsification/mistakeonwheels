@@ -18,7 +18,7 @@ All version 1 data (totals, order stats, hashes, image count, last order) is
 kept in the same file and the version 1 key counts are used as a half-weight
 prior until enough confirmed boards exist.
 """
-__version__ = "2.6.0"
+__version__ = "2.7.0"
 
 import asyncio
 import csv
@@ -1182,7 +1182,7 @@ def test_boards(guild_data, member_id):
 
 
 def test_active(guild_data, member_id):
-    state = guild_data.get("tests", {}).get(str(member_id), {}).get("state", "on")
+    state = guild_data.get("tests", {}).get(str(member_id), {}).get("state", "off")
     return state == "on" and len(test_boards(guild_data, member_id)) < TEST_STAGES
 
 
@@ -1194,8 +1194,70 @@ def stage_plan(guild_data, member_id, model):
         set_plan(guild_data, member_id, order)
         guild_data["plans"][str(member_id)]["test"] = arm
         return list(order), arm
-    set_plan(guild_data, member_id, model["order"])
-    return list(model["order"]), None
+    # Data-collection mode (1 Nov 2026): the order test proved keys are decided
+    # as you shoot, so every stage is shot 1->12 to make stages comparable.
+    set_plan(guild_data, member_id, PLAY_ORDER)
+    guild_data["plans"][str(member_id)]["fixed"] = True
+    return list(PLAY_ORDER), None
+
+
+PLAY_ORDER = list(range(1, 13))
+
+
+def fixed_stage_text():
+    return ("🎯 **Next stage: shoot 1 → 2 → 3 → … → 12, the whole stage** (keep going after the first key).\n"
+            "When it ends, log it straight away: `!ds <first key> <second key>` (e.g. `!ds 4 9`).")
+
+
+def algo_report(guild_data, member_id=None):
+    """Measured rules of the game from every stage with a known shot path."""
+    stages = []
+    for b in guild_data.get("boards", []):
+        if not isinstance(b, dict) or not b.get("shots") or not b.get("followed_path"):
+            continue
+        if member_id is not None and str(b.get("by")) != str(member_id):
+            continue
+        shots = [int(x) for x in b["shots"]]
+        f = board_found(b)
+        if f[0] not in shots:
+            continue
+        stages.append({"first": shots.index(f[0]) + 1, "len": len(shots)})
+    out = {"n": len(stages), "hazard": [], "after": []}
+    alive = len(stages)
+    for k in range(1, 12):
+        if alive < 8:
+            break
+        hit = sum(1 for st in stages if st["first"] == k)
+        out["hazard"].append((k, hit, alive, 2 / (13 - k)))
+        alive -= hit
+    gaps = [st["len"] - st["first"] for st in stages]
+    for g in range(1, 11):
+        left = [x for x in gaps if x >= g]
+        if len(left) < 8:
+            break
+        hit = sum(1 for x in gaps if x == g)
+        out["after"].append((g, hit, len(left), 1 / (12 - g)))
+    allr = [st["len"] - 2 for st in stages]
+    out["rewards"] = _mean(allr)
+    out["jackpots"] = sum(1 for x in allr if x == 10)
+    return out
+
+
+def algo_text(res):
+    lines = [f"**Dead Shot — measured rules** ({res['n']} stages with a full shot path)"]
+    if res["n"] == 0:
+        return lines[0] + "\nNo stages with a full path yet — shoot 1→12 and log with `!ds <first> <second>`."
+    lines.append(f"Rewards per stage **{res['rewards']:.2f}** (fair game 6.67) · jackpots {res['jackpots']} "
+                 f"(fair: 1 in 66 stages)")
+    if res["hazard"]:
+        lines.append("Chance the shot is a key, no key yet — actual vs fair:")
+        lines.append("```\n" + "\n".join(f"shot {k:>2}: {h:>3}/{a:<3} {h / a:>4.0%}  fair {f:.0%}"
+                                          for k, h, a, f in res["hazard"]) + "\n```")
+    if res["after"]:
+        lines.append("After the first key, chance the next shot is the 2nd key:")
+        lines.append("```\n" + "\n".join(f"{g:>2} after: {h:>3}/{a:<3} {h / a:>4.0%}  fair {f:.0%}"
+                                          for g, h, a, f in res["after"]) + "\n```")
+    return "\n".join(lines)[:1990]
 
 
 def test_stage_text(guild_data, member_id, order):
@@ -1664,6 +1726,7 @@ PREFIX_HELP = (
     "`!ds` — key odds, safest shoot order and pattern check\n"
     "`!ds 7` — first key found at 7: safest next shots\n"
     "`!ds 3 10` — record a finished board: first key 3, second key 10 (type them in find order)\n"
+    "`!ds algo` — the game's measured rules so far (key chance on each shot)\n"
     "`!ds undo` — remove the last board you recorded\n"
     "`!ds account <name>` — set the game account you're playing; boards get tagged with it\n"
     "`!ds mine` — odds for your current account only · `!ds compare` — accounts side by side\n"
@@ -1723,9 +1786,9 @@ class ChestPatternCog(commands.Cog):
             model = play_model(g, g["accounts"].get(str(member_id)), member=member_id)
             shown = self._plan_order(g, member_id, model)
             plan = g.get("plans", {}).get(str(member_id)) or {}
-            if plan.get("test") in TEST_ORDERS and int(first) in shown:
+            if (plan.get("test") in TEST_ORDERS or plan.get("fixed")) and int(first) in shown:
                 left = shown[shown.index(int(first)) + 1:]
-                return ("🧪 Test stage — keep going in the same order: "
+                return ("Keep going in the same order: "
                         + " → ".join(str(p) for p in left)
                         + f"\nWhen it ends: `!ds {first} <second key>`.")
             order = second_key_plan(model, first, shown)[0]
@@ -1956,7 +2019,7 @@ class ChestPatternCog(commands.Cog):
                         model = play_model(g, board.get("account"), member=board.get("by"))
                         order, arm = stage_plan(g, board.get("by"), model)
                         self._save(key, data)
-                        nxt = test_stage_text(g, board.get("by"), order) if arm else None
+                        nxt = test_stage_text(g, board.get("by"), order) if arm else fixed_stage_text()
                         content, view = saved_text(board, model, next_line=nxt), saved_view(board["id"])
                 else:
                     pos = int(act[1:])
@@ -2059,6 +2122,10 @@ class ChestPatternCog(commands.Cog):
             await ctx.send(f"Tagged {count} of your board(s) with account **{name}**."
                            if count else "You have no untagged boards.", allowed_mentions=none)
             return
+        if words and words[0] in ("algo", "algorithm", "rules"):
+            _, _, g = self._guild(ctx.guild.id)
+            await ctx.send(algo_text(algo_report(g)), allowed_mentions=none)
+            return
         if words and words[0] in ("test", "experiment"):
             async with self._lock:
                 key, data, g = self._guild(ctx.guild.id)
@@ -2154,7 +2221,7 @@ class ChestPatternCog(commands.Cog):
                 model = play_model(g, board.get("account"), member=ctx.author.id)
                 order, arm = stage_plan(g, ctx.author.id, model)
                 self._save(key, data)
-                nxt = test_stage_text(g, ctx.author.id, order) if arm else None
+                nxt = test_stage_text(g, ctx.author.id, order) if arm else fixed_stage_text()
             await ctx.send(saved_text(board, model, next_line=nxt)[:1995], view=saved_view(board["id"]),
                            allowed_mentions=none)
             return
@@ -2169,10 +2236,7 @@ class ChestPatternCog(commands.Cog):
             ranked=[], uploads=0, learned=0, dupes=0, total_images=g["images"], bad_files=[],
             latest_rows=[], used_previous_order=False, exact_order_applied=False, model=model)
         test_msg = await self._show_plan(ctx.guild.id, ctx.author.id, model)
-        if test_msg:
-            await ctx.send(test_msg, allowed_mentions=none)
-            return
-        await ctx.send(summary, view=helper_view(), allowed_mentions=none)
+        await ctx.send(test_msg or fixed_stage_text(), allowed_mentions=none)
 
 
 async def setup(bot):

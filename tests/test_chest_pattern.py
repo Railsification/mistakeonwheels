@@ -1,7 +1,7 @@
 # tests/test_chest_pattern.py
 from __future__ import annotations
 
-__version__ = '1.6.0'
+__version__ = '1.7.0'
 
 """Offline tests for cogs/wos/chest_pattern.py (Dead Shot helper).
 
@@ -739,6 +739,24 @@ class OrderTestReportTests(TempDataMixin, unittest.TestCase):
         self.assertLess(len(cp.test_text(res, False, 60)), 2000)
 
 
+class AlgoReportTests(TempDataMixin, unittest.TestCase):
+    def test_hazard_table(self):
+        g = cp.ensure_guild_data({'guilds': {}}, '1')
+        for i in range(20):
+            first, second = (1, 2) if i % 2 else (3, 7)
+            b = cp.record_board(g, {'src': 'manual', 'by': '1'}, [first, second], 1, found=[first, second])
+            b['shots'] = list(range(1, second + 1))
+            b['followed_path'] = True
+        res = cp.algo_report(g)
+        self.assertEqual(res['n'], 20)
+        self.assertEqual(res['hazard'][0][:3], (1, 10, 20))
+        self.assertAlmostEqual(res['rewards'], (0 + 5) / 2)
+        text = cp.algo_text(res)
+        self.assertIn('shot  1:  10/20', text)
+        self.assertLess(len(text), 2000)
+        self.assertIn('No stages', cp.algo_text(cp.algo_report(cp.ensure_guild_data({'guilds': {}}, '2'))))
+
+
 class FakeCtx:
     def __init__(self, uid, guild_id=5):
         self.author = types.SimpleNamespace(id=uid)
@@ -786,28 +804,23 @@ class PrefixTests(TempDataMixin, unittest.TestCase):
         self.assertEqual(ctx.file.filename, 'dead_shot_boards.csv')
 
     def test_shot_path_recorded_across_restarts(self):
-        self.ds(10, 'test', 'off')
         self.ds(10, 'account', 'main')
-        self.ds(10)                      # shows path, stores it
-        _, _, g = cp.ChestPatternCog(FakeBot())._guild(5)
-        shown = g['plans']['10']['order']
-        first = shown[3]
-        self.ds(10, str(first))          # first key on 4th shot
-        _, _, g = cp.ChestPatternCog(FakeBot())._guild(5)
-        nxt = g['plans']['10']['next']
-        second = nxt[2]
-        reply = self.ds(10, str(first), str(second))
+        msg = self.ds(10)                         # fixed 1->12 path, stored
+        self.assertIn('shoot 1 → 2 → 3', msg)
+        self.assertIn('Keep going in the same order', self.ds(10, '4'))
+        reply = self.ds(10, '4', '9')
         _, _, g = cp.ChestPatternCog(FakeBot())._guild(5)
         board = g['boards'][-1]
-        self.assertEqual(board['shots'], shown[:4] + nxt[:3])
+        self.assertEqual(board['shots'], [1, 2, 3, 4, 5, 6, 7, 8, 9])
         self.assertTrue(board['followed_path'])
-        self.assertEqual(board['shown_path'], shown)
         self.assertIn('Shots recorded:', reply)
-        # The new path shown after saving is stored for the next stage.
-        self.assertIsNone(g['plans']['10']['first'])
+        self.assertIn('Next stage: shoot 1', reply)
         rows = cp.export_csv(g).splitlines()
         self.assertIn('shots_in_order', rows[0])
-        self.assertIn(' '.join(str(x) for x in board['shots']), rows[-1])
+        self.assertIn('1 2 3 4 5 6 7 8 9', rows[-1])
+        algo = self.ds(10, 'algo')
+        self.assertIn('1 stages with a full shot path', algo)
+        self.assertIn('Rewards per stage **7.00**', algo)
 
     def test_unfollowed_path_still_saves_keys(self):
         self.ds(10)
@@ -820,10 +833,11 @@ class PrefixTests(TempDataMixin, unittest.TestCase):
         self.assertFalse(g['boards'][0]['followed_path'])
 
     def test_order_test_alternates_and_records(self):
+        self.ds(10, 'test', 'on')
         msg = self.ds(10)
         self.assertIn('Test stage 1/60', msg)
         self.assertIn('1 → 2 → 3', msg)
-        self.assertIn('keep going in the same order', self.ds(10, '4'))
+        self.assertIn('Keep going in the same order', self.ds(10, '4'))
         reply = self.ds(10, '4', '9')               # 1->12: keys at shots 4 and 9
         self.assertIn('Shots recorded: 1 → 2 → 3 → 4 → 5 → 6 → 7 → 8 → 9', reply)
         self.assertIn('Test stage 2/60', reply)
@@ -834,7 +848,7 @@ class PrefixTests(TempDataMixin, unittest.TestCase):
         self.assertEqual([b['test'] for b in g['boards']], ['fwd', 'rev'])
         self.assertIn('Needs at least 5', self.ds(10, 'test'))
         self.assertIn('test **off**', self.ds(10, 'test', 'off'))
-        self.assertNotIn('Test stage', self.ds(10))
+        self.assertIn('Next stage: shoot 1', self.ds(10))
         self.assertIn('test **on**', self.ds(10, 'test', 'on'))
         self.assertIn('Test stage 3/60', self.ds(10))
 
