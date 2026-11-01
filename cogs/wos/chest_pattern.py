@@ -18,7 +18,7 @@ All version 1 data (totals, order stats, hashes, image count, last order) is
 kept in the same file and the version 1 key counts are used as a half-weight
 prior until enough confirmed boards exist.
 """
-__version__ = "2.8.1"
+__version__ = "2.8.2"
 
 import asyncio
 import csv
@@ -69,7 +69,7 @@ EXACT_WEIGHTS = {
 
 FEATURE_NAME = "chest_pattern"
 # Shown in the Dead Shot channel once when this version first goes live.
-RELEASE_NOTE = "posts here when an update goes live; order is safest targets first (learned per shot)."
+RELEASE_NOTE = "full clears are now flagged when logged; `!ds wins` lists every full-clear path."
 POSITIONS = list(range(1, 13))
 KEYS_PER_BOARD = 2
 KEY_RATE = KEYS_PER_BOARD / 12.0
@@ -1735,6 +1735,8 @@ def saved_text(board, model, note="", next_line=None):
     ]
     if board.get("shots"):
         lines.insert(1, "Shots recorded: " + " → ".join(str(p) for p in board["shots"]))
+        if len(board["shots"]) == 12 and board.get("followed_path"):
+            lines.insert(1, "🏆 **FULL CLEAR** — this path is saved: `!ds wins` lists every full clear.")
     elif board.get("followed_path") is False:
         lines.insert(1, "Shots not recorded — the keys don't fit the path shown (keys still saved).")
     if note:
@@ -1823,6 +1825,7 @@ PREFIX_HELP = (
     "`!ds 7` — first key found at 7: safest next shots\n"
     "`!ds 3 10` — record a finished board: first key 3, second key 10 (type them in find order)\n"
     "`!ds algo` — the game's measured rules so far (key chance on each shot)\n"
+    "`!ds wins` — every full-clear path recorded\n"
     "`!ds undo` — remove the last board you recorded\n"
     "`!ds account <name>` — set the game account you're playing; boards get tagged with it\n"
     "`!ds mine` — odds for your current account only · `!ds compare` — accounts side by side\n"
@@ -2254,6 +2257,21 @@ class ChestPatternCog(commands.Cog):
                     self._save(key, data)
             await ctx.send(f"Tagged {count} of your board(s) with account **{name}**."
                            if count else "You have no untagged boards.", allowed_mentions=none)
+            return
+        if words and words[0] in ("wins", "win", "clears", "jackpots"):
+            _, _, g = self._guild(ctx.guild.id)
+            wins = [b for b in g["boards"] if isinstance(b, dict) and b.get("followed_path")
+                    and len(b.get("shots") or []) == 12]
+            if not wins:
+                await ctx.send("No full clears recorded yet (paths are recorded since 1 Nov).",
+                               allowed_mentions=none)
+                return
+            lines = [f"**Dead Shot full clears** ({len(wins)})"]
+            for b in wins[-15:]:
+                t = board_time(b)
+                when = (t + timedelta(hours=10)).strftime("%d %b %H:%M") if t else "?"
+                lines.append(f"{when} · {board_account(b)} · " + " → ".join(str(p) for p in b["shots"]))
+            await ctx.send("\n".join(lines)[:1990], allowed_mentions=none)
             return
         if words and words[0] in ("algo", "algorithm", "rules"):
             _, _, g = self._guild(ctx.guild.id)

@@ -1,7 +1,7 @@
 # tests/test_chest_pattern.py
 from __future__ import annotations
 
-__version__ = '1.8.2'
+__version__ = '1.8.3'
 
 """Offline tests for cogs/wos/chest_pattern.py (Dead Shot helper).
 
@@ -938,6 +938,17 @@ class PrefixTests(TempDataMixin, unittest.TestCase):
         msg = self.ds(10)
         self.assertNotIn('12 → 11 → 10', msg)
         self.assertIn('**1 → 2 → 3', msg)
+
+    def test_full_clear_flagged_and_listed(self):
+        self.assertIn('No full clears', self.ds(10, 'wins'))
+        self.ds(10)
+        _, _, g = cp.ChestPatternCog(FakeBot())._guild(5)
+        shown = g['plans']['10']['order']
+        reply = self.ds(10, str(shown[4]), str(shown[11]))
+        self.assertIn('FULL CLEAR', reply)
+        wins = self.ds(10, 'wins')
+        self.assertIn('full clears** (1)', wins)
+        self.assertIn(' → '.join(str(p) for p in shown), wins)
 
     def test_bad_account_name(self):
         self.assertIn('Account names', self.ds(10, 'account', 'untagged'))
