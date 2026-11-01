@@ -18,7 +18,7 @@ All version 1 data (totals, order stats, hashes, image count, last order) is
 kept in the same file and the version 1 key counts are used as a half-weight
 prior until enough confirmed boards exist.
 """
-__version__ = "2.7.4"
+__version__ = "2.8.0"
 
 import asyncio
 import csv
@@ -1203,13 +1203,75 @@ def stage_plan(guild_data, member_id, model, reuse=False):
     if (reuse and isinstance(plan, dict) and plan.get("fixed") == PLAY_MODE
             and plan.get("order")):
         return list(plan["order"]), None
-    order = rotating_order(guild_data, member_id)
+    order = safest_order(guild_data)
     set_plan(guild_data, member_id, order)
     guild_data["plans"][str(member_id)]["fixed"] = PLAY_MODE
     return list(order), None
 
 
-PLAY_MODE = "rotate_recent_keys"   # plans from older modes are not reused
+PLAY_MODE = "safest_targets"   # plans from older modes are not reused
+# Boards logged before this time were shot in the fewest-keys-first order
+# (versions 2.0.0-2.2.0); their shots up to the first key can be rebuilt.
+REPLAY_CUTOFF = "2026-10-31T02:20:00+00:00"
+RISK_PRIOR = 3.0
+
+
+def shot_events(guild_data):
+    """Every recorded shot as (target, shot number, first key found yet, was key).
+
+    Uses stored shot paths, plus yesterday's boards rebuilt from the
+    fewest-keys-first order the bot showed then (shots up to the first key)."""
+    rows = []
+    for b in guild_data.get("boards", []):
+        if isinstance(b, dict) and valid_keys(b.get("keys", [])):
+            t = board_time(b)
+            if t is not None:
+                rows.append((t, b))
+    rows.sort(key=lambda r: r[0])
+    cutoff = datetime.fromisoformat(REPLAY_CUTOFF)
+    counts = {p: 0 for p in POSITIONS}
+    events = []
+    for t, b in rows:
+        keys = set(b["keys"])
+        shots = None
+        if b.get("shots") and b.get("followed_path"):
+            shots = [int(x) for x in b["shots"]]
+        elif b.get("found") and t < cutoff:
+            order = sorted(POSITIONS, key=lambda q: (counts[q], q))
+            f1, f2 = [int(x) for x in board_found(b)]
+            if order.index(f1) < order.index(f2):
+                shots = order[:order.index(f1) + 1]
+        if shots:
+            found = 0
+            for k, target in enumerate(shots, start=1):
+                hit = 1 if target in keys else 0
+                events.append((target, k, 1 if found else 0, hit))
+                found += hit
+        for p in keys:
+            counts[p] += 1
+    return events
+
+
+def target_risk(guild_data):
+    """Key rate of each target relative to what its shot numbers predict
+    (1.0 = average; below 1 = safer than average)."""
+    events = shot_events(guild_data)
+    seen, hits = {}, {}
+    for _, k, after, hit in events:
+        seen[(k, after)] = seen.get((k, after), 0) + 1
+        hits[(k, after)] = hits.get((k, after), 0) + hit
+    obs = {p: 0.0 for p in POSITIONS}
+    exp = {p: 0.0 for p in POSITIONS}
+    for target, k, after, hit in events:
+        obs[target] += hit
+        exp[target] += hits[(k, after)] / seen[(k, after)]
+    risk = {p: (obs[p] + RISK_PRIOR) / (exp[p] + RISK_PRIOR) for p in POSITIONS}
+    return risk, len(events)
+
+
+def safest_order(guild_data):
+    risk, _ = target_risk(guild_data)
+    return sorted(POSITIONS, key=lambda p: (round(risk[p], 6), p))
 ROTATE_STAGES = 3                  # keys from this many recent stages go to the back
 
 
@@ -1265,6 +1327,9 @@ def algo_report(guild_data, member_id=None):
     allr = [st["len"] - 2 for st in stages]
     out["rewards"] = _mean(allr)
     out["jackpots"] = sum(1 for x in allr if x == 10)
+    risk, n_events = target_risk(guild_data)
+    out["risk"] = risk
+    out["risk_events"] = n_events
     return out
 
 
@@ -1278,6 +1343,10 @@ def algo_text(res):
         lines.append("Chance the shot is a key, no key yet — actual vs fair:")
         lines.append("```\n" + "\n".join(f"shot {k:>2}: {h:>3}/{a:<3} {h / a:>4.0%}  fair {f:.0%}"
                                           for k, h, a, f in res["hazard"]) + "\n```")
+    if res.get("risk_events"):
+        order = sorted(POSITIONS, key=lambda p: (round(res["risk"][p], 6), p))
+        lines.append(f"Safest → riskiest targets ({res['risk_events']} shots): "
+                     + " ".join(f"{p}({res['risk'][p]:.2f})" for p in order))
     if res["after"]:
         lines.append("After the first key, chance the next shot is the 2nd key:")
         lines.append("```\n" + "\n".join(f"{g:>2} after: {h:>3}/{a:<3} {h / a:>4.0%}  fair {f:.0%}"

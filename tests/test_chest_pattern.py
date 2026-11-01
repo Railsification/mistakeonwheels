@@ -1,7 +1,7 @@
 # tests/test_chest_pattern.py
 from __future__ import annotations
 
-__version__ = '1.7.4'
+__version__ = '1.8.0'
 
 """Offline tests for cogs/wos/chest_pattern.py (Dead Shot helper).
 
@@ -859,32 +859,41 @@ class PrefixTests(TempDataMixin, unittest.TestCase):
         self.assertIn('test **on**', self.ds(10, 'test', 'on'))
         self.assertIn('Test stage 3/60', self.ds(10))
 
-    def test_play_order_is_fewest_keys_first(self):
-        self.ds(10, '1', '2')
+    def test_safest_targets_first(self):
+        self.ds(10)
         _, _, g = cp.ChestPatternCog(FakeBot())._guild(5)
-        order = g['plans']['10']['order']
-        self.assertEqual(order[-2:], [1, 2])
-        self.assertEqual(order[:10], list(range(3, 13)))
-
-    def test_old_mode_plan_not_reused(self):
-        self.ds(10, '1', '2')
+        self.assertEqual(g['plans']['10']['order'], list(range(1, 13)))   # no data: ties by number
+        # Target 1 keeps being the key on shot 1; others are safe there.
         cog = cp.ChestPatternCog(FakeBot())
         key, data, g = cog._guild(5)
-        g['plans']['10'] = {'order': list(range(1, 13)), 'fixed': True, 'first': None, 'next': None}
+        for i in range(12):
+            if i % 2 == 0:      # target 1 shot first: it's a key
+                shots, keys = [1, 2, 3, 12], [1, 12]
+            else:               # target 2 shot first: safe
+                shots, keys = [2, 1, 3, 12], [3, 12]
+            b = cp.record_board(g, {'src': 'manual', 'by': '10'}, keys, 10, found=keys)
+            b['shots'] = shots
+            b['followed_path'] = True
         cog._save(key, data)
-        msg = self.ds(10)
-        self.assertNotIn('1 → 2 → 3 → 4', msg)
-        self.assertIn('**3 → 4 → 5', msg)
-
-    def test_recent_keys_rotate_to_back(self):
-        for keys in (('1', '2'), ('3', '4'), ('5', '6'), ('7', '8')):
-            reply = self.ds(10, *keys)
+        reply = self.ds(10, '5', '6')
         _, _, g = cp.ChestPatternCog(FakeBot())._guild(5)
         order = g['plans']['10']['order']
         self.assertEqual(sorted(order), list(range(1, 13)))
-        self.assertEqual(order[-6:], [3, 4, 5, 6, 7, 8])   # last 3 stages, newest last
-        self.assertEqual(order[:2], [9, 10])              # never keyed: front
-        self.assertIn('**9 → 10', reply)
+        risk, n = cp.target_risk(g)
+        self.assertGreater(risk[1], 1.0)
+        self.assertLess(risk[2], 1.0)
+        self.assertLess(order.index(2), order.index(1))
+        self.assertIn('Next stage', reply)
+        self.assertIn('Safest → riskiest targets', self.ds(10, 'algo'))
+
+    def test_old_mode_plan_not_reused(self):
+        cog = cp.ChestPatternCog(FakeBot())
+        key, data, g = cog._guild(5)
+        g['plans']['10'] = {'order': list(range(12, 0, -1)), 'fixed': True, 'first': None, 'next': None}
+        cog._save(key, data)
+        msg = self.ds(10)
+        self.assertNotIn('12 → 11 → 10', msg)
+        self.assertIn('**1 → 2 → 3', msg)
 
     def test_bad_account_name(self):
         self.assertIn('Account names', self.ds(10, 'account', 'untagged'))
