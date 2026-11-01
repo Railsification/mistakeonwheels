@@ -1,7 +1,7 @@
 # tests/test_chest_pattern.py
 from __future__ import annotations
 
-__version__ = '1.8.0'
+__version__ = '1.8.2'
 
 """Offline tests for cogs/wos/chest_pattern.py (Dead Shot helper).
 
@@ -755,6 +755,50 @@ class AlgoReportTests(TempDataMixin, unittest.TestCase):
         self.assertIn('shot  1:  10/20', text)
         self.assertLess(len(text), 2000)
         self.assertIn('No stages', cp.algo_text(cp.algo_report(cp.ensure_guild_data({'guilds': {}}, '2'))))
+
+
+
+class AnnounceTests(TempDataMixin, unittest.TestCase):
+    def test_announces_once_per_version(self):
+        sent = []
+
+        class Chan:
+            async def send(self, content, allowed_mentions=None):
+                sent.append(content)
+
+        class Settings:
+            def feature_channels(self, gid, feature):
+                return [111] if gid == 5 else []
+
+        bot = FakeBot()
+        bot.settings = Settings()
+        bot.guilds = [types.SimpleNamespace(id=5), types.SimpleNamespace(id=6)]
+        bot.get_channel = lambda cid: Chan() if cid == 111 else None
+        asyncio.run(cp.ChestPatternCog(bot).announce_release())
+        asyncio.run(cp.ChestPatternCog(bot).announce_release())   # restart: no repeat
+        self.assertEqual(len(sent), 1)
+        self.assertIn(f'v{cp.__version__} is live', sent[0])
+
+    def test_announces_in_last_ds_channel(self):
+        sent = []
+
+        class Chan:
+            async def send(self, content, allowed_mentions=None):
+                sent.append(content)
+
+        class Settings:
+            def feature_channels(self, gid, feature):
+                return []
+
+        ctx = FakeCtx(10)
+        ctx.channel = types.SimpleNamespace(id=222)
+        asyncio.run(cp.ChestPatternCog(FakeBot()).ds_prefix(ctx, 'help'))
+        bot = FakeBot()
+        bot.settings = Settings()
+        bot.guilds = [types.SimpleNamespace(id=5)]
+        bot.get_channel = lambda cid: Chan() if cid == 222 else None
+        asyncio.run(cp.ChestPatternCog(bot).announce_release())
+        self.assertEqual(len(sent), 1)
 
 
 class FakeCtx:

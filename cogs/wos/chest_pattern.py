@@ -18,7 +18,7 @@ All version 1 data (totals, order stats, hashes, image count, last order) is
 kept in the same file and the version 1 key counts are used as a half-weight
 prior until enough confirmed boards exist.
 """
-__version__ = "2.8.0"
+__version__ = "2.8.1"
 
 import asyncio
 import csv
@@ -68,6 +68,8 @@ EXACT_WEIGHTS = {
 }
 
 FEATURE_NAME = "chest_pattern"
+# Shown in the Dead Shot channel once when this version first goes live.
+RELEASE_NOTE = "posts here when an update goes live; order is safest targets first (learned per shot)."
 POSITIONS = list(range(1, 13))
 KEYS_PER_BOARD = 2
 KEY_RATE = KEYS_PER_BOARD / 12.0
@@ -1847,6 +1849,36 @@ class ChestPatternCog(commands.Cog):
         self.bot = bot
         self._lock = asyncio.Lock()
 
+    @commands.Cog.listener("on_ready")
+    async def announce_release(self):
+        """Post once per version in each guild's Dead Shot channel that the
+        new version is live. The announced version is saved, so restarts and
+        reconnects don't repeat it."""
+        settings = getattr(self.bot, "settings", None)
+        if settings is None:
+            return
+        for guild in list(getattr(self.bot, "guilds", []) or []):
+            try:
+                channel_ids = list(settings.feature_channels(guild.id, FEATURE_NAME))
+            except Exception:
+                channel_ids = []
+            async with self._lock:
+                key, data, g = self._guild(guild.id)
+                if not channel_ids and g.get("ds_channel"):
+                    channel_ids = [g["ds_channel"]]
+                if not channel_ids or g.get("announced_version") == __version__:
+                    continue
+                g["announced_version"] = __version__
+                self._save(key, data)
+            channel = self.bot.get_channel(int(channel_ids[0]))
+            if channel is None:
+                continue
+            try:
+                await channel.send(f"✅ **Dead Shot helper v{__version__} is live** — {RELEASE_NOTE}",
+                                   allowed_mentions=discord.AllowedMentions.none())
+            except Exception:
+                pass
+
     async def cog_unload(self):
         try:
             self.bot.remove_dynamic_items(DeadShotBoardButton, DeadShotNextButton)
@@ -2171,6 +2203,13 @@ class ChestPatternCog(commands.Cog):
     async def ds_prefix(self, ctx: commands.Context, *args: str):
         none = discord.AllowedMentions.none()
         words = [a.strip().lower() for a in args if a.strip()]
+        channel_id = getattr(getattr(ctx, "channel", None), "id", None)
+        if channel_id:
+            async with self._lock:
+                key, data, g = self._guild(ctx.guild.id)
+                if g.get("ds_channel") != channel_id:
+                    g["ds_channel"] = channel_id
+                    self._save(key, data)
         if words and words[0] in ("help", "commands", "?"):
             await ctx.send(PREFIX_HELP, allowed_mentions=none)
             return
