@@ -18,7 +18,7 @@ All version 1 data (totals, order stats, hashes, image count, last order) is
 kept in the same file and the version 1 key counts are used as a half-weight
 prior until enough confirmed boards exist.
 """
-__version__ = "2.7.2"
+__version__ = "2.7.3"
 
 import asyncio
 import csv
@@ -1200,12 +1200,16 @@ def stage_plan(guild_data, member_id, model, reuse=False):
     # which averaged ~5.5 rewards per stage, against 2.8 for the recent-pairs
     # order. The whole stage is shot in this order; every shot is recorded.
     plan = guild_data.get("plans", {}).get(str(member_id))
-    if reuse and isinstance(plan, dict) and plan.get("fixed") and plan.get("order"):
+    if (reuse and isinstance(plan, dict) and plan.get("fixed") == PLAY_MODE
+            and plan.get("order")):
         return list(plan["order"]), None
     order = list(build_model(guild_data)["order"])
     set_plan(guild_data, member_id, order)
-    guild_data["plans"][str(member_id)]["fixed"] = True
+    guild_data["plans"][str(member_id)]["fixed"] = PLAY_MODE
     return list(order), None
+
+
+PLAY_MODE = "fewest_keys_first"   # plans from older modes are not reused
 
 
 def fixed_stage_text(order):

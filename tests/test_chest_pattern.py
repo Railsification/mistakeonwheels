@@ -1,7 +1,7 @@
 # tests/test_chest_pattern.py
 from __future__ import annotations
 
-__version__ = '1.7.2'
+__version__ = '1.7.3'
 
 """Offline tests for cogs/wos/chest_pattern.py (Dead Shot helper).
 
@@ -865,6 +865,16 @@ class PrefixTests(TempDataMixin, unittest.TestCase):
         order = g['plans']['10']['order']
         self.assertEqual(order[-2:], [1, 2])
         self.assertEqual(order[:10], list(range(3, 13)))
+
+    def test_old_mode_plan_not_reused(self):
+        self.ds(10, '1', '2')
+        cog = cp.ChestPatternCog(FakeBot())
+        key, data, g = cog._guild(5)
+        g['plans']['10'] = {'order': list(range(1, 13)), 'fixed': True, 'first': None, 'next': None}
+        cog._save(key, data)
+        msg = self.ds(10)
+        self.assertNotIn('1 → 2 → 3 → 4', msg)
+        self.assertIn('**3 → 4 → 5', msg)
 
     def test_bad_account_name(self):
         self.assertIn('Account names', self.ds(10, 'account', 'untagged'))
