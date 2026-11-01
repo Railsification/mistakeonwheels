@@ -18,7 +18,7 @@ All version 1 data (totals, order stats, hashes, image count, last order) is
 kept in the same file and the version 1 key counts are used as a half-weight
 prior until enough confirmed boards exist.
 """
-__version__ = "2.7.0"
+__version__ = "2.7.1"
 
 import asyncio
 import csv
@@ -1186,8 +1186,9 @@ def test_active(guild_data, member_id):
     return state == "on" and len(test_boards(guild_data, member_id)) < TEST_STAGES
 
 
-def stage_plan(guild_data, member_id, model):
-    """Store and return (order, test_arm) for the member's next stage."""
+def stage_plan(guild_data, member_id, model, reuse=False):
+    """Store and return (order, test_arm) for the member's next stage.
+    With reuse=True an unplayed stage keeps the order already shown."""
     if test_active(guild_data, member_id):
         arm = "fwd" if len(test_boards(guild_data, member_id)) % 2 == 0 else "rev"
         order = TEST_ORDERS[arm]
@@ -1195,18 +1196,21 @@ def stage_plan(guild_data, member_id, model):
         guild_data["plans"][str(member_id)]["test"] = arm
         return list(order), arm
     # Data-collection mode (1 Nov 2026): the order test proved keys are decided
-    # as you shoot, so every stage is shot 1->12 to make stages comparable.
-    set_plan(guild_data, member_id, PLAY_ORDER)
+    # as you shoot, so the bot gives a fresh random order each stage. That
+    # separates "which shot" from "which target" in the data.
+    plan = guild_data.get("plans", {}).get(str(member_id))
+    if reuse and isinstance(plan, dict) and plan.get("fixed") and plan.get("order"):
+        return list(plan["order"]), None
+    order = secrets.SystemRandom().sample(POSITIONS, len(POSITIONS))
+    set_plan(guild_data, member_id, order)
     guild_data["plans"][str(member_id)]["fixed"] = True
-    return list(PLAY_ORDER), None
+    return list(order), None
 
 
-PLAY_ORDER = list(range(1, 13))
-
-
-def fixed_stage_text():
-    return ("🎯 **Next stage: shoot 1 → 2 → 3 → … → 12, the whole stage** (keep going after the first key).\n"
-            "When it ends, log it straight away: `!ds <first key> <second key>` (e.g. `!ds 4 9`).")
+def fixed_stage_text(order):
+    return ("🎯 **Next stage — shoot in this order, the whole stage** (keep going after the first key):\n**"
+            + " → ".join(str(p) for p in order)
+            + "**\nWhen it ends, log it straight away: `!ds <first key> <second key>` (e.g. `!ds 4 9`).")
 
 
 def algo_report(guild_data, member_id=None):
@@ -1801,9 +1805,9 @@ class ChestPatternCog(commands.Cog):
         test stage is due, else None."""
         async with self._lock:
             key, data, g = self._guild(guild_id)
-            order, arm = stage_plan(g, member_id, model)
+            order, arm = stage_plan(g, member_id, model, reuse=True)
             self._save(key, data)
-            return test_stage_text(g, member_id, order) if arm else None
+            return test_stage_text(g, member_id, order) if arm else fixed_stage_text(order)
 
     # ----- storage helpers -----
     def _guild(self, guild_id):
@@ -2019,7 +2023,7 @@ class ChestPatternCog(commands.Cog):
                         model = play_model(g, board.get("account"), member=board.get("by"))
                         order, arm = stage_plan(g, board.get("by"), model)
                         self._save(key, data)
-                        nxt = test_stage_text(g, board.get("by"), order) if arm else fixed_stage_text()
+                        nxt = test_stage_text(g, board.get("by"), order) if arm else fixed_stage_text(order)
                         content, view = saved_text(board, model, next_line=nxt), saved_view(board["id"])
                 else:
                     pos = int(act[1:])
@@ -2221,7 +2225,7 @@ class ChestPatternCog(commands.Cog):
                 model = play_model(g, board.get("account"), member=ctx.author.id)
                 order, arm = stage_plan(g, ctx.author.id, model)
                 self._save(key, data)
-                nxt = test_stage_text(g, ctx.author.id, order) if arm else fixed_stage_text()
+                nxt = test_stage_text(g, ctx.author.id, order) if arm else fixed_stage_text(order)
             await ctx.send(saved_text(board, model, next_line=nxt)[:1995], view=saved_view(board["id"]),
                            allowed_mentions=none)
             return
@@ -2236,7 +2240,7 @@ class ChestPatternCog(commands.Cog):
             ranked=[], uploads=0, learned=0, dupes=0, total_images=g["images"], bad_files=[],
             latest_rows=[], used_previous_order=False, exact_order_applied=False, model=model)
         test_msg = await self._show_plan(ctx.guild.id, ctx.author.id, model)
-        await ctx.send(test_msg or fixed_stage_text(), allowed_mentions=none)
+        await ctx.send(test_msg, allowed_mentions=none)
 
 
 async def setup(bot):

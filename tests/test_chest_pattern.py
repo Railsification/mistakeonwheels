@@ -1,7 +1,7 @@
 # tests/test_chest_pattern.py
 from __future__ import annotations
 
-__version__ = '1.7.0'
+__version__ = '1.7.1'
 
 """Offline tests for cogs/wos/chest_pattern.py (Dead Shot helper).
 
@@ -805,19 +805,26 @@ class PrefixTests(TempDataMixin, unittest.TestCase):
 
     def test_shot_path_recorded_across_restarts(self):
         self.ds(10, 'account', 'main')
-        msg = self.ds(10)                         # fixed 1->12 path, stored
-        self.assertIn('shoot 1 → 2 → 3', msg)
-        self.assertIn('Keep going in the same order', self.ds(10, '4'))
-        reply = self.ds(10, '4', '9')
+        msg = self.ds(10)                         # random order, stored
+        self.assertIn('Next stage — shoot in this order', msg)
+        _, _, g = cp.ChestPatternCog(FakeBot())._guild(5)
+        shown = g['plans']['10']['order']
+        self.assertEqual(sorted(shown), list(range(1, 13)))
+        self.ds(10)                               # asking again keeps the same order
+        _, _, g = cp.ChestPatternCog(FakeBot())._guild(5)
+        self.assertEqual(g['plans']['10']['order'], shown)
+        first, second = shown[3], shown[8]
+        self.assertIn('Keep going in the same order', self.ds(10, str(first)))
+        reply = self.ds(10, str(first), str(second))
         _, _, g = cp.ChestPatternCog(FakeBot())._guild(5)
         board = g['boards'][-1]
-        self.assertEqual(board['shots'], [1, 2, 3, 4, 5, 6, 7, 8, 9])
+        self.assertEqual(board['shots'], shown[:9])
         self.assertTrue(board['followed_path'])
         self.assertIn('Shots recorded:', reply)
-        self.assertIn('Next stage: shoot 1', reply)
+        self.assertIn('Next stage', reply)
         rows = cp.export_csv(g).splitlines()
         self.assertIn('shots_in_order', rows[0])
-        self.assertIn('1 2 3 4 5 6 7 8 9', rows[-1])
+        self.assertIn(' '.join(str(x) for x in shown[:9]), rows[-1])
         algo = self.ds(10, 'algo')
         self.assertIn('1 stages with a full shot path', algo)
         self.assertIn('Rewards per stage **7.00**', algo)
@@ -848,7 +855,7 @@ class PrefixTests(TempDataMixin, unittest.TestCase):
         self.assertEqual([b['test'] for b in g['boards']], ['fwd', 'rev'])
         self.assertIn('Needs at least 5', self.ds(10, 'test'))
         self.assertIn('test **off**', self.ds(10, 'test', 'off'))
-        self.assertIn('Next stage: shoot 1', self.ds(10))
+        self.assertIn('Next stage — shoot in this order', self.ds(10))
         self.assertIn('test **on**', self.ds(10, 'test', 'on'))
         self.assertIn('Test stage 3/60', self.ds(10))
 
