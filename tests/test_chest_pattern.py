@@ -1,7 +1,7 @@
 # tests/test_chest_pattern.py
 from __future__ import annotations
 
-__version__ = '1.3.1'
+__version__ = '1.3.2'
 
 """Offline tests for cogs/wos/chest_pattern.py (Dead Shot helper).
 
@@ -637,6 +637,14 @@ class RecencyTests(TempDataMixin, unittest.TestCase):
         # Sort by time only matters within an hour here; use the helper directly.
         recent = cp.recent_pairs(g, 'a')
         self.assertEqual(len(recent), cp.RECENT_WINDOW)
+
+    def test_new_account_message(self):
+        g = cp.ensure_guild_data({'guilds': {}}, '1')
+        m = cp.play_model(g, 'main')
+        text = cp.build_summary([], 0, 0, 0, 0, [], [], False, False, model=m)
+        self.assertIn('Account **main** has no boards yet', text)
+        self.assertNotIn('Set your account', text)
+        self.assertNotIn('pair_weight', m)
 
     def test_probabilities_sum_to_two_keys(self):
         g = cp.ensure_guild_data({'guilds': {}}, '1')

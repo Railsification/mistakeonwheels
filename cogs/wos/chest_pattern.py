@@ -18,7 +18,7 @@ All version 1 data (totals, order stats, hashes, image count, last order) is
 kept in the same file and the version 1 key counts are used as a half-weight
 prior until enough confirmed boards exist.
 """
-__version__ = "2.3.0"
+__version__ = "2.3.1"
 
 import asyncio
 import csv
@@ -901,7 +901,11 @@ def apply_recency(model, guild_data, account):
     """Re-rank the shoot order for one account using pairs it had recently."""
     recent = recent_pairs(guild_data, account)
     if not recent:
-        return model
+        if not account:
+            return model
+        out = dict(model)
+        out["new_account"] = account
+        return out
     used = set(recent)
     weights = {pr: (RECENT_WEIGHT if pr in used else 1.0) for pr in ALL_PAIRS}
     total = sum(weights.values())
@@ -1040,6 +1044,9 @@ def build_summary(
     if model.get("recent_account"):
         lines.append(f"Order uses account **{model['recent_account']}**'s last {model['recent_count']} boards: "
                      "key pairs it just had rarely come back, so their spots go first.")
+    elif model.get("new_account"):
+        lines.append(f"Account **{model['new_account']}** has no boards yet, so there's no edge on this stage — "
+                     "it starts helping once this account has logged a few. Log every stage.")
     else:
         lines.append("Set your account (`!ds account <name>`) — the order then uses that account's "
                      "recent boards, which is where the real pattern is.")
