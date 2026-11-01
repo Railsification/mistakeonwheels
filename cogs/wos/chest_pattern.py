@@ -18,7 +18,7 @@ All version 1 data (totals, order stats, hashes, image count, last order) is
 kept in the same file and the version 1 key counts are used as a half-weight
 prior until enough confirmed boards exist.
 """
-__version__ = "2.4.0"
+__version__ = "2.5.0"
 
 import asyncio
 import csv
@@ -147,6 +147,7 @@ def fresh_guild_data():
         "boards": [],
         "pending": {},
         "accounts": {},
+        "plans": {},
         "samples": [],
         "dhashes": [],
     }
@@ -248,6 +249,8 @@ def ensure_guild_data(data, guild_key):
         g["pending"] = {}
     if not isinstance(g.get("accounts"), dict):
         g["accounts"] = {}
+    if not isinstance(g.get("plans"), dict):
+        g["plans"] = {}
 
     return g
 
@@ -856,7 +859,7 @@ def export_csv(guild_data):
     w = csv.writer(s)
     w.writerow(["board_id", "account", "logged_utc", "logged_brisbane", "attempt_on_account",
                 "key_a", "key_b", "first_key", "second_key", "source", "logged_by"]
-               + [f"t{p}" for p in POSITIONS])
+               + [f"t{p}" for p in POSITIONS] + ["shots_in_order", "followed_path", "shown_path"])
     seq = {}
     rows = []
     for b in guild_data.get("boards", []):
@@ -873,7 +876,10 @@ def export_csv(guild_data):
                     (t + timedelta(hours=10)).strftime("%Y-%m-%d %H:%M:%S") if t else "",
                     seq[acc], b["keys"][0], b["keys"][1], found[0], found[1],
                     b.get("src", ""), b.get("by", "")]
-                   + [syms.get(str(p), "") for p in POSITIONS])
+                   + [syms.get(str(p), "") for p in POSITIONS]
+                   + [" ".join(str(x) for x in b.get("shots") or []),
+                      "" if b.get("followed_path") is None else ("yes" if b["followed_path"] else "no"),
+                      " ".join(str(x) for x in b.get("shown_path") or [])])
     return s.getvalue()
 
 
@@ -1148,9 +1154,55 @@ def followed_order(guild_data, model=None):
     return list((model or build_model(guild_data))["order"])
 
 
-def second_key_text(model, first, shoot_order=None):
-    """Second-key advice. With `shoot_order`, everything shot before the first
-    key is treated as already opened (safe) and only the rest are ranked."""
+# ---------------------------------------------------------------------------
+# Shot-path recording: the bot remembers the order it showed each member, so a
+# board logged with `!ds <first> <second>` also stores every shot taken, in
+# order (assuming the shown path was followed). This is the data needed to
+# test whether contents are decided when a target is shot.
+# ---------------------------------------------------------------------------
+
+def set_plan(guild_data, member_id, order):
+    guild_data.setdefault("plans", {})[str(member_id)] = {
+        "order": [int(p) for p in order], "t": utcnow(), "first": None, "next": None}
+
+
+def set_next_plan(guild_data, member_id, first, order):
+    plan = guild_data.setdefault("plans", {}).get(str(member_id))
+    if not isinstance(plan, dict):
+        plan = {"order": None, "t": utcnow()}
+        guild_data["plans"][str(member_id)] = plan
+    plan["first"] = int(first)
+    plan["next"] = [int(p) for p in order]
+    plan["t_next"] = utcnow()
+
+
+def shots_from_plan(plan, found):
+    """Rebuild the shot sequence from the shown path and the find order.
+
+    Returns (shots, followed): shots is the list of targets shot in order,
+    ending on the second key; followed is False when the keys could not have
+    been hit in that order on the shown path (path not followed)."""
+    if not isinstance(plan, dict) or not plan.get("order") or not found or len(found) != 2:
+        return None, None
+    order = [int(p) for p in plan["order"]]
+    first, second = int(found[0]), int(found[1])
+    if first not in order or second not in order:
+        return None, None
+    idx = order.index(first)
+    phase1 = order[:idx + 1]
+    if second in phase1:
+        return None, False
+    if plan.get("first") == first and plan.get("next"):
+        rest = [p for p in plan["next"] if p not in phase1]
+    else:
+        rest = order[idx + 1:]
+    if second not in rest:
+        return None, False
+    return phase1 + rest[:rest.index(second) + 1], True
+
+
+def second_key_plan(model, first, shoot_order=None):
+    """(order of targets left safest first, odds, opened, seen) after the first key."""
     first = int(first)
     odds, seen = second_key_odds(model, first)
     opened = []
@@ -1160,6 +1212,14 @@ def second_key_text(model, first, shoot_order=None):
         total = sum(left.values()) or 1.0
         odds = {p: v / total for p, v in left.items()}
     order = sorted(odds, key=lambda p: (odds[p], p))
+    return order, odds, opened, seen
+
+
+def second_key_text(model, first, shoot_order=None):
+    """Second-key advice. With `shoot_order`, everything shot before the first
+    key is treated as already opened (safe) and only the rest are ranked."""
+    first = int(first)
+    order, odds, opened, seen = second_key_plan(model, first, shoot_order)
     mark = {first: "KEY"}
     mark.update({p: "open" for p in opened})
     lines = [f"**First key at {first}** — chance the second key is at each target left:"]
@@ -1414,6 +1474,10 @@ def saved_text(board, model, note=""):
         f"Confirmed boards: `{model['boards']}`.",
         "Shoot order now: " + " → ".join(str(p) for p in model["order"]),
     ]
+    if board.get("shots"):
+        lines.insert(1, "Shots recorded: " + " → ".join(str(p) for p in board["shots"]))
+    elif board.get("followed_path") is False:
+        lines.insert(1, "Shots not recorded — the keys don't fit the path shown (keys still saved).")
     if note:
         lines.append(note)
     return "\n".join(lines)
@@ -1529,6 +1593,41 @@ class ChestPatternCog(commands.Cog):
             self.bot.remove_dynamic_items(DeadShotBoardButton, DeadShotNextButton)
         except Exception:
             pass
+
+    # ----- shot-path helpers -----
+    @staticmethod
+    def _plan_order(g, member_id, model):
+        plan = g.get("plans", {}).get(str(member_id))
+        if isinstance(plan, dict) and plan.get("order"):
+            return list(plan["order"])
+        return followed_order(g, model)
+
+    @staticmethod
+    def _attach_shots(g, board, member_id):
+        """Store the shot path on a board logged in find order."""
+        plan = g.get("plans", {}).get(str(member_id))
+        if not board.get("found"):
+            return
+        shots, followed = shots_from_plan(plan, board["found"])
+        board["shots"] = shots
+        board["followed_path"] = followed
+        board["shown_path"] = list(plan["order"]) if isinstance(plan, dict) and plan.get("order") else None
+
+    async def _next_shot_text(self, guild_id, member_id, first):
+        async with self._lock:
+            key, data, g = self._guild(guild_id)
+            model = play_model(g, g["accounts"].get(str(member_id)), member=member_id)
+            shown = self._plan_order(g, member_id, model)
+            order = second_key_plan(model, first, shown)[0]
+            set_next_plan(g, member_id, first, order)
+            self._save(key, data)
+        return second_key_text(model, first, shown)
+
+    async def _show_plan(self, guild_id, member_id, model):
+        async with self._lock:
+            key, data, g = self._guild(guild_id)
+            set_plan(g, member_id, model["order"])
+            self._save(key, data)
 
     # ----- storage helpers -----
     def _guild(self, guild_id):
@@ -1739,10 +1838,12 @@ class ChestPatternCog(commands.Cog):
                     else:
                         board = record_board(g, pend, pend["keys"], interaction.user.id)
                         g["pending"].pop(pid, None)
+                        if not pend.get("replaces"):
+                            self._attach_shots(g, board, board.get("by"))
+                        model = play_model(g, board.get("account"), member=board.get("by"))
+                        set_plan(g, board.get("by"), model["order"])
                         self._save(key, data)
-                        content, view = saved_text(board, play_model(g, board.get("account"),
-                                                                     member=board.get("by"))), \
-                            saved_view(board["id"])
+                        content, view = saved_text(board, model), saved_view(board["id"])
                 else:
                     pos = int(act[1:])
                     # Track tap order so the board remembers which key was found first.
@@ -1763,10 +1864,8 @@ class ChestPatternCog(commands.Cog):
         await interaction.response.edit_message(content=content, view=view)
 
     async def handle_next_button(self, interaction, first):
-        _, _, g = self._guild(interaction.guild_id)
-        model = play_model(g, g["accounts"].get(str(interaction.user.id)), member=interaction.user.id)
-        await interaction.response.send_message(
-            second_key_text(model, first, followed_order(g, model)), ephemeral=True)
+        text = await self._next_shot_text(interaction.guild_id, interaction.user.id, first)
+        await interaction.response.send_message(text, ephemeral=True)
 
     # ----- channel drop: screenshots posted in the Dead Shot channel -----
     @commands.Cog.listener("on_message")
@@ -1878,6 +1977,7 @@ class ChestPatternCog(commands.Cog):
             summary = build_summary(
                 ranked=[], uploads=0, learned=0, dupes=0, total_images=g["images"], bad_files=[],
                 latest_rows=[], used_previous_order=False, exact_order_applied=False, model=model)
+            await self._show_plan(ctx.guild.id, ctx.author.id, model)
             await ctx.send(summary[:1995],
                            view=helper_view(), allowed_mentions=none)
             return
@@ -1916,20 +2016,23 @@ class ChestPatternCog(commands.Cog):
                                          "id": new_board_id(g),
                                          "account": g["accounts"].get(str(ctx.author.id))},
                                      keys, ctx.author.id, found=nums)
-                self._save(key, data)
+                self._attach_shots(g, board, ctx.author.id)
                 model = play_model(g, board.get("account"), member=ctx.author.id)
+                set_plan(g, ctx.author.id, model["order"])
+                self._save(key, data)
             await ctx.send(saved_text(board, model), view=saved_view(board["id"]), allowed_mentions=none)
             return
 
         _, _, g = self._guild(ctx.guild.id)
         model = play_model(g, g["accounts"].get(str(ctx.author.id)), member=ctx.author.id)
         if len(nums) == 1:
-            await ctx.send(second_key_text(model, nums[0], followed_order(g, model)),
+            await ctx.send(await self._next_shot_text(ctx.guild.id, ctx.author.id, nums[0]),
                            allowed_mentions=none)
             return
         summary = build_summary(
             ranked=[], uploads=0, learned=0, dupes=0, total_images=g["images"], bad_files=[],
             latest_rows=[], used_previous_order=False, exact_order_applied=False, model=model)
+        await self._show_plan(ctx.guild.id, ctx.author.id, model)
         await ctx.send(summary, view=helper_view(), allowed_mentions=none)
 
 

@@ -1,7 +1,7 @@
 # tests/test_chest_pattern.py
 from __future__ import annotations
 
-__version__ = '1.4.0'
+__version__ = '1.5.0'
 
 """Offline tests for cogs/wos/chest_pattern.py (Dead Shot helper).
 
@@ -683,6 +683,29 @@ class RecencyTests(TempDataMixin, unittest.TestCase):
             [], 0, 0, 0, 0, [], [], False, False, model=m))
 
 
+class ShotPathTests(TempDataMixin, unittest.TestCase):
+    def test_rebuild_path_both_phases(self):
+        plan = {'order': [10, 3, 4, 6, 1, 2, 7, 9, 12, 5, 8, 11], 'first': 6,
+                'next': [9, 1, 2, 7, 12, 5, 8, 11]}
+        shots, ok = cp.shots_from_plan(plan, [6, 2])
+        self.assertTrue(ok)
+        self.assertEqual(shots, [10, 3, 4, 6, 9, 1, 2])
+
+    def test_rebuild_without_first_key_step(self):
+        plan = {'order': [10, 3, 4, 6, 1, 2], 'first': None, 'next': None}
+        self.assertEqual(cp.shots_from_plan(plan, [4, 1]), ([10, 3, 4, 6, 1], True))
+
+    def test_path_not_followed(self):
+        plan = {'order': [10, 3, 4, 6, 1, 2], 'first': None, 'next': None}
+        self.assertEqual(cp.shots_from_plan(plan, [4, 3]), (None, False))
+        self.assertEqual(cp.shots_from_plan(None, [4, 3]), (None, None))
+        self.assertEqual(cp.shots_from_plan(plan, None), (None, None))
+
+    def test_next_plan_for_other_first_key_ignored(self):
+        plan = {'order': [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12], 'first': 9, 'next': [12, 11, 10]}
+        self.assertEqual(cp.shots_from_plan(plan, [2, 5])[0], [1, 2, 3, 4, 5])
+
+
 class FakeCtx:
     def __init__(self, uid, guild_id=5):
         self.author = types.SimpleNamespace(id=uid)
@@ -728,6 +751,39 @@ class PrefixTests(TempDataMixin, unittest.TestCase):
         asyncio.run(cp.ChestPatternCog(FakeBot()).ds_prefix(ctx, 'export'))
         self.assertIn('All `1` logged', ctx.sent[-1])
         self.assertEqual(ctx.file.filename, 'dead_shot_boards.csv')
+
+    def test_shot_path_recorded_across_restarts(self):
+        self.ds(10, 'account', 'main')
+        self.ds(10)                      # shows path, stores it
+        _, _, g = cp.ChestPatternCog(FakeBot())._guild(5)
+        shown = g['plans']['10']['order']
+        first = shown[3]
+        self.ds(10, str(first))          # first key on 4th shot
+        _, _, g = cp.ChestPatternCog(FakeBot())._guild(5)
+        nxt = g['plans']['10']['next']
+        second = nxt[2]
+        reply = self.ds(10, str(first), str(second))
+        _, _, g = cp.ChestPatternCog(FakeBot())._guild(5)
+        board = g['boards'][-1]
+        self.assertEqual(board['shots'], shown[:4] + nxt[:3])
+        self.assertTrue(board['followed_path'])
+        self.assertEqual(board['shown_path'], shown)
+        self.assertIn('Shots recorded:', reply)
+        # The new path shown after saving is stored for the next stage.
+        self.assertIsNone(g['plans']['10']['first'])
+        rows = cp.export_csv(g).splitlines()
+        self.assertIn('shots_in_order', rows[0])
+        self.assertIn(' '.join(str(x) for x in board['shots']), rows[-1])
+
+    def test_unfollowed_path_still_saves_keys(self):
+        self.ds(10)
+        _, _, g = cp.ChestPatternCog(FakeBot())._guild(5)
+        shown = g['plans']['10']['order']
+        reply = self.ds(10, str(shown[5]), str(shown[1]))
+        self.assertIn('Shots not recorded', reply)
+        _, _, g = cp.ChestPatternCog(FakeBot())._guild(5)
+        self.assertEqual(len(g['boards']), 1)
+        self.assertFalse(g['boards'][0]['followed_path'])
 
     def test_bad_account_name(self):
         self.assertIn('Account names', self.ds(10, 'account', 'untagged'))
