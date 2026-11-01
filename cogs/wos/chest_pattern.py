@@ -18,7 +18,7 @@ All version 1 data (totals, order stats, hashes, image count, last order) is
 kept in the same file and the version 1 key counts are used as a half-weight
 prior until enough confirmed boards exist.
 """
-__version__ = "2.8.3"
+__version__ = "2.8.4"
 
 import asyncio
 import csv
@@ -69,7 +69,7 @@ EXACT_WEIGHTS = {
 
 FEATURE_NAME = "chest_pattern"
 # Shown in the Dead Shot channel once when this version first goes live.
-RELEASE_NOTE = "`!ds path <12 numbers>` sets your next stage's path (e.g. to replay a full clear) and still records it."
+RELEASE_NOTE = "stages logged at 9+ rewards now ask you to confirm (✅/❌); `!ds review` fixes earlier ones; `!ds wins` lists confirmed full clears only."
 POSITIONS = list(range(1, 13))
 KEYS_PER_BOARD = 2
 KEY_RATE = KEYS_PER_BOARD / 12.0
@@ -1735,7 +1735,10 @@ def saved_text(board, model, note="", next_line=None):
     ]
     if board.get("shots"):
         lines.insert(1, "Shots recorded: " + " → ".join(str(p) for p in board["shots"]))
-        if len(board["shots"]) == 12 and board.get("followed_path"):
+        if needs_confirm(board):
+            lines.insert(1, f"❓ **{len(board['shots']) - 2} rewards?** The bot assumes you kept its order after "
+                            "the first key. Tap ✅ if that's right, ❌ if you shot a different target.")
+        elif len(board["shots"]) == 12 and board.get("big_confirmed"):
             lines.insert(1, "🏆 **FULL CLEAR** — this path is saved: `!ds wins` lists every full clear.")
     elif board.get("followed_path") is False:
         lines.insert(1, "Shots not recorded — the keys don't fit the path shown (keys still saved).")
@@ -1806,6 +1809,45 @@ def pending_view(pid, keys):
     return view
 
 
+BIG_STAGE_REWARDS = 9
+
+
+def needs_confirm(board):
+    """A recorded path of 9+ rewards that the member hasn't confirmed yet."""
+    shots = board.get("shots") or []
+    return (bool(board.get("followed_path")) and len(shots) - 2 >= BIG_STAGE_REWARDS
+            and board.get("big_confirmed") is None)
+
+
+class DeadShotConfirmButton(
+    discord.ui.DynamicItem[discord.ui.Button],
+    template=r"dsc:(?P<bid>[0-9a-f]{12}):(?P<ans>y|n)",
+):
+    def __init__(self, bid, ans, label="?", style=discord.ButtonStyle.secondary):
+        super().__init__(discord.ui.Button(label=label, style=style, custom_id=f"dsc:{bid}:{ans}"))
+        self.bid = bid
+        self.ans = ans
+
+    @classmethod
+    async def from_custom_id(cls, interaction, item, match):
+        return cls(match["bid"], match["ans"])
+
+    async def callback(self, interaction):
+        cog = _cog(interaction)
+        if cog is None:
+            await interaction.response.send_message("Dead Shot helper is not loaded.", ephemeral=True)
+            return
+        await cog.handle_confirm_button(interaction, self.bid, self.ans)
+
+
+def confirm_view(board_id):
+    view = discord.ui.View(timeout=None)
+    view.add_item(DeadShotConfirmButton(board_id, "y", label="✅ Yes, that's right",
+                                        style=discord.ButtonStyle.success))
+    view.add_item(DeadShotConfirmButton(board_id, "n", label="❌ No", style=discord.ButtonStyle.danger))
+    return view
+
+
 def saved_view(board_id):
     view = discord.ui.View(timeout=None)
     view.add_item(DeadShotBoardButton(board_id, "fix", label="Fix keys", style=discord.ButtonStyle.secondary))
@@ -1825,7 +1867,7 @@ PREFIX_HELP = (
     "`!ds 7` — first key found at 7: safest next shots\n"
     "`!ds 3 10` — record a finished board: first key 3, second key 10 (type them in find order)\n"
     "`!ds algo` — the game's measured rules so far (key chance on each shot)\n"
-    "`!ds wins` — every full-clear path recorded\n"
+    "`!ds wins` — every confirmed full-clear path · `!ds review` — confirm or reject big stages\n"
     "`!ds path 10 3 9 4 6 7 8 12 11 5 1 2` — use your own path for the next stage (still recorded)\n"
     "`!ds undo` — remove the last board you recorded\n"
     "`!ds account <name>` — set the game account you're playing; boards get tagged with it\n"
@@ -1885,7 +1927,7 @@ class ChestPatternCog(commands.Cog):
 
     async def cog_unload(self):
         try:
-            self.bot.remove_dynamic_items(DeadShotBoardButton, DeadShotNextButton)
+            self.bot.remove_dynamic_items(DeadShotBoardButton, DeadShotNextButton, DeadShotConfirmButton)
         except Exception:
             pass
 
@@ -2150,7 +2192,8 @@ class ChestPatternCog(commands.Cog):
                         order, arm = stage_plan(g, board.get("by"), model)
                         self._save(key, data)
                         nxt = test_stage_text(g, board.get("by"), order) if arm else fixed_stage_text(order)
-                        content, view = saved_text(board, model, next_line=nxt), saved_view(board["id"])
+                        content = saved_text(board, model, next_line=nxt)
+                        view = confirm_view(board["id"]) if needs_confirm(board) else saved_view(board["id"])
                 else:
                     pos = int(act[1:])
                     # Track tap order so the board remembers which key was found first.
@@ -2169,6 +2212,37 @@ class ChestPatternCog(commands.Cog):
             await interaction.response.send_message(error, ephemeral=True)
             return
         await interaction.response.edit_message(content=content, view=view)
+
+    async def handle_confirm_button(self, interaction, bid, ans):
+        if interaction.guild_id is None:
+            await interaction.response.send_message("Use this in a server.", ephemeral=True)
+            return
+        async with self._lock:
+            key, data, g = self._guild(interaction.guild_id)
+            board = find_board(g, bid)
+            if board is None:
+                text, error = None, "That stage is no longer stored."
+            elif not self._can_edit(interaction.user, board.get("by")):
+                text, error = None, "Only the person who logged it or a server manager can change it."
+            else:
+                error = None
+                n = len(board.get("shots") or []) - 2
+                if ans == "y":
+                    board["big_confirmed"] = True
+                    text = f"✅ Confirmed: {n} rewards, keys {board_found(board)[0]} then {board_found(board)[1]}."
+                    if n == 10:
+                        text += "\n🏆 **FULL CLEAR** saved: " + " → ".join(str(p) for p in board["shots"])
+                else:
+                    board["big_confirmed"] = False
+                    board["shots"] = None
+                    board["followed_path"] = False
+                    text = ("❌ Path removed for that stage — the keys are kept. "
+                            "Shoot the bot's order after the first key so the path stays right.")
+                self._save(key, data)
+        if error:
+            await interaction.response.send_message(error, ephemeral=True)
+            return
+        await interaction.response.edit_message(content=text, view=None)
 
     async def handle_next_button(self, interaction, first):
         text = await self._next_shot_text(interaction.guild_id, interaction.user.id, first)
@@ -2275,12 +2349,29 @@ class ChestPatternCog(commands.Cog):
             await ctx.send(fixed_stage_text(order) + "\n(Your own path for this stage — the next stage goes "
                            "back to the bot's order unless you set it again.)", allowed_mentions=none)
             return
+        if words and words[0] in ("review", "check"):
+            _, _, g = self._guild(ctx.guild.id)
+            todo = [b for b in g["boards"] if isinstance(b, dict) and str(b.get("by")) == str(ctx.author.id)
+                    and needs_confirm(b)]
+            if not todo:
+                await ctx.send("Nothing to check — no unconfirmed stages with 9+ rewards.", allowed_mentions=none)
+                return
+            for b in todo[-5:]:
+                t = board_time(b)
+                when = (t + timedelta(hours=10)).strftime("%d %b %H:%M") if t else "?"
+                k = board_found(b)
+                await ctx.send(f"❓ {when} · keys {k[0]} then {k[1]} · recorded as **{len(b['shots']) - 2} rewards**: "
+                               + " → ".join(str(p) for p in b["shots"]) + "\nIs that right?",
+                               view=confirm_view(b["id"]), allowed_mentions=none)
+            return
         if words and words[0] in ("wins", "win", "clears", "jackpots"):
             _, _, g = self._guild(ctx.guild.id)
             wins = [b for b in g["boards"] if isinstance(b, dict) and b.get("followed_path")
-                    and len(b.get("shots") or []) == 12]
+                    and len(b.get("shots") or []) == 12 and b.get("big_confirmed")]
             if not wins:
-                await ctx.send("No full clears recorded yet (paths are recorded since 1 Nov).",
+                unconfirmed = sum(1 for b in g["boards"] if isinstance(b, dict) and needs_confirm(b))
+                await ctx.send("No confirmed full clears yet."
+                               + (f" {unconfirmed} big stage(s) to check: `!ds review`." if unconfirmed else ""),
                                allowed_mentions=none)
                 return
             lines = [f"**Dead Shot full clears** ({len(wins)})"]
@@ -2390,7 +2481,8 @@ class ChestPatternCog(commands.Cog):
                 order, arm = stage_plan(g, ctx.author.id, model)
                 self._save(key, data)
                 nxt = test_stage_text(g, ctx.author.id, order) if arm else fixed_stage_text(order)
-            await ctx.send(saved_text(board, model, next_line=nxt)[:1995], view=saved_view(board["id"]),
+            view = confirm_view(board["id"]) if needs_confirm(board) else saved_view(board["id"])
+            await ctx.send(saved_text(board, model, next_line=nxt)[:1995], view=view,
                            allowed_mentions=none)
             return
 
@@ -2415,4 +2507,4 @@ async def setup(bot):
     await bot.add_cog(cog)
     # Re-attach every Dead Shot button (pending checks, Fix, first-key helper)
     # after a restart; their state is read from storage when pressed.
-    bot.add_dynamic_items(DeadShotBoardButton, DeadShotNextButton)
+    bot.add_dynamic_items(DeadShotBoardButton, DeadShotNextButton, DeadShotConfirmButton)

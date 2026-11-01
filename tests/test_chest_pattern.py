@@ -1,7 +1,7 @@
 # tests/test_chest_pattern.py
 from __future__ import annotations
 
-__version__ = '1.8.4'
+__version__ = '1.8.5'
 
 """Offline tests for cogs/wos/chest_pattern.py (Dead Shot helper).
 
@@ -940,12 +940,18 @@ class PrefixTests(TempDataMixin, unittest.TestCase):
         self.assertIn('**1 → 2 → 3', msg)
 
     def test_full_clear_flagged_and_listed(self):
-        self.assertIn('No full clears', self.ds(10, 'wins'))
+        self.assertIn('No confirmed full clears', self.ds(10, 'wins'))
         self.ds(10)
         _, _, g = cp.ChestPatternCog(FakeBot())._guild(5)
         shown = g['plans']['10']['order']
         reply = self.ds(10, str(shown[4]), str(shown[11]))
-        self.assertIn('FULL CLEAR', reply)
+        self.assertIn('10 rewards?', reply)
+        self.assertIn('big stage(s) to check', self.ds(10, 'wins'))
+        _, _, g = cp.ChestPatternCog(FakeBot())._guild(5)
+        bid = g['boards'][-1]['id']
+        inter = FakeInteraction(5, FakeUser(10))
+        asyncio.run(cp.ChestPatternCog(FakeBot()).handle_confirm_button(inter, bid, 'y'))
+        self.assertIn('FULL CLEAR', inter.response.edits[-1][0])
         wins = self.ds(10, 'wins')
         self.assertIn('full clears** (1)', wins)
         self.assertIn(' → '.join(str(p) for p in shown), wins)
@@ -959,9 +965,31 @@ class PrefixTests(TempDataMixin, unittest.TestCase):
         self.assertIn('**10 → 3 → 9', self.ds(10))        # !ds keeps it until logged
         self.assertIn('Keep going in the same order: 11 → 5', self.ds(10, '12'))
         reply = self.ds(10, '12', '2')
-        self.assertIn('FULL CLEAR', reply)
+        self.assertIn('10 rewards?', reply)
         _, _, g = cp.ChestPatternCog(FakeBot())._guild(5)
         self.assertEqual(g['boards'][-1]['shots'], [int(x) for x in path])
+
+    def test_reject_big_stage_and_review(self):
+        self.ds(10, 'path', '1', '2', '3', '4', '5', '6', '7', '8', '9', '10', '11', '12')
+        self.ds(10, '3', '12')                     # bot assumes 10 rewards
+        msg = self.ds(10, 'review')
+        self.assertIn('recorded as **10 rewards**', msg)
+        _, _, g = cp.ChestPatternCog(FakeBot())._guild(5)
+        bid = g['boards'][-1]['id']
+        stranger = FakeInteraction(5, FakeUser(99))
+        asyncio.run(cp.ChestPatternCog(FakeBot()).handle_confirm_button(stranger, bid, 'n'))
+        self.assertIn('Only the person', stranger.response.sent[-1])
+        inter = FakeInteraction(5, FakeUser(10))
+        asyncio.run(cp.ChestPatternCog(FakeBot()).handle_confirm_button(inter, bid, 'n'))
+        self.assertIn('Path removed', inter.response.edits[-1][0])
+        _, _, g = cp.ChestPatternCog(FakeBot())._guild(5)
+        b = g['boards'][-1]
+        self.assertIsNone(b['shots'])
+        self.assertEqual(b['keys'], [3, 12])
+        self.assertIn('Nothing to check', self.ds(10, 'review'))
+        self.assertIn('No confirmed full clears', self.ds(10, 'wins'))
+        import re
+        self.assertTrue(re.fullmatch(cp.DeadShotConfirmButton.template, f'dsc:{bid}:y'))
 
     def test_bad_account_name(self):
         self.assertIn('Account names', self.ds(10, 'account', 'untagged'))
