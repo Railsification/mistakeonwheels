@@ -1,7 +1,7 @@
 # tests/test_chest_pattern.py
 from __future__ import annotations
 
-__version__ = '1.5.0'
+__version__ = '1.6.0'
 
 """Offline tests for cogs/wos/chest_pattern.py (Dead Shot helper).
 
@@ -706,6 +706,39 @@ class ShotPathTests(TempDataMixin, unittest.TestCase):
         self.assertEqual(cp.shots_from_plan(plan, [2, 5])[0], [1, 2, 3, 4, 5])
 
 
+class OrderTestReportTests(TempDataMixin, unittest.TestCase):
+    def run_arm(self, g, arm, keys_fn, n, rng):
+        for _ in range(n):
+            order = cp.TEST_ORDERS[arm]
+            i, j = keys_fn(rng)
+            found = [order[i], order[j]]
+            b = cp.record_board(g, {'src': 'manual', 'by': '1'}, found, 1, found=found)
+            b['test'] = arm
+            b['shots'] = order[:j + 1]
+            b['followed_path'] = True
+
+    def test_keys_decided_on_shot_detected(self):
+        g = cp.ensure_guild_data({'guilds': {}}, '1')
+        rng = random.Random(1)
+        early = lambda r: sorted(r.sample(range(6), 2))      # keys always in first 6 shots
+        self.run_arm(g, 'fwd', early, 30, rng)
+        self.run_arm(g, 'rev', early, 30, rng)
+        res = cp.test_report(g, 1)
+        self.assertLess(res['p'], 0.01)
+        self.assertIn('Keys follow your shooting order', cp.test_text(res, False, 60))
+        self.assertFalse(cp.test_active(g, 1))
+
+    def test_placed_at_start_not_flagged(self):
+        g = cp.ensure_guild_data({'guilds': {}}, '1')
+        rng = random.Random(2)
+        anywhere = lambda r: sorted(r.sample(range(12), 2))
+        self.run_arm(g, 'fwd', anywhere, 20, rng)
+        self.run_arm(g, 'rev', anywhere, 20, rng)
+        res = cp.test_report(g, 1)
+        self.assertGreater(res['p'], 0.01)
+        self.assertLess(len(cp.test_text(res, False, 60)), 2000)
+
+
 class FakeCtx:
     def __init__(self, uid, guild_id=5):
         self.author = types.SimpleNamespace(id=uid)
@@ -753,6 +786,7 @@ class PrefixTests(TempDataMixin, unittest.TestCase):
         self.assertEqual(ctx.file.filename, 'dead_shot_boards.csv')
 
     def test_shot_path_recorded_across_restarts(self):
+        self.ds(10, 'test', 'off')
         self.ds(10, 'account', 'main')
         self.ds(10)                      # shows path, stores it
         _, _, g = cp.ChestPatternCog(FakeBot())._guild(5)
@@ -784,6 +818,25 @@ class PrefixTests(TempDataMixin, unittest.TestCase):
         _, _, g = cp.ChestPatternCog(FakeBot())._guild(5)
         self.assertEqual(len(g['boards']), 1)
         self.assertFalse(g['boards'][0]['followed_path'])
+
+    def test_order_test_alternates_and_records(self):
+        msg = self.ds(10)
+        self.assertIn('Test stage 1/60', msg)
+        self.assertIn('1 → 2 → 3', msg)
+        self.assertIn('keep going in the same order', self.ds(10, '4'))
+        reply = self.ds(10, '4', '9')               # 1->12: keys at shots 4 and 9
+        self.assertIn('Shots recorded: 1 → 2 → 3 → 4 → 5 → 6 → 7 → 8 → 9', reply)
+        self.assertIn('Test stage 2/60', reply)
+        self.assertIn('12 → 11 → 10', reply)
+        reply = self.ds(10, '11', '7')              # 12->1: keys at shots 2 and 6
+        self.assertIn('Shots recorded: 12 → 11 → 10 → 9 → 8 → 7', reply)
+        _, _, g = cp.ChestPatternCog(FakeBot())._guild(5)
+        self.assertEqual([b['test'] for b in g['boards']], ['fwd', 'rev'])
+        self.assertIn('Needs at least 5', self.ds(10, 'test'))
+        self.assertIn('test **off**', self.ds(10, 'test', 'off'))
+        self.assertNotIn('Test stage', self.ds(10))
+        self.assertIn('test **on**', self.ds(10, 'test', 'on'))
+        self.assertIn('Test stage 3/60', self.ds(10))
 
     def test_bad_account_name(self):
         self.assertIn('Account names', self.ds(10, 'account', 'untagged'))

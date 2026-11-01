@@ -18,7 +18,7 @@ All version 1 data (totals, order stats, hashes, image count, last order) is
 kept in the same file and the version 1 key counts are used as a half-weight
 prior until enough confirmed boards exist.
 """
-__version__ = "2.5.0"
+__version__ = "2.6.0"
 
 import asyncio
 import csv
@@ -148,6 +148,7 @@ def fresh_guild_data():
         "pending": {},
         "accounts": {},
         "plans": {},
+        "tests": {},
         "samples": [],
         "dhashes": [],
     }
@@ -251,6 +252,8 @@ def ensure_guild_data(data, guild_key):
         g["accounts"] = {}
     if not isinstance(g.get("plans"), dict):
         g["plans"] = {}
+    if not isinstance(g.get("tests"), dict):
+        g["tests"] = {}
 
     return g
 
@@ -1161,6 +1164,104 @@ def followed_order(guild_data, model=None):
 # test whether contents are decided when a target is shot.
 # ---------------------------------------------------------------------------
 
+# ---------------------------------------------------------------------------
+# Order test (1 Nov 2026): are keys placed when the stage starts, or decided
+# as you shoot? Stages alternate between shooting 1->12 and 12->1 for the
+# whole stage. If keys are placed at the start, the order makes no
+# difference to where they are; if they're decided as you shoot, keys land
+# on low numbers in 1->12 stages and high numbers in 12->1 stages.
+# ---------------------------------------------------------------------------
+
+TEST_STAGES = 60
+TEST_ORDERS = {"fwd": list(range(1, 13)), "rev": list(range(12, 0, -1))}
+
+
+def test_boards(guild_data, member_id):
+    return [b for b in guild_data.get("boards", []) if isinstance(b, dict)
+            and str(b.get("by")) == str(member_id) and b.get("test") in TEST_ORDERS]
+
+
+def test_active(guild_data, member_id):
+    state = guild_data.get("tests", {}).get(str(member_id), {}).get("state", "on")
+    return state == "on" and len(test_boards(guild_data, member_id)) < TEST_STAGES
+
+
+def stage_plan(guild_data, member_id, model):
+    """Store and return (order, test_arm) for the member's next stage."""
+    if test_active(guild_data, member_id):
+        arm = "fwd" if len(test_boards(guild_data, member_id)) % 2 == 0 else "rev"
+        order = TEST_ORDERS[arm]
+        set_plan(guild_data, member_id, order)
+        guild_data["plans"][str(member_id)]["test"] = arm
+        return list(order), arm
+    set_plan(guild_data, member_id, model["order"])
+    return list(model["order"]), None
+
+
+def test_stage_text(guild_data, member_id, order):
+    done = len(test_boards(guild_data, member_id))
+    return (f"🧪 **Test stage {done + 1}/{TEST_STAGES}** — shoot this exact order for the WHOLE stage:\n"
+            + " → ".join(str(p) for p in order)
+            + "\nKeep going in this order after the first key (no `!ds <first key>` needed). "
+            "When it ends: `!ds <first key> <second key>`.\n"
+            "This checks whether the game decides keys as you shoot. `!ds test` shows the result so far.")
+
+
+def _mean(xs):
+    return sum(xs) / len(xs) if xs else 0.0
+
+
+def _var(xs):
+    if len(xs) < 2:
+        return 0.0
+    m = _mean(xs)
+    return sum((x - m) ** 2 for x in xs) / (len(xs) - 1)
+
+
+def test_report(guild_data, member_id):
+    arms = {"fwd": [], "rev": []}
+    for b in test_boards(guild_data, member_id):
+        if b.get("followed_path") and b.get("shots"):
+            arms[b["test"]].append(b)
+    res = {"n": {k: len(v) for k, v in arms.items()}}
+    keymean = {k: [sum(b["keys"]) / 2 for b in v] for k, v in arms.items()}
+    rewards = {k: [len(b["shots"]) - 2 for b in v] for k, v in arms.items()}
+    firsts = [b["shots"].index(board_found(b)[0]) + 1 for v in arms.values() for b in v]
+    res["key_mean"] = {k: _mean(v) for k, v in keymean.items()}
+    res["rewards"] = {k: _mean(v) for k, v in rewards.items()}
+    res["all_rewards"] = _mean(rewards["fwd"] + rewards["rev"])
+    res["first_shot"] = _mean(firsts)
+    res["p"] = None
+    if min(res["n"].values()) >= 5:
+        se = math.sqrt(_var(keymean["fwd"]) / len(keymean["fwd"]) + _var(keymean["rev"]) / len(keymean["rev"]))
+        z = (res["key_mean"]["rev"] - res["key_mean"]["fwd"]) / se if se else 0.0
+        res["z"] = z
+        res["p"] = math.erfc(abs(z) / math.sqrt(2))
+    return res
+
+
+def test_text(res, active, done):
+    n = res["n"]
+    lines = [f"**Dead Shot order test** — {n['fwd']} stages shot 1→12, {n['rev']} shot 12→1 "
+             f"({done}/{TEST_STAGES} logged{'' if active else ', test finished/off'})"]
+    if n["fwd"] + n["rev"]:
+        lines.append(f"Average key number: 1→12 stages **{res['key_mean']['fwd']:.2f}**, "
+                     f"12→1 stages **{res['key_mean']['rev']:.2f}** (placed at the start: both ≈ 6.5)")
+        lines.append(f"First key on shot **{res['first_shot']:.2f}** on average (placed at random: 4.33) · "
+                     f"rewards per stage **{res['all_rewards']:.2f}** (luck: 6.67)")
+    pv = res["p"]
+    if pv is None:
+        lines.append("Needs at least 5 followed stages of each order before it can judge.")
+    elif pv < 0.01 and res["key_mean"]["rev"] > res["key_mean"]["fwd"]:
+        lines.append(f"🔴 **Keys follow your shooting order** (p={pv:.3f}). The game decides keys as you "
+                     "shoot — no order of targets can beat another.")
+    elif pv < 0.05 and res["key_mean"]["rev"] > res["key_mean"]["fwd"]:
+        lines.append(f"🟠 Keys may follow your shooting order (p={pv:.3f}). Finish the test to confirm.")
+    else:
+        lines.append(f"⚪ No sign keys follow your order (p={pv:.2f}) — they look placed at the start.")
+    return "\n".join(lines)[:1990]
+
+
 def set_plan(guild_data, member_id, order):
     guild_data.setdefault("plans", {})[str(member_id)] = {
         "order": [int(p) for p in order], "t": utcnow(), "first": None, "next": None}
@@ -1460,7 +1561,7 @@ def pending_text(pending, note=""):
     return "\n".join(lines)
 
 
-def saved_text(board, model, note=""):
+def saved_text(board, model, note="", next_line=None):
     k = board_found(board)
     if board.get("found"):
         keys_txt = f"first key **{k[0]}**, second key **{k[1]}**"
@@ -1472,7 +1573,7 @@ def saved_text(board, model, note=""):
     lines = [
         f"✅ **Saved Dead Shot board** — {keys_txt}. "
         f"Confirmed boards: `{model['boards']}`.",
-        "Shoot order now: " + " → ".join(str(p) for p in model["order"]),
+        next_line or ("Shoot order now: " + " → ".join(str(p) for p in model["order"])),
     ]
     if board.get("shots"):
         lines.insert(1, "Shots recorded: " + " → ".join(str(p) for p in board["shots"]))
@@ -1569,6 +1670,7 @@ PREFIX_HELP = (
     "`!ds tag <name>` — tag your boards that have no account yet\n"
     "`!ds time` — test whether keys line up with the clock or attempt order (`!ds time mine` for one account)\n"
     "`!ds export` — download every logged board as a CSV spreadsheet\n"
+    "`!ds test` — result of the order test (1→12 vs 12→1) · `!ds test off` / `on`\n"
     "Screenshots: drop finished-board screenshots in the Dead Shot channel "
     "(council feature `chest_pattern`) or use `/chest_pattern`. Check the keys and press Save."
 )
@@ -1612,22 +1714,33 @@ class ChestPatternCog(commands.Cog):
         board["shots"] = shots
         board["followed_path"] = followed
         board["shown_path"] = list(plan["order"]) if isinstance(plan, dict) and plan.get("order") else None
+        if isinstance(plan, dict) and plan.get("test") in TEST_ORDERS:
+            board["test"] = plan["test"]
 
     async def _next_shot_text(self, guild_id, member_id, first):
         async with self._lock:
             key, data, g = self._guild(guild_id)
             model = play_model(g, g["accounts"].get(str(member_id)), member=member_id)
             shown = self._plan_order(g, member_id, model)
+            plan = g.get("plans", {}).get(str(member_id)) or {}
+            if plan.get("test") in TEST_ORDERS and int(first) in shown:
+                left = shown[shown.index(int(first)) + 1:]
+                return ("🧪 Test stage — keep going in the same order: "
+                        + " → ".join(str(p) for p in left)
+                        + f"\nWhen it ends: `!ds {first} <second key>`.")
             order = second_key_plan(model, first, shown)[0]
             set_next_plan(g, member_id, first, order)
             self._save(key, data)
         return second_key_text(model, first, shown)
 
     async def _show_plan(self, guild_id, member_id, model):
+        """Store the member's next-stage path; returns the test text when a
+        test stage is due, else None."""
         async with self._lock:
             key, data, g = self._guild(guild_id)
-            set_plan(g, member_id, model["order"])
+            order, arm = stage_plan(g, member_id, model)
             self._save(key, data)
+            return test_stage_text(g, member_id, order) if arm else None
 
     # ----- storage helpers -----
     def _guild(self, guild_id):
@@ -1841,9 +1954,10 @@ class ChestPatternCog(commands.Cog):
                         if not pend.get("replaces"):
                             self._attach_shots(g, board, board.get("by"))
                         model = play_model(g, board.get("account"), member=board.get("by"))
-                        set_plan(g, board.get("by"), model["order"])
+                        order, arm = stage_plan(g, board.get("by"), model)
                         self._save(key, data)
-                        content, view = saved_text(board, model), saved_view(board["id"])
+                        nxt = test_stage_text(g, board.get("by"), order) if arm else None
+                        content, view = saved_text(board, model, next_line=nxt), saved_view(board["id"])
                 else:
                     pos = int(act[1:])
                     # Track tap order so the board remembers which key was found first.
@@ -1945,6 +2059,24 @@ class ChestPatternCog(commands.Cog):
             await ctx.send(f"Tagged {count} of your board(s) with account **{name}**."
                            if count else "You have no untagged boards.", allowed_mentions=none)
             return
+        if words and words[0] in ("test", "experiment"):
+            async with self._lock:
+                key, data, g = self._guild(ctx.guild.id)
+                if len(words) > 1 and words[1] in ("on", "off"):
+                    g["tests"][str(ctx.author.id)] = {"state": words[1], "t": utcnow()}
+                    if words[1] == "off":
+                        plan = g["plans"].get(str(ctx.author.id))
+                        if isinstance(plan, dict):
+                            plan.pop("test", None)
+                    self._save(key, data)
+                    note = ("Order test **on** — `!ds` shows your next test stage." if words[1] == "on"
+                            else "Order test **off** — back to the normal shoot order.")
+                    await ctx.send(note, allowed_mentions=none)
+                    return
+                done = len(test_boards(g, ctx.author.id))
+                text = test_text(test_report(g, ctx.author.id), test_active(g, ctx.author.id), done)
+            await ctx.send(text, allowed_mentions=none)
+            return
         if words and words[0] in ("time", "clock"):
             _, _, g = self._guild(ctx.guild.id)
             account = None
@@ -1977,7 +2109,9 @@ class ChestPatternCog(commands.Cog):
             summary = build_summary(
                 ranked=[], uploads=0, learned=0, dupes=0, total_images=g["images"], bad_files=[],
                 latest_rows=[], used_previous_order=False, exact_order_applied=False, model=model)
-            await self._show_plan(ctx.guild.id, ctx.author.id, model)
+            test_msg = await self._show_plan(ctx.guild.id, ctx.author.id, model)
+            if test_msg:
+                summary = summary + "\n\n" + test_msg
             await ctx.send(summary[:1995],
                            view=helper_view(), allowed_mentions=none)
             return
@@ -2018,9 +2152,11 @@ class ChestPatternCog(commands.Cog):
                                      keys, ctx.author.id, found=nums)
                 self._attach_shots(g, board, ctx.author.id)
                 model = play_model(g, board.get("account"), member=ctx.author.id)
-                set_plan(g, ctx.author.id, model["order"])
+                order, arm = stage_plan(g, ctx.author.id, model)
                 self._save(key, data)
-            await ctx.send(saved_text(board, model), view=saved_view(board["id"]), allowed_mentions=none)
+                nxt = test_stage_text(g, ctx.author.id, order) if arm else None
+            await ctx.send(saved_text(board, model, next_line=nxt)[:1995], view=saved_view(board["id"]),
+                           allowed_mentions=none)
             return
 
         _, _, g = self._guild(ctx.guild.id)
@@ -2032,7 +2168,10 @@ class ChestPatternCog(commands.Cog):
         summary = build_summary(
             ranked=[], uploads=0, learned=0, dupes=0, total_images=g["images"], bad_files=[],
             latest_rows=[], used_previous_order=False, exact_order_applied=False, model=model)
-        await self._show_plan(ctx.guild.id, ctx.author.id, model)
+        test_msg = await self._show_plan(ctx.guild.id, ctx.author.id, model)
+        if test_msg:
+            await ctx.send(test_msg, allowed_mentions=none)
+            return
         await ctx.send(summary, view=helper_view(), allowed_mentions=none)
 
 
